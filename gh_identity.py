@@ -199,7 +199,9 @@ def main(argv=None):
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
-  else:\n   marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None\n   o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
+  else:
+   marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
+   o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False));return 0
 if __name__=="__main__":raise SystemExit(main())
