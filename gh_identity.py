@@ -129,8 +129,12 @@ def resolve_ref(r,ref,transport="auto",timeout=30):
  sha=d.get("sha") if isinstance(d,dict) else None
  if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha):raise Error("invalid_commit")
  return {"schema":"gh-identity-ref/1","repository":r,"ref":ref,"sha":sha.lower(),"observed_at":now()}
+def _min_checks(value):
+ if not isinstance(value,int) or isinstance(value,bool) or value<1:raise ValueError("min_checks must be at least 1")
+ return value
+
 def summarize_checks(rows,expected_count,min_checks=1):
- if not isinstance(min_checks,int) or isinstance(min_checks,bool) or min_checks<1:raise ValueError("min_checks must be at least 1")
+ min_checks=_min_checks(min_checks)
  if not isinstance(rows,list):raise ValueError("check rows must be a list")
  normalized=[{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("url") or x.get("html_url"),"annotations_count":x.get("annotations_count",(x.get("output")or{}).get("annotations_count",0))} for x in rows]
  complete=isinstance(expected_count,int) and not isinstance(expected_count,bool) and expected_count==len(normalized)
@@ -144,6 +148,7 @@ def summarize_checks(rows,expected_count,min_checks=1):
  return {"state":state,"complete":complete,"expected_count":expected_count,"count":len(normalized),"min_checks":min_checks,"checks":normalized}
 
 def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
+ min_checks=_min_checks(min_checks)
  r=repo(r);rows=[];page=1;expected=None
  while True:
   d=request("GET",f"repos/{r}/commits/{sha}/check-runs?per_page=100&page={page}",transport=transport,timeout=timeout)
