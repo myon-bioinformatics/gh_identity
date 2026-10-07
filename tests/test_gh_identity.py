@@ -59,6 +59,11 @@ class T(unittest.TestCase):
   summary.assert_called_once_with([row],1,1)
   self.assertEqual(x["checks"],[{"sentinel":True}])
 
+ def test_checks_invalid_minimum_fails_before_transport(self):
+  with mock.patch.object(g,"request") as request:
+   with self.assertRaises(ValueError): g.checks_for_sha("o/r","a"*40,min_checks=0)
+  request.assert_not_called()
+
  def test_checks_reject_nonpositive_minimum(self):
   for value in (0,-1,False):
    with self.subTest(value=value), self.assertRaises(ValueError):
