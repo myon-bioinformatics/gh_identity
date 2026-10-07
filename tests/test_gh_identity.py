@@ -35,6 +35,34 @@ class T(unittest.TestCase):
  def test_zero_checks_not_green(self):
   with mock.patch.object(g,"request",return_value={"total_count":0,"check_runs":[]}):
    self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"pending")
+ def test_checks_reject_nonpositive_minimum(self):
+  for value in (0,-1,False):
+   with self.subTest(value=value), self.assertRaises(ValueError):
+    g.checks_for_sha("o/r","a"*40,min_checks=value)
+
+ def test_checks_fewer_than_minimum_pending(self):
+  ok={"id":1,"name":"ok","status":"completed","conclusion":"success","output":{"annotations_count":2}}
+  with mock.patch.object(g,"request",return_value={"total_count":1,"check_runs":[ok]}):
+   x=g.checks_for_sha("o/r","a"*40,min_checks=2)
+  self.assertEqual(x["state"],"pending"); self.assertEqual(x["checks"][0]["annotations_count"],2)
+
+ def test_checks_in_progress_pending(self):
+  row={"id":1,"name":"unit","status":"in_progress","conclusion":None}
+  with mock.patch.object(g,"request",return_value={"total_count":1,"check_runs":[row]}):
+   self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"pending")
+
+ def test_checks_all_skipped_or_neutral_not_green(self):
+  rows=[{"id":1,"name":"skip","status":"completed","conclusion":"skipped"},
+        {"id":2,"name":"neutral","status":"completed","conclusion":"neutral"}]
+  with mock.patch.object(g,"request",return_value={"total_count":2,"check_runs":rows}):
+   self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"failed")
+
+ def test_checks_success_plus_skipped_is_green(self):
+  rows=[{"id":1,"name":"unit","status":"completed","conclusion":"success"},
+        {"id":2,"name":"optional","status":"completed","conclusion":"skipped"}]
+  with mock.patch.object(g,"request",return_value={"total_count":2,"check_runs":rows}):
+   self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"green")
+
  def test_observe_pr_stale(self):
   p1={"schema":"x","repository":"o/r","number":1,"state":"open","draft":False,"mergeable":True,"head_sha":"a"*40,"base_sha":"b"*40}
   p2=dict(p1,head_sha="c"*40)

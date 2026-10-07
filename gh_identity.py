@@ -130,12 +130,13 @@ def resolve_ref(r,ref,transport="auto",timeout=30):
  if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha):raise Error("invalid_commit")
  return {"schema":"gh-identity-ref/1","repository":r,"ref":ref,"sha":sha.lower(),"observed_at":now()}
 def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
+ if not isinstance(min_checks,int) or isinstance(min_checks,bool) or min_checks<1:raise ValueError("min_checks must be at least 1")
  r=repo(r);rows=[];page=1;expected=None
  while True:
   d=request("GET",f"repos/{r}/commits/{sha}/check-runs?per_page=100&page={page}",transport=transport,timeout=timeout)
   if not isinstance(d,dict) or not isinstance(d.get("check_runs"),list):raise Error("invalid_json")
   if expected is None:expected=d.get("total_count")
-  batch=d["check_runs"];rows += [{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("html_url")} for x in batch]
+  batch=d["check_runs"];rows += [{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("html_url"),"annotations_count":(x.get("output")or{}).get("annotations_count",0)} for x in batch]
   if len(batch)<100:break
   page+=1
  complete=isinstance(expected,int) and expected==len(rows)
@@ -144,6 +145,7 @@ def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
  elif len(rows)<min_checks:state="pending"
  elif any(x["status"]!="completed" for x in rows):state="pending"
  elif any(x["conclusion"] in bad for x in rows):state="failed"
+ elif not any(x["conclusion"]=="success" for x in rows):state="failed"
  else:state="green"
  return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,"state":state,"complete":complete,"expected_count":expected,"count":len(rows),"min_checks":min_checks,"checks":rows,"observed_at":now()}
 
