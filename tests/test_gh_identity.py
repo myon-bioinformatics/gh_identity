@@ -43,4 +43,4 @@ class T(unittest.TestCase):
  def test_resolve_ref(self):
   with mock.patch.object(g,"request",return_value={"sha":"A"*40}):
    self.assertEqual(g.resolve_ref("o/r","main")["sha"],"a"*40)
-\nif __name__=="__main__": unittest.main()
+if __name__=="__main__": unittest.main()
