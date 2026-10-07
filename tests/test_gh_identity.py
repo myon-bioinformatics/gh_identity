@@ -1,4 +1,4 @@
-import json, subprocess, sys, unittest
+import json, unittest
 from unittest import mock
 import gh_identity as g
 
