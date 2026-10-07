@@ -176,11 +176,11 @@ def workflow(r,w,transport="auto",timeout=30):
 def run(r, run_id, attempt=None, transport="auto", timeout=30):
  """Read an exact Actions run and optionally one exact rerun attempt."""
  r=repo(r)
- def positive(x):
-  if isinstance(x,bool) or not str(x).isdigit() or int(x)<1:raise ValueError("invalid run identifier")
+ def positive(x, label):
+  if isinstance(x,bool) or not str(x).isdigit() or int(x)<1:raise ValueError("invalid " + label + " identifier")
   return int(x)
- run_id=positive(run_id)
- if attempt is not None:attempt=positive(attempt)
+ run_id=positive(run_id, "run")
+ if attempt is not None:attempt=positive(attempt, "attempt")
  path=f"repos/{r}/actions/runs/{run_id}"
  if attempt is not None:path+=f"/attempts/{attempt}"
  d=request("GET",path,transport=transport,timeout=timeout)
