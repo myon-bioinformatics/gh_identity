@@ -61,4 +61,24 @@ class T(unittest.TestCase):
   self.assertEqual(x["mutation_status"],"succeeded")
   self.assertEqual(x["status"],"verification_failed")
 
+ def test_checks_second_page_failure(self):
+  ok={"id":1,"name":"ok","status":"completed","conclusion":"success","html_url":"u"}
+  bad={"id":2,"name":"bad","status":"completed","conclusion":"failure","html_url":"u"}
+  first={"total_count":101,"check_runs":[ok]*100}; second={"total_count":101,"check_runs":[bad]}
+  with mock.patch.object(g,"request",side_effect=[first,second]):
+   x=g.checks_for_sha("o/r","a"*40)
+  self.assertTrue(x["complete"]); self.assertEqual(x["count"],101); self.assertEqual(x["state"],"failed")
+ def test_checks_incomplete_never_green(self):
+  ok={"id":1,"name":"ok","status":"completed","conclusion":"success","html_url":"u"}
+  with mock.patch.object(g,"request",return_value={"total_count":2,"check_runs":[ok]}):
+   self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"incomplete")
+ def test_comment_write_requires_marker(self):
+  with self.assertRaises(ValueError): g.post_comment("o/r",1,"hello",write=True)
+ def test_comment_rejects_active_mention(self):
+  with self.assertRaises(ValueError): g.post_comment("o/r",1,"hello @bot",marker="<!-- gh-identity:k -->")
+ def test_comment_can_sanitize_mention(self):
+  with mock.patch.object(g,"pages",return_value=[]):
+   x=g.post_comment("o/r",1,"hello @bot",marker="<!-- gh-identity:k -->",sanitize_mentions=True)
+  self.assertIn("＠bot",x["body"])
+
 if __name__=="__main__": unittest.main()
