@@ -43,4 +43,16 @@ class T(unittest.TestCase):
  def test_resolve_ref(self):
   with mock.patch.object(g,"request",return_value={"sha":"A"*40}):
    self.assertEqual(g.resolve_ref("o/r","main")["sha"],"a"*40)
+ def test_transport_after_subcommand(self):
+  with mock.patch.object(g,"repository",return_value={"ok":1}) as fn, mock.patch("builtins.print"):
+   self.assertEqual(g.main(["repo","o/r","--transport","urllib"]),0)
+   self.assertEqual(fn.call_args.kwargs["transport"],"urllib")
+ def test_transport_before_subcommand(self):
+  with mock.patch.object(g,"repository",return_value={"ok":1}) as fn, mock.patch("builtins.print"):
+   self.assertEqual(g.main(["--transport","gh","repo","o/r"]),0)
+   self.assertEqual(fn.call_args.kwargs["transport"],"gh")
+ def test_unknown_flag_rejected(self):
+  with mock.patch("sys.stderr"):
+   self.assertEqual(g.main(["repo","o/r","--wat"]),2)
+
 if __name__=="__main__": unittest.main()
