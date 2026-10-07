@@ -109,8 +109,8 @@ def set_variable(r,name,value,write=False,transport="auto",timeout=30):
 def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30,sanitize_mentions=False):
  r=repo(r)
  if not body.strip():raise ValueError("empty body")
- if re.search(r"(?<![\\w])@[A-Za-z0-9_-]+",body):
-  if sanitize_mentions:body=re.sub(r"(?<![\\w])@(?=[A-Za-z0-9_-]+)","＠",body)
+ if re.search(r"(^|[^A-Za-z0-9_])@[A-Za-z0-9_-]+",body):
+  if sanitize_mentions:body=re.sub(r"(^|[^A-Za-z0-9_])@(?=[A-Za-z0-9_-]+)",lambda m:m.group(1)+"＠",body)
   else:raise ValueError("comment contains an active mention")
  if write and not marker:raise ValueError("marker is required for comment writes")
  if marker:
