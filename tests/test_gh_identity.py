@@ -81,4 +81,8 @@ class T(unittest.TestCase):
    x=g.post_comment("o/r",1,"hello @bot",marker="<!-- gh-identity:k -->",sanitize_mentions=True)
   self.assertIn("＠bot",x["body"])
 
+ def test_comment_email_like_text_is_not_mention(self):
+  x=g.post_comment("o/r",1,"mail x@y.example")
+  self.assertEqual(x["status"],"planned")
+
 if __name__=="__main__": unittest.main()
