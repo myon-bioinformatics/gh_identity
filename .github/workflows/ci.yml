@@ -13,11 +13,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install test dependencies
+        run: python -m pip install -r tests/requirements.txt
       - name: Compile
         run: python -m py_compile gh_identity.py
       - name: Import smoke
         run: python -c "import gh_identity"
       - name: CLI smoke
         run: python gh_identity.py --help
-      - name: Tests
-        run: python -m unittest discover -s tests -v
+      - name: Tests with JUnit
+        run: python -m pytest -q tests --junitxml=reports/junit.xml
+      - name: Preserve JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-py${{ matrix.python-version }}
+          path: reports/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
