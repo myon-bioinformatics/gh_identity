@@ -129,6 +129,19 @@ def resolve_ref(r,ref,transport="auto",timeout=30):
  sha=d.get("sha") if isinstance(d,dict) else None
  if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha):raise Error("invalid_commit")
  return {"schema":"gh-identity-ref/1","repository":r,"ref":ref,"sha":sha.lower(),"observed_at":now()}
+def source_identity(r,ref,path,transport="auto",timeout=30):
+ r=repo(r)
+ if not isinstance(path,str) or not path or path.startswith("/") or "\\" in path or any(p in ("",".","..") for p in path.split("/")):
+  raise ValueError("invalid source path")
+ resolved=resolve_ref(r,ref,transport,timeout)
+ encoded="/".join(urllib.parse.quote(p,safe="") for p in path.split("/"))
+ d=request("GET",f"repos/{r}/contents/{encoded}?ref={resolved['sha']}",transport=transport,timeout=timeout)
+ if not isinstance(d,dict) or d.get("type")!="file":raise Error("source_not_regular_file")
+ blob=d.get("sha");size=d.get("size")
+ if not isinstance(blob,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",blob):raise Error("invalid_blob")
+ if not isinstance(size,int) or size<0:raise Error("invalid_source_size")
+ return {"schema":"gh-identity-source/1","repository":r,"ref":ref,"commit_sha":resolved["sha"],"path":path,"blob_sha":blob.lower(),"size":size,"type":"file","observed_at":now()}
+
 def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
  r=repo(r);rows=[];page=1;expected=None
  while True:
