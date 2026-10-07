@@ -85,16 +85,27 @@ def variable(r,name,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/variables/{urllib.parse.quote(name,safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-variable/1","repository":r,"name":d.get("name"),"value":d.get("value"),"updated_at":d.get("updated_at")}
 def set_variable(r,name,value,write=False,transport="auto",timeout=30):
- r=repo(r);out={"schema":"gh-identity-variable-write/1","repository":r,"name":name,"status":"planned"}
+ r=repo(r);out={"schema":"gh-identity-variable-write/1","repository":r,"name":name,"status":"planned","mutation_status":"not_attempted","verification_status":"not_attempted"}
  if not write:return out
  try:
   try:request("PATCH",f"repos/{r}/actions/variables/{urllib.parse.quote(name,safe='')}",{"name":name,"value":value},transport,timeout,True)
   except Error as e:
    if e.code!="not_found_or_inaccessible":raise
    request("POST",f"repos/{r}/actions/variables",{"name":name,"value":value},transport,timeout,True)
-  out["status"]="verified";out["verified"]=variable(r,name,transport,timeout)["value"]==value
- except Error as e:out.update(status="mutation_uncertain" if e.uncertain else "mutation_failed",error=e.code)
+ except Error as e:
+  out.update(status="mutation_uncertain" if e.uncertain else "mutation_failed",mutation_status="uncertain" if e.uncertain else "failed",error=e.code)
+  return out
+ out["mutation_status"]="succeeded"
+ try:
+  got=variable(r,name,transport,timeout)
+ except Error as e:
+  out.update(status="verification_failed",verification_status="failed",verification_error=e.code)
+  return out
+ out["verified"]=got.get("value")==value
+ out["verification_status"]="verified" if out["verified"] else "mismatch"
+ out["status"]="verified" if out["verified"] else "verification_mismatch"
  return out
+
 def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30):
  r=repo(r)
  if not body.strip():raise ValueError("empty body")
