@@ -102,4 +102,41 @@ class T(unittest.TestCase):
   x=g.compare_sha({"sha":None},"d"*40)
   self.assertFalse(x["comparable"]); self.assertIsNone(x["same"])
 
+
+ def test_pull_request_discovery_walks_older_pages_and_is_bounded(self):
+  calls=[]
+  def fake(method,path,*args,**kwargs):
+   calls.append(path)
+   page=int(path.rsplit("page=",1)[1])
+   if page==1:return [{"number":n,"title":str(n),"state":"closed","head":{"sha":"a"*40,"ref":"f"},"base":{"sha":"b"*40,"ref":"main"}} for n in range(200,100,-1)]
+   return [{"number":100,"title":"100","state":"closed","head":{"sha":"c"*40,"ref":"old"},"base":{"sha":"b"*40,"ref":"main"}}]
+  with mock.patch.object(g,"request",side_effect=fake):
+   out=g.pull_requests("o/r",state="all",max_items=101,max_pages=3)
+  self.assertEqual(out["pull_requests"][-1]["number"],100)
+  self.assertEqual(out["pages_fetched"],2);self.assertTrue(out["complete"])
+  self.assertEqual(len(calls),2)
+
+ def test_pull_request_discovery_reports_truncation(self):
+  batch=[{"number":n,"head":{},"base":{}} for n in range(100)]
+  with mock.patch.object(g,"request",return_value=batch):
+   out=g.pull_requests("o/r",max_items=50,max_pages=1)
+  self.assertEqual(out["count"],50);self.assertFalse(out["complete"]);self.assertTrue(out["truncated"])
+
+ def test_run_history_finds_older_sha_across_pages(self):
+  target="d"*40
+  page1=[{"id":n,"head_sha":"a"*40,"head_branch":"main","event":"push"} for n in range(100)]
+  page2=[{"id":999,"run_attempt":2,"workflow_id":7,"name":"CI","head_sha":target,"head_branch":"feature","event":"pull_request","status":"completed","conclusion":"success"}]
+  def fake(method,path,*args,**kwargs):
+   return {"workflow_runs":page1 if "page=1" in path else page2}
+  with mock.patch.object(g,"request",side_effect=fake):
+   out=g.run_history("o/r",head_sha=target,max_items=10,max_pages=3)
+  self.assertEqual([x["run_id"] for x in out["runs"]],[999])
+  self.assertEqual(out["pages_fetched"],2);self.assertTrue(out["complete"])
+
+ def test_run_history_bound_is_explicit_not_latest_equals_relevant(self):
+  batch={"workflow_runs":[{"id":n,"head_sha":"a"*40,"head_branch":"main","event":"push"} for n in range(100)]}
+  with mock.patch.object(g,"request",return_value=batch):
+   out=g.run_history("o/r",max_items=5,max_pages=1)
+  self.assertEqual(out["count"],5);self.assertTrue(out["truncated"]);self.assertFalse(out["complete"])
+
 if __name__=="__main__": unittest.main()
