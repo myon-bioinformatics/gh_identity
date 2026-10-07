@@ -160,3 +160,30 @@ class T(unittest.TestCase):
   self.assertFalse(x["comparable"]); self.assertIsNone(x["same"])
 
 if __name__=="__main__": unittest.main()
+
+class WorkflowRunIdentityTests(unittest.TestCase):
+ def test_exact_run_attempt(self):
+  payload={"id":123,"workflow_id":456,"run_attempt":2,"head_sha":"a"*40,
+           "event":"workflow_dispatch","status":"completed","conclusion":"success",
+           "created_at":"2026-10-08T00:00:00Z","html_url":"https://github.com/o/r/actions/runs/123"}
+  with mock.patch.object(g,"request",return_value=payload) as req:
+   result=g.run("o/r",123,attempt=2)
+   self.assertEqual((result["workflow_id"],result["run_id"],result["attempt"]),(456,123,2))
+   req.assert_called_once_with("GET","repos/o/r/actions/runs/123/attempts/2",transport="auto",timeout=30)
+ def test_attempt_mismatch_is_rejected(self):
+  with mock.patch.object(g,"request",return_value={"id":123,"run_attempt":3}):
+   with self.assertRaises(g.Error):g.run("o/r",123,attempt=2)
+ def test_invalid_ids_rejected_before_network(self):
+  with mock.patch.object(g,"request") as req:
+   for value in (0,-1,True,"x"):
+    with self.assertRaises(ValueError):g.run("o/r",value)
+   req.assert_not_called()
+ def test_cli_workflow_and_run(self):
+  with mock.patch.object(g,"workflow",return_value={"id":42}) as wf:
+   with mock.patch("builtins.print") as out:
+    self.assertEqual(g.main(["workflow","o/r","42"]),0)
+   wf.assert_called_once()
+  with mock.patch.object(g,"run",return_value={"run_id":123}) as rn:
+   with mock.patch("builtins.print"):
+    self.assertEqual(g.main(["run","o/r","123","--attempt","2"]),0)
+   self.assertEqual(rn.call_args.kwargs["attempt"],2)
