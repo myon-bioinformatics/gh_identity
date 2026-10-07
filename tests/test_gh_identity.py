@@ -159,8 +159,6 @@ class T(unittest.TestCase):
   x=g.compare_sha({"sha":None},"d"*40)
   self.assertFalse(x["comparable"]); self.assertIsNone(x["same"])
 
-if __name__=="__main__": unittest.main()
-
 class WorkflowRunIdentityTests(unittest.TestCase):
  def test_exact_run_attempt(self):
   payload={"id":123,"workflow_id":456,"run_attempt":2,"head_sha":"a"*40,
@@ -187,3 +185,6 @@ class WorkflowRunIdentityTests(unittest.TestCase):
    with mock.patch("builtins.print"):
     self.assertEqual(g.main(["run","o/r","123","--attempt","2"]),0)
    self.assertEqual(rn.call_args.kwargs["attempt"],2)
+
+if __name__ == "__main__":
+ unittest.main()
