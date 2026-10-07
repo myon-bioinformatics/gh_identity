@@ -20,20 +20,20 @@ class T(unittest.TestCase):
   with mock.patch.object(g,"pages",return_value=rows):
    x=g.comments("o/r",1); self.assertEqual(x["comments"][0]["chars"],300); self.assertEqual(len(x["comments"][0]["preview"]),240)
  def test_comment_marker_idempotent(self):
-  with mock.patch.object(g,"pages",return_value=[{"id":7,"body":"<!-- k -->","html_url":"u"}]), mock.patch.object(g,"request") as q:
-   x=g.post_comment("o/r",1,"body",write=True,marker="<!-- k -->"); self.assertEqual(x["status"],"already_exists"); q.assert_not_called()
+  with mock.patch.object(g,"pages",return_value=[{"id":7,"body":"<!-- gh-identity:k -->","html_url":"u"}]), mock.patch.object(g,"request") as q:
+   x=g.post_comment("o/r",1,"body",write=True,marker="<!-- gh-identity:k -->"); self.assertEqual(x["status"],"already_exists"); q.assert_not_called()
  def test_variable_dry_run(self):
   x=g.set_variable("o/r","A","B"); self.assertEqual(x["status"],"planned")
  def test_uncertain_comment(self):
   with mock.patch.object(g,"request",side_effect=g.Error("timeout",True)):
-   x=g.post_comment("o/r",1,"x",write=True); self.assertEqual(x["status"],"mutation_uncertain")
+   x=g.post_comment("o/r",1,"x",write=True,marker="<!-- gh-identity:k -->"); self.assertEqual(x["status"],"mutation_uncertain")
  def test_pr_identity(self):
   raw={"state":"open","draft":False,"merged":False,"mergeable":True,"head":{"sha":"h","ref":"f"},"base":{"sha":"b","ref":"main"},"html_url":"u"}
   with mock.patch.object(g,"request",return_value=raw):
    x=g.pr("o/r",2); self.assertEqual((x["head_sha"],x["base_sha"]),("h","b"))
 
  def test_zero_checks_not_green(self):
-  with mock.patch.object(g,"request",return_value={"check_runs":[]}):
+  with mock.patch.object(g,"request",return_value={"total_count":0,"check_runs":[]}):
    self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"pending")
  def test_observe_pr_stale(self):
   p1={"schema":"x","repository":"o/r","number":1,"state":"open","draft":False,"mergeable":True,"head_sha":"a"*40,"base_sha":"b"*40}
