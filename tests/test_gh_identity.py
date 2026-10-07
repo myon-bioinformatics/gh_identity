@@ -127,7 +127,9 @@ class T(unittest.TestCase):
   req.assert_not_called()
  def test_source_identity_rejects_bad_blob_identity(self):
   def req(method,path,**kwargs):
-   return {"sha":"a"*40} if "/commits/" in path else {"type":"file","sha":"short","size":1}
+   if "/commits/" in path:return {"sha":"a"*40}
+   if "/git/trees/" in path:return {"tree":[{"path":"a.py","type":"blob","mode":"100644","sha":"short"}]}
+   return {"type":"file","sha":"short","size":1}
   with mock.patch.object(g,"request",side_effect=req):
    with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","a.py")
   self.assertEqual(cm.exception.code,"invalid_blob")
