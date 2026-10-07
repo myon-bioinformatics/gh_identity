@@ -25,7 +25,7 @@ class T(unittest.TestCase):
  def test_variable_dry_run(self):
   x=g.set_variable("o/r","A","B"); self.assertEqual(x["status"],"planned")
  def test_uncertain_comment(self):
-  with mock.patch.object(g,"request",side_effect=g.Error("timeout",True)):
+  with mock.patch.object(g,"pages",return_value=[]), mock.patch.object(g,"request",side_effect=g.Error("timeout",True)):
    x=g.post_comment("o/r",1,"x",write=True,marker="<!-- gh-identity:k -->"); self.assertEqual(x["status"],"mutation_uncertain")
  def test_pr_identity(self):
   raw={"state":"open","draft":False,"merged":False,"mergeable":True,"head":{"sha":"h","ref":"f"},"base":{"sha":"b","ref":"main"},"html_url":"u"}
