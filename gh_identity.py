@@ -192,6 +192,7 @@ def local_identity(*,cwd=None,identity=None,env=None):
 
 def compare_sha(local,remote_sha):
  lsha=local.get("sha") if isinstance(local,dict) else None
+ lsha=str(lsha).lower() if lsha else None
  rsha=str(remote_sha).lower() if remote_sha else None
  return {"schema":"gh-identity-comparison/1","local_sha":lsha,"remote_sha":rsha,"comparable":bool(lsha and rsha),"same":(lsha==rsha) if lsha and rsha else None,"observed_at":now()}
 
