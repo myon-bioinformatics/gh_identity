@@ -32,4 +32,15 @@ class T(unittest.TestCase):
   with mock.patch.object(g,"request",return_value=raw):
    x=g.pr("o/r",2); self.assertEqual((x["head_sha"],x["base_sha"]),("h","b"))
 
-if __name__=="__main__": unittest.main()
+ def test_zero_checks_not_green(self):
+  with mock.patch.object(g,"request",return_value={"check_runs":[]}):
+   self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"pending")
+ def test_observe_pr_stale(self):
+  p1={"schema":"x","repository":"o/r","number":1,"state":"open","draft":False,"mergeable":True,"head_sha":"a"*40,"base_sha":"b"*40}
+  p2=dict(p1,head_sha="c"*40)
+  with mock.patch.object(g,"pr",side_effect=[p1,p2]), mock.patch.object(g,"checks_for_sha",return_value={"state":"green"}), mock.patch.object(g,"comments",return_value={}), mock.patch.object(g,"reviews",return_value={}):
+   self.assertTrue(g.observe_pr("o/r",1)["stale"])
+ def test_resolve_ref(self):
+  with mock.patch.object(g,"request",return_value={"sha":"A"*40}):
+   self.assertEqual(g.resolve_ref("o/r","main")["sha"],"a"*40)
+\nif __name__=="__main__": unittest.main()
