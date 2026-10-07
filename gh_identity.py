@@ -136,7 +136,14 @@ def source_identity(r,ref,path,transport="auto",timeout=30):
  resolved=resolve_ref(r,ref,transport,timeout)
  encoded="/".join(urllib.parse.quote(p,safe="") for p in path.split("/"))
  d=request("GET",f"repos/{r}/contents/{encoded}?ref={resolved['sha']}",transport=transport,timeout=timeout)
- if not isinstance(d,dict) or d.get("type")!="file":raise Error("source_not_regular_file")
+ if not isinstance(d,dict) or d.get("type")!="file" or d.get("submodule_git_url"):raise Error("source_not_regular_file")
+ tree=request("GET",f"repos/{r}/git/trees/{resolved['sha']}?recursive=1",transport=transport,timeout=timeout)
+ entries=tree.get("tree") if isinstance(tree,dict) else None
+ if not isinstance(entries,list):raise Error("invalid_json")
+ matches=[x for x in entries if isinstance(x,dict) and x.get("path")==path]
+ if len(matches)!=1 or matches[0].get("type")!="blob" or matches[0].get("mode") not in ("100644","100755"):
+  raise Error("source_not_regular_file")
+ if matches[0].get("sha")!=d.get("sha"):raise Error("source_identity_mismatch")
  blob=d.get("sha");size=d.get("size")
  if not isinstance(blob,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",blob):raise Error("invalid_blob")
  if not isinstance(size,int) or size<0:raise Error("invalid_source_size")
