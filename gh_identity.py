@@ -106,18 +106,23 @@ def set_variable(r,name,value,write=False,transport="auto",timeout=30):
  out["status"]="verified" if out["verified"] else "verification_mismatch"
  return out
 
-def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30):
+def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30,sanitize_mentions=False):
  r=repo(r)
  if not body.strip():raise ValueError("empty body")
+ if re.search(r"(?<![\\w])@[A-Za-z0-9_-]+",body):
+  if sanitize_mentions:body=re.sub(r"(?<![\\w])@(?=[A-Za-z0-9_-]+)","＠",body)
+  else:raise ValueError("comment contains an active mention")
+ if write and not marker:raise ValueError("marker is required for comment writes")
  if marker:
+  if not re.fullmatch(r"<!-- gh-identity:[A-Za-z0-9_.:-]+ -->",marker):raise ValueError("invalid marker")
   for x in pages(f"repos/{r}/issues/{n}/comments",transport,timeout):
-   if marker in (x.get("body")or""):return {"schema":"gh-identity-comment-write/1","status":"already_exists","id":x.get("id"),"url":x.get("html_url")}
-  body=marker+"\n"+body
- if not write:return {"schema":"gh-identity-comment-write/1","status":"planned","chars":len(body)}
+   if marker in (x.get("body")or""):return {"schema":"gh-identity-comment-write/1","status":"already_exists","id":x.get("id"),"url":x.get("html_url"),"marker":marker}
+  body=marker+"\\n"+body
+ if not write:return {"schema":"gh-identity-comment-write/1","status":"planned","chars":len(body),"marker":marker,"body":body}
  try:
   d=request("POST",f"repos/{r}/issues/{n}/comments",{"body":body},transport,timeout,True)
-  return {"schema":"gh-identity-comment-write/1","status":"verified","id":d.get("id"),"url":d.get("html_url")}
- except Error as e:return {"schema":"gh-identity-comment-write/1","status":"mutation_uncertain" if e.uncertain else "mutation_failed","error":e.code}
+  return {"schema":"gh-identity-comment-write/1","status":"verified","id":d.get("id"),"url":d.get("html_url"),"marker":marker}
+ except Error as e:return {"schema":"gh-identity-comment-write/1","status":"mutation_uncertain" if e.uncertain else "mutation_failed","error":e.code,"marker":marker}
 
 def resolve_ref(r,ref,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/commits/{urllib.parse.quote(ref,safe='')}",transport=transport,timeout=timeout)
@@ -125,15 +130,23 @@ def resolve_ref(r,ref,transport="auto",timeout=30):
  if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha):raise Error("invalid_commit")
  return {"schema":"gh-identity-ref/1","repository":r,"ref":ref,"sha":sha.lower(),"observed_at":now()}
 def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
- r=repo(r);d=request("GET",f"repos/{r}/commits/{sha}/check-runs?per_page=100",transport=transport,timeout=timeout)
- xs=(d or {}).get("check_runs") or []
- rows=[{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("html_url")} for x in xs]
+ r=repo(r);rows=[];page=1;expected=None
+ while True:
+  d=request("GET",f"repos/{r}/commits/{sha}/check-runs?per_page=100&page={page}",transport=transport,timeout=timeout)
+  if not isinstance(d,dict) or not isinstance(d.get("check_runs"),list):raise Error("invalid_json")
+  if expected is None:expected=d.get("total_count")
+  batch=d["check_runs"];rows += [{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("html_url")} for x in batch]
+  if len(batch)<100:break
+  page+=1
+ complete=isinstance(expected,int) and expected==len(rows)
  bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
- if len(rows)<min_checks:state="pending"
+ if not complete:state="incomplete"
+ elif len(rows)<min_checks:state="pending"
  elif any(x["status"]!="completed" for x in rows):state="pending"
  elif any(x["conclusion"] in bad for x in rows):state="failed"
  else:state="green"
- return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,"state":state,"count":len(rows),"min_checks":min_checks,"checks":rows,"observed_at":now()}
+ return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,"state":state,"complete":complete,"expected_count":expected,"count":len(rows),"min_checks":min_checks,"checks":rows,"observed_at":now()}
+
 def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
  before=pr(r,n,transport=transport,timeout=timeout)
  ch=checks_for_sha(r,before["head_sha"],min_checks,transport,timeout)
@@ -173,7 +186,7 @@ def main(argv=None):
  x=s.add_parser("runs");x.add_argument("repo")
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
- x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--write",action="store_true")
+ x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
  try:ns=a.parse_args(argv)
  except SystemExit as e:return int(e.code)
  try:
@@ -186,7 +199,7 @@ def main(argv=None):
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
-  else:o=post_comment(ns.repo,ns.number,ns.body,ns.write,None,transport)
+  else:\n   marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None\n   o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False));return 0
 if __name__=="__main__":raise SystemExit(main())
