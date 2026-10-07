@@ -142,7 +142,8 @@ def gh_help(*parts,timeout=15):
  except OSError as e:raise Error("process_error") from e
  if p.returncode:raise Error("gh_failed")
  return p.stdout
-\ndef main(argv=None):
+
+def main(argv=None):
  a=argparse.ArgumentParser();a.add_argument("--transport",choices=["auto","gh","urllib"],default="auto");s=a.add_subparsers(dest="cmd",required=True)
  s.add_parser("capabilities")
  for c in ("repo","repos","pr","comments","reviews","runs","variable-get","variable-set","comment"):s.add_parser(c)
