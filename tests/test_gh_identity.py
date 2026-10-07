@@ -102,4 +102,32 @@ class T(unittest.TestCase):
   x=g.compare_sha({"sha":None},"d"*40)
   self.assertFalse(x["comparable"]); self.assertIsNone(x["same"])
 
+ def test_source_identity_resolves_commit_then_regular_file(self):
+  calls=[]
+  def req(method,path,**kwargs):
+   calls.append(path)
+   if "/commits/" in path:return {"sha":"A"*40}
+   return {"type":"file","sha":"B"*40,"size":123}
+  with mock.patch.object(g,"request",side_effect=req):
+   x=g.source_identity("o/r","main","dir/a b.py")
+  self.assertEqual(x["commit_sha"],"a"*40); self.assertEqual(x["blob_sha"],"b"*40)
+  self.assertEqual(x["size"],123); self.assertEqual(x["path"],"dir/a b.py")
+  self.assertIn("contents/dir/a%20b.py?ref="+"a"*40,calls[1])
+ def test_source_identity_rejects_non_regular_source(self):
+  def req(method,path,**kwargs):
+   return {"sha":"a"*40} if "/commits/" in path else {"type":"symlink","sha":"b"*40,"size":1}
+  with mock.patch.object(g,"request",side_effect=req):
+   with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","link")
+  self.assertEqual(cm.exception.code,"source_not_regular_file")
+ def test_source_identity_rejects_unsafe_path_before_network(self):
+  with mock.patch.object(g,"request") as req:
+   with self.assertRaises(ValueError):g.source_identity("o/r","main","../secret")
+  req.assert_not_called()
+ def test_source_identity_rejects_bad_blob_identity(self):
+  def req(method,path,**kwargs):
+   return {"sha":"a"*40} if "/commits/" in path else {"type":"file","sha":"short","size":1}
+  with mock.patch.object(g,"request",side_effect=req):
+   with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","a.py")
+  self.assertEqual(cm.exception.code,"invalid_blob")
+
 if __name__=="__main__": unittest.main()
