@@ -176,6 +176,9 @@ class WorkflowRunIdentityTests(unittest.TestCase):
    for value in (0,-1,True,"x"):
     with self.assertRaises(ValueError):g.run("o/r",value)
    req.assert_not_called()
+ def test_invalid_attempt_has_specific_error(self):
+  with self.assertRaisesRegex(ValueError, "invalid attempt identifier"):
+   g.run("o/r", 123, attempt=0)
  def test_cli_workflow_and_run(self):
   with mock.patch.object(g,"workflow",return_value={"id":42}) as wf:
    with mock.patch("builtins.print") as out:
