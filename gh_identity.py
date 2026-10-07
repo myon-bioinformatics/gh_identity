@@ -144,21 +144,38 @@ def gh_help(*parts,timeout=15):
  return p.stdout
 
 def main(argv=None):
- a=argparse.ArgumentParser();a.add_argument("--transport",choices=["auto","gh","urllib"],default="auto");s=a.add_subparsers(dest="cmd",required=True)
+ argv=list(sys.argv[1:] if argv is None else argv)
+ transport="auto"
+ if "--transport" in argv:
+  i=argv.index("--transport")
+  if i+1>=len(argv): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
+  transport=argv[i+1]
+  if transport not in ("auto","gh","urllib"): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
+  del argv[i:i+2]
+ a=argparse.ArgumentParser();s=a.add_subparsers(dest="cmd",required=True)
  s.add_parser("capabilities")
- for c in ("repo","repos","pr","comments","reviews","runs","variable-get","variable-set","comment"):s.add_parser(c)
- ns,rest=a.parse_known_args(argv)
+ x=s.add_parser("repo");x.add_argument("repo")
+ x=s.add_parser("repos");x.add_argument("owner")
+ x=s.add_parser("pr");x.add_argument("repo");x.add_argument("number",type=int)
+ x=s.add_parser("comments");x.add_argument("repo");x.add_argument("number",type=int)
+ x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
+ x=s.add_parser("runs");x.add_argument("repo")
+ x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
+ x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
+ x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--write",action="store_true")
+ try:ns=a.parse_args(argv)
+ except SystemExit as e:return int(e.code)
  try:
   if ns.cmd=="capabilities":o=capabilities()
-  elif ns.cmd=="repo":o=repository(rest[0],transport=ns.transport)
-  elif ns.cmd=="repos":o=repositories(rest[0],transport=ns.transport)
-  elif ns.cmd=="pr":o=pr(rest[0],int(rest[1]),transport=ns.transport)
-  elif ns.cmd=="comments":o=comments(rest[0],int(rest[1]),transport=ns.transport)
-  elif ns.cmd=="reviews":o=reviews(rest[0],int(rest[1]),transport=ns.transport)
-  elif ns.cmd=="runs":o=runs(rest[0],transport=ns.transport)
-  elif ns.cmd=="variable-get":o=variable(rest[0],rest[1],transport=ns.transport)
-  elif ns.cmd=="variable-set":o=set_variable(rest[0],rest[1],rest[2],"--write" in rest,ns.transport)
-  else:o=post_comment(rest[0],int(rest[1]),rest[2],"--write" in rest,None,ns.transport)
- except (ValueError,Error,IndexError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
+  elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
+  elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
+  elif ns.cmd=="pr":o=pr(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="comments":o=comments(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
+  elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
+  elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
+  else:o=post_comment(ns.repo,ns.number,ns.body,ns.write,None,transport)
+ except (ValueError,Error) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False));return 0
 if __name__=="__main__":raise SystemExit(main())
