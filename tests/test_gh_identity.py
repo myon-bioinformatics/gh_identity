@@ -96,7 +96,7 @@ class T(unittest.TestCase):
    x=g.local_identity(env={})
   self.assertIsNone(x["sha"]); self.assertEqual(x["source"],"unavailable")
  def test_compare_sha(self):
-  x=g.compare_sha({"sha":"c"*40},"C"*40)
+  x=g.compare_sha({"sha":"C"*40},"c"*40)
   self.assertTrue(x["comparable"]); self.assertTrue(x["same"])
  def test_compare_sha_unknown_is_not_false(self):
   x=g.compare_sha({"sha":None},"d"*40)
