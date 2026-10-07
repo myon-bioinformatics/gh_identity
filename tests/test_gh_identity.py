@@ -35,6 +35,35 @@ class T(unittest.TestCase):
  def test_zero_checks_not_green(self):
   with mock.patch.object(g,"request",return_value={"total_count":0,"check_runs":[]}):
    self.assertEqual(g.checks_for_sha("o/r","a"*40)["state"],"pending")
+ def test_summarize_checks_is_pure_and_normalizes_evidence(self):
+  rows=[{"id":1,"name":"unit","status":"completed","conclusion":"success",
+         "html_url":"u","output":{"annotations_count":3}}]
+  original=json.loads(json.dumps(rows))
+  x=g.summarize_checks(rows,1)
+  self.assertEqual(x["state"],"green"); self.assertTrue(x["complete"])
+  self.assertEqual(x["checks"][0]["url"],"u")
+  self.assertEqual(x["checks"][0]["annotations_count"],3)
+  self.assertEqual(rows,original)
+
+ def test_summarize_checks_explicit_incomplete_wins(self):
+  rows=[{"id":1,"name":"unit","status":"completed","conclusion":"success"}]
+  x=g.summarize_checks(rows,2)
+  self.assertEqual(x["state"],"incomplete"); self.assertFalse(x["complete"])
+
+ def test_checks_for_sha_delegates_classification_to_summary(self):
+  row={"id":1,"name":"unit","status":"completed","conclusion":"success"}
+  sentinel={"state":"green","complete":True,"expected_count":1,"count":1,"min_checks":1,"checks":[{"sentinel":True}]}
+  with mock.patch.object(g,"request",return_value={"total_count":1,"check_runs":[row]}), \
+       mock.patch.object(g,"summarize_checks",return_value=sentinel) as summary:
+   x=g.checks_for_sha("o/r","a"*40)
+  summary.assert_called_once_with([row],1,1)
+  self.assertEqual(x["checks"],[{"sentinel":True}])
+
+ def test_checks_invalid_minimum_fails_before_transport(self):
+  with mock.patch.object(g,"request") as request:
+   with self.assertRaises(ValueError): g.checks_for_sha("o/r","a"*40,min_checks=0)
+  request.assert_not_called()
+
  def test_checks_reject_nonpositive_minimum(self):
   for value in (0,-1,False):
    with self.subTest(value=value), self.assertRaises(ValueError):
