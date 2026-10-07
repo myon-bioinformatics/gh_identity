@@ -107,7 +107,42 @@ def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30):
   d=request("POST",f"repos/{r}/issues/{n}/comments",{"body":body},transport,timeout,True)
   return {"schema":"gh-identity-comment-write/1","status":"verified","id":d.get("id"),"url":d.get("html_url")}
  except Error as e:return {"schema":"gh-identity-comment-write/1","status":"mutation_uncertain" if e.uncertain else "mutation_failed","error":e.code}
-def main(argv=None):
+
+def resolve_ref(r,ref,transport="auto",timeout=30):
+ r=repo(r);d=request("GET",f"repos/{r}/commits/{urllib.parse.quote(ref,safe='')}",transport=transport,timeout=timeout)
+ sha=d.get("sha") if isinstance(d,dict) else None
+ if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha):raise Error("invalid_commit")
+ return {"schema":"gh-identity-ref/1","repository":r,"ref":ref,"sha":sha.lower(),"observed_at":now()}
+def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
+ r=repo(r);d=request("GET",f"repos/{r}/commits/{sha}/check-runs?per_page=100",transport=transport,timeout=timeout)
+ xs=(d or {}).get("check_runs") or []
+ rows=[{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("html_url")} for x in xs]
+ bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
+ if len(rows)<min_checks:state="pending"
+ elif any(x["status"]!="completed" for x in rows):state="pending"
+ elif any(x["conclusion"] in bad for x in rows):state="failed"
+ else:state="green"
+ return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,"state":state,"count":len(rows),"min_checks":min_checks,"checks":rows,"observed_at":now()}
+def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
+ before=pr(r,n,transport=transport,timeout=timeout)
+ ch=checks_for_sha(r,before["head_sha"],min_checks,transport,timeout)
+ cs=comments(r,n,transport=transport,timeout=timeout)
+ rs=reviews(r,n,transport=transport,timeout=timeout)
+ after=pr(r,n,transport=transport,timeout=timeout)
+ return {"schema":"gh-identity-pr-observation/1","repository":repo(r),"number":n,"head_sha":before["head_sha"],"base_sha":before["base_sha"],
+  "state":before["state"],"draft":before["draft"],"mergeable":before["mergeable"],"checks":ch,"conversation":cs,"reviews":rs,
+  "stale":before["head_sha"]!=after["head_sha"],"head_sha_after":after["head_sha"],"observed_at":now()}
+def workflow(r,w,transport="auto",timeout=30):
+ r=repo(r);d=request("GET",f"repos/{r}/actions/workflows/{urllib.parse.quote(str(w),safe='')}",transport=transport,timeout=timeout)
+ return {"schema":"gh-identity-workflow/1","repository":r,"id":d.get("id"),"name":d.get("name"),"path":d.get("path"),"state":d.get("state"),"url":d.get("html_url"),"observed_at":now()}
+def gh_help(*parts,timeout=15):
+ if not gh_available():raise Error("gh_not_found")
+ env=os.environ.copy();env.update(GH_PROMPT_DISABLED="1",GH_PAGER="cat");env.pop("GH_REPO",None)
+ try:p=subprocess.run(["gh","help",*parts],capture_output=True,text=True,encoding="utf-8",timeout=timeout,env=env)
+ except OSError as e:raise Error("process_error") from e
+ if p.returncode:raise Error("gh_failed")
+ return p.stdout
+\ndef main(argv=None):
  a=argparse.ArgumentParser();a.add_argument("--transport",choices=["auto","gh","urllib"],default="auto");s=a.add_subparsers(dest="cmd",required=True)
  s.add_parser("capabilities")
  for c in ("repo","repos","pr","comments","reviews","runs","variable-get","variable-set","comment"):s.add_parser(c)
