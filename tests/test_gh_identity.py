@@ -85,4 +85,21 @@ class T(unittest.TestCase):
   x=g.post_comment("o/r",1,"mail x@y.example")
   self.assertEqual(x["status"],"planned")
 
+ def test_local_identity_prefers_provided_contract(self):
+  x=g.local_identity(identity={"sha":"A"*40,"ref":"main","dirty":False,"source":"metadata"})
+  self.assertEqual(x["sha"],"a"*40); self.assertEqual(x["source"],"metadata")
+ def test_local_identity_uses_github_environment(self):
+  x=g.local_identity(env={"GITHUB_SHA":"B"*40,"GITHUB_HEAD_REF":"feature"})
+  self.assertEqual((x["sha"],x["ref"],x["source"]),("b"*40,"feature","github-env"))
+ def test_local_identity_unavailable_without_git(self):
+  with mock.patch.object(g.shutil,"which",return_value=None):
+   x=g.local_identity(env={})
+  self.assertIsNone(x["sha"]); self.assertEqual(x["source"],"unavailable")
+ def test_compare_sha(self):
+  x=g.compare_sha({"sha":"C"*40},"c"*40)
+  self.assertTrue(x["comparable"]); self.assertTrue(x["same"])
+ def test_compare_sha_unknown_is_not_false(self):
+  x=g.compare_sha({"sha":None},"d"*40)
+  self.assertFalse(x["comparable"]); self.assertIsNone(x["same"])
+
 if __name__=="__main__": unittest.main()
