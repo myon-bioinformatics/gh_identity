@@ -55,4 +55,10 @@ class T(unittest.TestCase):
   with mock.patch("sys.stderr"):
    self.assertEqual(g.main(["repo","o/r","--wat"]),2)
 
+ def test_verification_failure_preserves_successful_write(self):
+  with mock.patch.object(g,"request",return_value=None), mock.patch.object(g,"variable",side_effect=g.Error("timeout")):
+   x=g.set_variable("o/r","A","B",write=True)
+  self.assertEqual(x["mutation_status"],"succeeded")
+  self.assertEqual(x["status"],"verification_failed")
+
 if __name__=="__main__": unittest.main()
