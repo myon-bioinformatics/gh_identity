@@ -78,5 +78,63 @@ partial-rerun observations usable without asserting an unrequested attempt.
 retaining the observed total; negative values, booleans and other types fail
 before transport. This is an output limit, not a collection-memory limit.
 Check normalization prefers GitHub's human-facing `html_url`, falling back to
-`url` for pre-normalized consumer rows. Collection byte/time limits and broader
-pagination hardening remain tracked in Issue #12.
+`url` for pre-normalized consumer rows.
+
+
+## Operation limits and transport injection
+
+Every public network operation shares a cumulative budget across its nested
+requests, pagination and gh-to-urllib fallback: 100 collection pages, 10,000
+collected items, 10,000,000 response bytes and 30 seconds by default. Filtered-out
+collection rows still count. Page/item limits apply to collection helpers;
+response bytes and elapsed time also cover individual requests. `timeout=` sets
+the outer operation deadline, rather than restarting it on each page.
+
+```python
+with ghi.operation(max_pages=20, max_items=2000, max_bytes=2000000, timeout=15):
+    checks = ghi.checks_for_sha("OWNER/REPO", sha)
+    comments = ghi.comments("OWNER/REPO", 9, last=5)
+```
+
+Explicit scopes share limits across multiple calls and cannot be nested. CLI
+flags `--max-pages`, `--max-items`, `--max-bytes`, and `--timeout` accept the same
+limits before or after the command. Counts must be positive integers; time must
+be positive and finite. Budget exhaustion raises `Error` with `pages_limit`,
+`items_limit`, `bytes_limit`, or `operation_timeout` (CLI exit 2), never a complete
+or green partial result. Existing discovery helpers retain their explicit
+`truncated` result for their own smaller discovery limits. A short check response
+with a valid but unmatched total is `complete=false`, `state=incomplete`;
+missing, invalid, changing or exceeded totals raise `pagination_incomplete`.
+
+The built-in transports drain bounded stdout/stderr pipes and stop their child
+process on the wall deadline. urllib runs in a private Python worker so stalled
+DNS or response reads can be stopped too; credentials are sent through stdin.
+This requires permission to start the current Python executable and access to
+the module file. The byte budget includes gh diagnostics; it limits collected
+response bytes, not total interpreter memory. An interrupted mutation remains
+uncertain and must not be blindly retried.
+
+`pages(..., requester=...)` and `checks_for_sha(..., requester=...)` accept a
+callable with signature `requester(method, path, *, transport, timeout)` for
+existing clients and offline fixtures. Return parsed JSON to use numbered
+pagination, or `ghi.Page(data, headers)` to preserve Link pagination. Explicit
+headers without a next link end the collection, even on a full page. Next links
+must advance one page on the same GitHub API endpoint with unchanged filters.
+This retains injectable client transports without duplicating check classification.
+
+An adapter can wrap an existing client's response as follows:
+
+```python
+def requester(method, path, *, transport, timeout):
+    # Configure your client's transport to enforce this remaining timeout.
+    response = client.request(method, "/" + path)
+    return ghi.Page(response.data, response.headers)
+
+checks = ghi.checks_for_sha("OWNER/REPO", sha, requester=requester)
+```
+
+Injected callables are trusted: they must bound their own I/O and allocations and
+honor the supplied remaining timeout. GHI checks elapsed time and charges the
+serialized payload size after they return; it cannot interrupt arbitrary Python
+callbacks. Existing consumer deployment/vendor updates remain tracked in #4;
+this interface and its parity fixtures provide the migration seam.

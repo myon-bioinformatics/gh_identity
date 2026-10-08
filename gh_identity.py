@@ -6,6 +6,169 @@ from datetime import datetime,timezone
 API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
+import contextlib
+import contextvars
+import functools
+import inspect
+import math
+import threading
+import time
+
+
+class _Budget:
+ def __init__(self,max_pages=100,max_items=10000,max_bytes=10000000,timeout=30):
+  for value in (max_pages,max_items,max_bytes):
+   if type(value) is not int or value<1:raise ValueError("limits must be positive integers")
+  if isinstance(timeout,bool) or not isinstance(timeout,(int,float)) or not math.isfinite(timeout) or timeout<=0:
+   raise ValueError("timeout must be positive and finite")
+  self.max_pages=max_pages;self.max_items=max_items;self.max_bytes=max_bytes
+  self.pages=0;self.items=0;self.bytes=0;self.deadline=time.monotonic()+timeout
+ def remaining(self):
+  left=self.deadline-time.monotonic()
+  if left<=0:raise Error("operation_timeout")
+  return left
+ def charge(self,kind,count):
+  self.remaining()
+  value=getattr(self,kind)+count
+  if value>getattr(self,"max_"+kind):raise Error(kind+"_limit")
+  setattr(self,kind,value)
+
+_BUDGET=contextvars.ContextVar("ghi_operation_budget",default=None)
+
+@contextlib.contextmanager
+def operation(*,max_pages=100,max_items=10000,max_bytes=10000000,timeout=30):
+ """Set cumulative limits for a group of calls; nested scopes cannot reset them."""
+ candidate=_Budget(max_pages,max_items,max_bytes,timeout)
+ current=_BUDGET.get()
+ if current is not None:
+  raise ValueError("operation scopes cannot be nested")
+ token=_BUDGET.set(candidate)
+ try:yield
+ finally:_BUDGET.reset(token)
+
+def _bounded(fn):
+ signature=inspect.signature(fn)
+ @functools.wraps(fn)
+ def call(*args,**kwargs):
+  bound=signature.bind(*args,**kwargs)
+  timeout=bound.arguments.get("timeout",bound.arguments.get("k",{}).get("timeout",30))
+  if isinstance(timeout,bool) or not isinstance(timeout,(int,float)) or not math.isfinite(timeout) or timeout<=0:
+   raise ValueError("timeout must be positive and finite")
+  if _BUDGET.get() is not None:
+   _BUDGET.get().remaining()
+   return fn(*args,**kwargs)
+  with operation(timeout=timeout):return fn(*args,**kwargs)
+ return call
+
+def _process(argv,payload,timeout,env=None,mutating=False):
+ """Bound both pipes and wall time; never use communicate/capture_output."""
+ budget=_BUDGET.get();left=min(timeout,budget.remaining())
+ cap=budget.max_bytes-budget.bytes
+ if cap<=0:raise Error("bytes_limit")
+ try:p=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
+ except FileNotFoundError as e:raise Error("process_not_found") from e
+ except OSError as e:raise Error("process_error") from e
+ buffers=[bytearray(),bytearray()];errors=[];lock=threading.Lock();wake=threading.Event()
+ def drain(stream,index):
+  try:
+   while True:
+    chunk=stream.read1(min(65536,cap+1))
+    if not chunk:break
+    with lock:
+     available=cap-sum(map(len,buffers))
+     buffers[index].extend(chunk[:available])
+     if len(chunk)>available:
+      errors.append("bytes_limit");wake.set();return
+  except (OSError,ValueError):
+   with lock:errors.append("process_error")
+  finally:stream.close();wake.set()
+ def write():
+  try:
+   if payload:p.stdin.write(payload)
+  except (BrokenPipeError,OSError):pass
+  finally:
+   try:p.stdin.close()
+   except OSError:pass
+   wake.set()
+ threads=[threading.Thread(target=drain,args=(p.stdout,0),daemon=True),
+          threading.Thread(target=drain,args=(p.stderr,1),daemon=True),
+          threading.Thread(target=write,daemon=True)]
+ for thread in threads:thread.start()
+ deadline=min(budget.deadline,time.monotonic()+left)
+ failure=None
+ try:
+  while p.poll() is None or any(t.is_alive() for t in threads):
+   if errors:failure=errors[0];break
+   left=deadline-time.monotonic()
+   if left<=0:failure="operation_timeout";break
+   wake.wait(min(left,.02));wake.clear()
+  if not failure and errors:failure=errors[0]
+ finally:
+  if p.poll() is None:p.kill()
+  p.wait()
+ if failure:raise Error(failure,mutating)
+ raw,err=map(bytes,buffers)
+ try:budget.charge("bytes",len(raw)+len(err))
+ except Error as e:raise Error(e.code,mutating) from e
+ return p.returncode,raw,err
+
+_HTTP_CODES={401:3,403:4,404:5,422:6}
+_HTTP_ERRORS={3:"authentication_required",4:"permission_or_rate_limit",5:"not_found_or_inaccessible",
+              6:"rejected",7:"http_error",8:"transport_error",9:"bytes_limit",10:"server_error"}
+
+def _http_worker():
+ """Private isolated urllib worker, killed by the parent on deadline/overflow."""
+ spec=json.load(sys.stdin)
+ data=None if spec["payload"] is None else json.dumps(spec["payload"]).encode()
+ req=urllib.request.Request(spec["url"],data=data,headers=spec["headers"],method=spec["method"])
+ try:
+  with urllib.request.urlopen(req,timeout=spec["timeout"]) as response:
+   # At most cap+1 bytes are ever retained by this worker.
+   raw=response.read(spec["cap"]+1)
+   if len(raw)>spec["cap"]:return 9
+   sys.stdout.buffer.write(raw)
+ except urllib.error.HTTPError as e:
+  e.close()
+  return _HTTP_CODES.get(e.code,10 if e.code>=500 else 7)
+ except (urllib.error.URLError,TimeoutError,OSError):return 8
+ return 0
+
+class Page:
+ """Optional injected response carrying data and HTTP Link headers."""
+ def __init__(self,data,headers=None):self.data=data;self.headers=headers or {}
+
+def _page(path,transport,timeout,requester=None):
+ budget=_BUDGET.get();budget.charge("pages",1)
+ result=(requester or request)("GET",path,transport=transport,timeout=min(timeout,budget.remaining()))
+ budget.remaining()
+ if requester is not None:
+  data=result.data if isinstance(result,Page) else result
+  budget.charge("bytes",len(json.dumps(data).encode()))
+ if isinstance(result,Page):
+  if not isinstance(result.headers,dict):raise Error("invalid_pagination_link")
+  return result.data,result.headers
+ return result,None
+
+def _next_page(path,headers,count):
+ link=None if headers is None else next((v for k,v in headers.items() if isinstance(k,str) and k.lower()=="link"),"")
+ if link is not None:
+  if not isinstance(link,str):raise Error("invalid_pagination_link")
+  candidates=re.findall(r'<([^>]+)>\s*;\s*rel=["\']?next["\']?',link)
+  if len(candidates)>1:raise Error("invalid_pagination_link")
+  if not candidates:return None
+  target=urllib.parse.urlsplit(urllib.parse.urljoin(API+"/"+path,candidates[0]))
+  before=urllib.parse.urlsplit(API+"/"+path)
+  old=urllib.parse.parse_qs(before.query);new=urllib.parse.parse_qs(target.query)
+  try:valid_page=new.pop("page")==[str(int(old.pop("page")[0])+1)]
+  except (KeyError,ValueError,IndexError):raise Error("invalid_pagination_link")
+  if target.scheme!="https" or target.netloc!="api.github.com" or target.path!=before.path or target.fragment or new!=old or not valid_page:
+   raise Error("invalid_pagination_link")
+  return target.path.lstrip("/")+"?"+target.query
+ if count<100:return None
+ parsed=urllib.parse.urlsplit(path);query=urllib.parse.parse_qs(parsed.query)
+ query["page"]=[str(int(query["page"][0])+1)]
+ return parsed.path+"?"+urllib.parse.urlencode(query,doseq=True)
+
 def now(): return datetime.now(timezone.utc).isoformat()
 def repo(x):
  if not isinstance(x,str) or not REPO.fullmatch(x): raise ValueError("repo must be OWNER/REPO")
@@ -15,32 +178,33 @@ def gh_available(): return shutil.which("gh") is not None
 def _gh(method,path,payload=None,timeout=30,mutating=False):
  env=os.environ.copy(); env.update(GH_PROMPT_DISABLED="1",GH_PAGER="cat"); env.pop("GH_REPO",None)
  a=["gh","api","--method",method,path]+(["--input","-"] if payload is not None else [])
- try:p=subprocess.run(a,input=json.dumps(payload) if payload is not None else None,capture_output=True,text=True,encoding="utf-8",timeout=timeout,env=env)
- except FileNotFoundError as e: raise Error("gh_not_found") from e
- except subprocess.TimeoutExpired as e: raise Error("timeout",mutating) from e
- except OSError as e: raise Error("process_error",mutating) from e
- if p.returncode:
-  s=(p.stderr or p.stdout).lower()
-  c="authentication_required" if p.returncode==4 else "cancelled" if p.returncode==2 else "gh_failed"
-  if "http 403" in s:c="permission_or_rate_limit"
-  if "http 404" in s:c="not_found_or_inaccessible"
-  raise Error(c,mutating and ("http 5" in s or "timed out" in s))
- if not p.stdout.strip(): return None
- try:return json.loads(p.stdout)
- except json.JSONDecodeError as e: raise Error("invalid_json",mutating) from e
+ try:code,raw,err=_process(a,None if payload is None else json.dumps(payload).encode(),timeout,env,mutating)
+ except Error as e:
+  if e.code=="process_not_found":raise Error("gh_not_found") from e
+  raise
+ if code:
+  message=(err or raw).decode("utf-8",errors="replace").lower()
+  c="authentication_required" if code==4 else "cancelled" if code==2 else "gh_failed"
+  if "http 403" in message:c="permission_or_rate_limit"
+  if "http 404" in message:c="not_found_or_inaccessible"
+  raise Error(c,mutating and ("http 5" in message or "timed out" in message))
+ if not raw.strip():return None
+ try:return json.loads(raw.decode("utf-8"))
+ except (UnicodeError,json.JSONDecodeError) as e:raise Error("invalid_json",mutating) from e
+
 def _url(method,path,payload=None,timeout=30,mutating=False):
- h={"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"gh_identity/0.1"}
- if token():h["Authorization"]="Bearer "+token()
- data=None if payload is None else json.dumps(payload).encode()
- q=urllib.request.Request(API+"/"+path.lstrip("/"),data=data,headers=h,method=method)
- try:
-  with urllib.request.urlopen(q,timeout=timeout) as r: raw=r.read()
- except urllib.error.HTTPError as e:
-  raise Error({401:"authentication_required",403:"permission_or_rate_limit",404:"not_found_or_inaccessible",422:"rejected"}.get(e.code,"http_error"),mutating and e.code>=500) from e
- except (urllib.error.URLError,TimeoutError,OSError) as e: raise Error("transport_error",mutating) from e
+ headers={"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"gh_identity/0.1"}
+ if token():headers["Authorization"]="Bearer "+token()
+ budget=_BUDGET.get()
+ spec={"url":API+"/"+path.lstrip("/"),"method":method,"payload":payload,"headers":headers,
+       "timeout":min(timeout,budget.remaining()),"cap":budget.max_bytes-budget.bytes}
+ # Credentials go over stdin, never command-line arguments or diagnostics.
+ code,raw,err=_process([sys.executable,os.path.abspath(__file__),"--_http-worker"],json.dumps(spec).encode(),timeout,mutating=mutating)
+ if code:raise Error(_HTTP_ERRORS.get(code,"transport_error"),mutating and code not in (3,4,5,6))
  if not raw:return None
- try:return json.loads(raw.decode())
- except (UnicodeError,json.JSONDecodeError) as e: raise Error("invalid_json",mutating) from e
+ try:return json.loads(raw.decode("utf-8"))
+ except (UnicodeError,json.JSONDecodeError) as e:raise Error("invalid_json",mutating) from e
+
 def request(method,path,payload=None,transport="auto",timeout=30,mutating=False):
  if transport not in ("auto","gh","urllib"):raise ValueError("bad transport")
  if transport=="gh" or (transport=="auto" and gh_available()):
@@ -48,14 +212,15 @@ def request(method,path,payload=None,transport="auto",timeout=30,mutating=False)
   except Error as e:
    if transport=="gh" or e.code not in ("gh_not_found","authentication_required"):raise
  return _url(method,path,payload,timeout,mutating)
-def pages(path,transport="auto",timeout=30):
- out=[]; p=1; sep="&" if "?" in path else "?"
- while True:
-  x=request("GET",f"{path}{sep}per_page=100&page={p}",transport=transport,timeout=timeout)
-  if not isinstance(x,list):raise Error("invalid_json")
-  out+=x
-  if len(x)<100:return out
-  p+=1
+
+def pages(path,transport="auto",timeout=30,*,requester=None):
+ out=[];sep="&" if "?" in path else "?";path+=sep+"per_page=100&page=1"
+ while path:
+  data,headers=_page(path,transport,timeout,requester)
+  if not isinstance(data,list):raise Error("invalid_json")
+  _BUDGET.get().charge("items",len(data));out.extend(data)
+  path=_next_page(path,headers,len(data))
+ return out
 def capabilities():
  return {"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],"gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token())}
 def repository(r,**k):
@@ -87,9 +252,10 @@ def pull_requests(r,state="open",max_items=100,max_pages=10,transport="auto",tim
  if not isinstance(max_pages,int) or max_pages<1:raise ValueError("max_pages must be positive")
  rows=[];page=1;exhausted=False;pages_fetched=0
  while page<=max_pages and len(rows)<max_items:
-  batch=request("GET",f"repos/{r}/pulls?state={state}&sort=updated&direction=desc&per_page=100&page={page}",transport=transport,timeout=timeout)
+  batch,_headers=_page(f"repos/{r}/pulls?state={state}&sort=updated&direction=desc&per_page=100&page={page}",transport=transport,timeout=timeout)
   pages_fetched += 1
   if not isinstance(batch,list):raise Error("invalid_json")
+  _BUDGET.get().charge("items",len(batch))
   consumed=0
   for x in batch:
    consumed+=1
@@ -109,10 +275,11 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
  if not isinstance(max_pages,int) or max_pages<1:raise ValueError("max_pages must be positive")
  rows=[];page=1;exhausted=False;pages_fetched=0
  while page<=max_pages and len(rows)<max_items:
-  batch=request("GET",f"repos/{r}/actions/runs?per_page=100&page={page}",transport=transport,timeout=timeout)
+  batch,_headers=_page(f"repos/{r}/actions/runs?per_page=100&page={page}",transport=transport,timeout=timeout)
   pages_fetched += 1
   if not isinstance(batch,dict) or not isinstance(batch.get("workflow_runs"),list):raise Error("invalid_json")
   raw=batch["workflow_runs"]
+  _BUDGET.get().charge("items",len(raw))
   consumed=0
   for x in raw:
    consumed+=1
@@ -243,16 +410,20 @@ def summarize_checks(rows,expected_count,min_checks=1):
  else:state="green"
  return {"state":state,"complete":complete,"expected_count":expected_count,"count":len(normalized),"min_checks":min_checks,"checks":normalized}
 
-def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
- min_checks=_min_checks(min_checks)
- r=repo(r);rows=[];page=1;expected=None
- while True:
-  d=request("GET",f"repos/{r}/commits/{sha}/check-runs?per_page=100&page={page}",transport=transport,timeout=timeout)
+def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30,*,requester=None):
+ min_checks=_min_checks(min_checks);r=repo(r);rows=[];expected=None
+ path=f"repos/{r}/commits/{sha}/check-runs?per_page=100&page=1"
+ while path:
+  d,headers=_page(path,transport,timeout,requester)
   if not isinstance(d,dict) or not isinstance(d.get("check_runs"),list):raise Error("invalid_json")
-  if expected is None:expected=d.get("total_count")
-  rows += d["check_runs"]
-  if len(d["check_runs"])<100:break
-  page+=1
+  total=d.get("total_count")
+  if type(total) is not int or total<0:raise Error("pagination_incomplete")
+  if expected is None:expected=total
+  elif total!=expected:raise Error("pagination_incomplete")
+  batch=d["check_runs"]
+  _BUDGET.get().charge("items",len(batch));rows.extend(batch)
+  if len(rows)>expected:raise Error("pagination_incomplete")
+  path=_next_page(path,headers,len(batch))
  summary=summarize_checks(rows,expected,min_checks)
  return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,**summary,"observed_at":now()}
 
@@ -303,10 +474,10 @@ def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
  if attempt is not None:base+=f"/attempts/{attempt}"
  rows=[];page=1;total=None
  while True:
-  data=request("GET",f"{base}/jobs?per_page=100&page={page}",transport=transport,timeout=timeout)
+  data,_headers=_page(f"{base}/jobs?per_page=100&page={page}",transport=transport,timeout=timeout)
   if not isinstance(data,dict) or not isinstance(data.get("jobs"),list):raise Error("invalid_json")
   if total is None:total=data.get("total_count")
-  batch=data["jobs"];rows.extend(batch)
+  batch=data["jobs"];_BUDGET.get().charge("items",len(batch));rows.extend(batch)
   if len(batch)<100:break
   page+=1
   if page>100:raise Error("pagination_incomplete")
@@ -412,7 +583,7 @@ def compare_sha(local,remote_sha):
  rsha=str(remote_sha).lower() if remote_sha else None
  return {"schema":"gh-identity-comparison/1","local_sha":lsha,"remote_sha":rsha,"comparable":bool(lsha and rsha),"same":(lsha==rsha) if lsha and rsha else None,"observed_at":now()}
 
-def main(argv=None):
+def _main(argv=None):
  argv=list(sys.argv[1:] if argv is None else argv)
  transport="auto"
  if "--transport" in argv:
@@ -421,7 +592,7 @@ def main(argv=None):
   transport=argv[i+1]
   if transport not in ("auto","gh","urllib"): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
   del argv[i:i+2]
- a=argparse.ArgumentParser();s=a.add_subparsers(dest="cmd",required=True)
+ a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
  s.add_parser("capabilities")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("repos");x.add_argument("owner")
@@ -460,4 +631,24 @@ def main(argv=None):
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
  return 0
-if __name__=="__main__":raise SystemExit(main())
+def main(argv=None):
+ args=list(sys.argv[1:] if argv is None else argv);limits={}
+ try:
+  for flag,key,convert in (("--max-pages","max_pages",int),("--max-items","max_items",int),
+                           ("--max-bytes","max_bytes",int),("--timeout","timeout",float)):
+   if flag in args:
+    index=args.index(flag)
+    if index+1>=len(args):raise ValueError("missing limit")
+    limits[key]=convert(args[index+1]);del args[index:index+2]
+  with operation(**limits):return _main(args)
+ except (ValueError,Error) as e:
+  print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr)
+  return 2
+
+# One outer deadline/budget is shared across nested calls and gh fallback.
+for _name in ("_gh","_url","request","pages","repository","repositories","pr","comments","reviews",
+              "pull_requests","run_history","runs","variable","set_variable","post_comment",
+              "resolve_ref","source_identity","checks_for_sha","observe_pr","workflow","run","jobs"):
+ globals()[_name]=_bounded(globals()[_name])
+if __name__=="__main__":
+ raise SystemExit(_http_worker() if sys.argv[1:]==["--_http-worker"] else main())
