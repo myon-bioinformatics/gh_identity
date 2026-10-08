@@ -160,6 +160,73 @@ class T(unittest.TestCase):
   x=g.compare_sha({"sha":None},"d"*40)
   self.assertFalse(x["comparable"]); self.assertIsNone(x["same"])
 
+ def test_source_identity_resolves_commit_then_regular_file(self):
+  calls=[]
+  def req(method,path,**kwargs):
+   calls.append(path)
+   if "/commits/" in path:return {"sha":"A"*40}
+   if "/git/trees/" in path:return {"tree":[{"path":"dir/a b.py","type":"blob","mode":"100644","sha":"B"*40}]}
+   return {"type":"file","sha":"B"*40,"size":123}
+  with mock.patch.object(g,"request",side_effect=req):
+   x=g.source_identity("o/r","main","dir/a b.py")
+  self.assertEqual(x["commit_sha"],"a"*40); self.assertEqual(x["blob_sha"],"b"*40)
+  self.assertEqual(x["size"],123); self.assertEqual(x["path"],"dir/a b.py")
+  self.assertIn("contents/dir/a%20b.py?ref="+"a"*40,calls[1])
+  self.assertIn("git/trees/"+"a"*40+"?recursive=1",calls[2])
+ def test_source_identity_rejects_non_regular_source(self):
+  def req(method,path,**kwargs):
+   return {"sha":"a"*40} if "/commits/" in path else {"type":"symlink","sha":"b"*40,"size":1}
+  with mock.patch.object(g,"request",side_effect=req):
+   with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","link")
+  self.assertEqual(cm.exception.code,"source_not_regular_file")
+ def test_source_identity_rejects_unsafe_path_before_network(self):
+  with mock.patch.object(g,"request") as req:
+   with self.assertRaises(ValueError):g.source_identity("o/r","main","../secret")
+  req.assert_not_called()
+ def test_source_identity_rejects_bad_blob_identity(self):
+  def req(method,path,**kwargs):
+   if "/commits/" in path:return {"sha":"a"*40}
+   if "/git/trees/" in path:return {"tree":[{"path":"a.py","type":"blob","mode":"100644","sha":"short"}]}
+   return {"type":"file","sha":"short","size":1}
+  with mock.patch.object(g,"request",side_effect=req):
+   with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","a.py")
+  self.assertEqual(cm.exception.code,"invalid_blob")
+
+ def test_source_identity_rejects_symlink_to_file_contents_shape(self):
+  def req(method,path,**kwargs):
+   if "/commits/" in path:return {"sha":"a"*40}
+   if "/git/trees/" in path:return {"tree":[{"path":"link","type":"blob","mode":"120000","sha":"b"*40}]}
+   # GitHub Contents API may expose the target file shape for an in-repo symlink.
+   return {"type":"file","sha":"b"*40,"size":1}
+  with mock.patch.object(g,"request",side_effect=req):
+   with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","link")
+  self.assertEqual(cm.exception.code,"source_not_regular_file")
+
+ def test_source_identity_rejects_submodule_even_if_contents_says_file(self):
+  def req(method,path,**kwargs):
+   if "/commits/" in path:return {"sha":"a"*40}
+   return {"type":"file","sha":"b"*40,"size":1,"submodule_git_url":"https://example.invalid/x"}
+  with mock.patch.object(g,"request",side_effect=req):
+   with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","vendor")
+  self.assertEqual(cm.exception.code,"source_not_regular_file")
+
+ def test_source_identity_accepts_executable_regular_file(self):
+  def req(method,path,**kwargs):
+   if "/commits/" in path:return {"sha":"a"*40}
+   if "/git/trees/" in path:return {"tree":[{"path":"tool","type":"blob","mode":"100755","sha":"b"*40}]}
+   return {"type":"file","sha":"b"*40,"size":7}
+  with mock.patch.object(g,"request",side_effect=req):
+   self.assertEqual(g.source_identity("o/r","main","tool")["blob_sha"],"b"*40)
+
+ def test_source_identity_rejects_tree_contents_sha_mismatch(self):
+  def req(method,path,**kwargs):
+   if "/commits/" in path:return {"sha":"a"*40}
+   if "/git/trees/" in path:return {"tree":[{"path":"a.py","type":"blob","mode":"100644","sha":"c"*40}]}
+   return {"type":"file","sha":"b"*40,"size":1}
+  with mock.patch.object(g,"request",side_effect=req):
+   with self.assertRaises(g.Error) as cm:g.source_identity("o/r","main","a.py")
+  self.assertEqual(cm.exception.code,"source_identity_mismatch")
+
 
  def test_pull_request_discovery_walks_older_pages_and_is_bounded(self):
   calls=[]
