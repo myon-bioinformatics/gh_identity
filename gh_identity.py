@@ -168,12 +168,36 @@ def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30,sa
   if not re.fullmatch(r"<!-- gh-identity:[A-Za-z0-9_.:-]+ -->",marker):raise ValueError("invalid marker")
   for x in pages(f"repos/{r}/issues/{n}/comments",transport,timeout):
    if marker in (x.get("body")or""):return {"schema":"gh-identity-comment-write/1","status":"already_exists","id":x.get("id"),"url":x.get("html_url"),"marker":marker}
-  body=marker+"\\n"+body
+  body=marker+"\n"+body
  if not write:return {"schema":"gh-identity-comment-write/1","status":"planned","chars":len(body),"marker":marker,"body":body}
+ out={"schema":"gh-identity-comment-write/1","marker":marker,"mutation_status":"not_attempted","verification_status":"not_attempted"}
  try:
   d=request("POST",f"repos/{r}/issues/{n}/comments",{"body":body},transport,timeout,True)
-  return {"schema":"gh-identity-comment-write/1","status":"verified","id":d.get("id"),"url":d.get("html_url"),"marker":marker}
- except Error as e:return {"schema":"gh-identity-comment-write/1","status":"mutation_uncertain" if e.uncertain else "mutation_failed","error":e.code,"marker":marker}
+ except Error as e:
+  out.update(status="mutation_uncertain" if e.uncertain else "mutation_failed",mutation_status="uncertain" if e.uncertain else "failed",error=e.code)
+  return out
+ # A successful transport is not evidence of a valid comment identity.
+ cid=d.get("id") if isinstance(d,dict) else None
+ if type(cid) is not int or cid<1:
+  out.update(status="mutation_uncertain",mutation_status="uncertain",error="invalid_comment_response")
+  return out
+ out.update(id=cid,mutation_status="succeeded")
+ try:
+  got=request("GET",f"repos/{r}/issues/comments/{cid}",transport=transport,timeout=timeout)
+ except Error as e:
+  out.update(status="verification_failed",verification_status="failed",verification_error=e.code)
+  return out
+ expected_issue=f"{API}/repos/{r}/issues/{n}"
+ expected_url=f"https://github.com/{r}/issues/{n}#issuecomment-{cid}"
+ # PR conversation comments may use /pull/ in their human-facing URL.
+ urls={expected_url,f"https://github.com/{r}/pull/{n}#issuecomment-{cid}"}
+ verified=(isinstance(got,dict) and type(got.get("id")) is int and got.get("id")==cid
+           and got.get("issue_url")==expected_issue and got.get("body")==body
+           and got.get("html_url") in urls)
+ out.update(status="verified" if verified else "verification_mismatch",
+            verification_status="verified" if verified else "mismatch",verified=verified)
+ if verified:out["url"]=got["html_url"]
+ return out
 
 def resolve_ref(r,ref,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/commits/{urllib.parse.quote(ref,safe='')}",transport=transport,timeout=timeout)
@@ -420,5 +444,8 @@ def main(argv=None):
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
- print(json.dumps(o,ensure_ascii=False));return 0
+ print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd in ("comment","variable-set"):
+  return 0 if o.get("status") in ("planned","already_exists","verified") else 1
+ return 0
 if __name__=="__main__":raise SystemExit(main())

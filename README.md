@@ -48,3 +48,21 @@ python gh_identity.py step-url OWNER/REPO 20 91 7 --line 1
 ```
 
 The observation helper requires a unique matching job, matching run/attempt and an existing step number. It does not infer the step number from list position. The pure builder formats explicitly supplied identities; it does not establish that a job, step or log line exists. A line anchor selects the GitHub UI location, not a log API endpoint. Step links are independent of log availability and bounded log retrieval remains a separate Issue #17 phase.
+
+## Write receipts and CLI exit codes
+
+Comment writes require an operation marker. A successful POST alone does not
+produce a verified receipt: the returned positive comment ID is read back and
+its repository/issue identity, exact body (including marker), and web URL must
+match. Invalid POST identity is `mutation_uncertain`; failed readback is
+`verification_failed`; differing readback is `verification_mismatch`. A receipt
+retains a known comment ID and successful mutation state even if verification
+fails. The implementation never automatically reposts after these outcomes.
+
+For `comment` and `variable-set`, CLI exit 0 means `planned`, `already_exists`,
+or `verified`; other receipt states return 1. Argument/transport exceptions
+handled by the CLI return 2. Always inspect the receipt: a nonzero exit does
+not mean a write did not happen, and must not trigger a blind retry.
+
+This covers existing comment and variable-set operations only. Variable deletion,
+workflow dispatch and guarded PR merge remain separate unfinished work in Issue #2.
