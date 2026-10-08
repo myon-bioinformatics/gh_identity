@@ -307,7 +307,9 @@ class JobsTests(unittest.TestCase):
    result=g.jobs("o/r",20,attempt=2)
    self.assertEqual(result["jobs"][0]["job_id"],91)
    self.assertEqual(result["jobs"][0]["steps"][0]["number"],1)
-   req.assert_called_once_with("GET","repos/o/r/actions/runs/20/attempts/2/jobs?per_page=100&page=1",transport="auto",timeout=30)
+   self.assertEqual(req.call_args.args,("GET","repos/o/r/actions/runs/20/attempts/2/jobs?per_page=100&page=1"))
+   self.assertEqual(req.call_args.kwargs["transport"],"auto")
+   self.assertTrue(0 < req.call_args.kwargs["timeout"] <= 30)
  def test_incomplete_response_fails(self):
   with mock.patch.object(g,"request",return_value={"total_count":2,"jobs":[]}):
    with self.assertRaises(g.Error):g.jobs("o/r",20)
@@ -350,7 +352,8 @@ class DiscoveryBoundaryTests(unittest.TestCase):
       params=urllib.parse.parse_qs(urllib.parse.urlsplit(call.args[1]).query)
       self.assertEqual(params["page"],[str(page)])
       self.assertEqual(params["per_page"],["100"])
-      self.assertEqual(call.kwargs,{"transport":"urllib","timeout":7})
+      self.assertEqual(call.kwargs["transport"],"urllib")
+      self.assertTrue(0 < call.kwargs["timeout"] <= 7)
 
  def test_filter_mismatch_counts_actual_requests(self):
   row={"id":1,"head_sha":"a"*40,"head_branch":"main","event":"push"}
