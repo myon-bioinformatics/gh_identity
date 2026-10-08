@@ -88,13 +88,15 @@ def pull_requests(r,state="open",max_items=100,max_pages=10,transport="auto",tim
   batch=request("GET",f"repos/{r}/pulls?state={state}&sort=updated&direction=desc&per_page=100&page={page}",transport=transport,timeout=timeout)
   pages_fetched += 1
   if not isinstance(batch,list):raise Error("invalid_json")
+  consumed=0
   for x in batch:
+   consumed+=1
    rows.append({"number":x.get("number"),"title":x.get("title"),"state":x.get("state"),"draft":bool(x.get("draft")),
     "head_sha":(x.get("head")or{}).get("sha"),"head_ref":(x.get("head")or{}).get("ref"),
     "base_sha":(x.get("base")or{}).get("sha"),"base_ref":(x.get("base")or{}).get("ref"),
     "created_at":x.get("created_at"),"updated_at":x.get("updated_at"),"closed_at":x.get("closed_at"),"merged_at":x.get("merged_at"),"url":x.get("html_url")})
    if len(rows)>=max_items:break
-  if len(batch)<100:exhausted=True;break
+  if len(batch)<100:exhausted=consumed==len(batch);break
   page+=1
  return {"schema":"gh-identity-pr-discovery/1","repository":r,"state":state,"pull_requests":rows,
   "count":len(rows),"pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted}
@@ -109,7 +111,9 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
   pages_fetched += 1
   if not isinstance(batch,dict) or not isinstance(batch.get("workflow_runs"),list):raise Error("invalid_json")
   raw=batch["workflow_runs"]
+  consumed=0
   for x in raw:
+   consumed+=1
    row={"run_id":x.get("id"),"attempt":x.get("run_attempt"),"workflow_id":x.get("workflow_id"),"name":x.get("name"),
     "status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"head_branch":x.get("head_branch"),
     "event":x.get("event"),"created_at":x.get("created_at"),"updated_at":x.get("updated_at"),"run_started_at":x.get("run_started_at"),"url":x.get("html_url")}
@@ -118,7 +122,7 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
    if event is not None and row["event"]!=event:continue
    rows.append(row)
    if len(rows)>=max_items:break
-  if len(raw)<100:exhausted=True;break
+  if len(raw)<100:exhausted=consumed==len(raw);break
   page+=1
  return {"schema":"gh-identity-run-discovery/1","repository":r,"runs":rows,"count":len(rows),
   "pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted,
@@ -176,23 +180,36 @@ def resolve_ref(r,ref,transport="auto",timeout=30):
  sha=d.get("sha") if isinstance(d,dict) else None
  if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha):raise Error("invalid_commit")
  return {"schema":"gh-identity-ref/1","repository":r,"ref":ref,"sha":sha.lower(),"observed_at":now()}
+def _min_checks(value):
+ if not isinstance(value,int) or isinstance(value,bool) or value<1:raise ValueError("min_checks must be at least 1")
+ return value
+
+def summarize_checks(rows,expected_count,min_checks=1):
+ min_checks=_min_checks(min_checks)
+ if not isinstance(rows,list):raise ValueError("check rows must be a list")
+ normalized=[{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("url") or x.get("html_url"),"annotations_count":x.get("annotations_count",(x.get("output")or{}).get("annotations_count",0))} for x in rows]
+ complete=isinstance(expected_count,int) and not isinstance(expected_count,bool) and expected_count==len(normalized)
+ bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
+ if not complete:state="incomplete"
+ elif len(normalized)<min_checks:state="pending"
+ elif any(x["status"]!="completed" for x in normalized):state="pending"
+ elif any(x["conclusion"] in bad for x in normalized):state="failed"
+ elif not any(x["conclusion"]=="success" for x in normalized):state="failed"
+ else:state="green"
+ return {"state":state,"complete":complete,"expected_count":expected_count,"count":len(normalized),"min_checks":min_checks,"checks":normalized}
+
 def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30):
+ min_checks=_min_checks(min_checks)
  r=repo(r);rows=[];page=1;expected=None
  while True:
   d=request("GET",f"repos/{r}/commits/{sha}/check-runs?per_page=100&page={page}",transport=transport,timeout=timeout)
   if not isinstance(d,dict) or not isinstance(d.get("check_runs"),list):raise Error("invalid_json")
   if expected is None:expected=d.get("total_count")
-  batch=d["check_runs"];rows += [{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("html_url")} for x in batch]
-  if len(batch)<100:break
+  rows += d["check_runs"]
+  if len(d["check_runs"])<100:break
   page+=1
- complete=isinstance(expected,int) and expected==len(rows)
- bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
- if not complete:state="incomplete"
- elif len(rows)<min_checks:state="pending"
- elif any(x["status"]!="completed" for x in rows):state="pending"
- elif any(x["conclusion"] in bad for x in rows):state="failed"
- else:state="green"
- return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,"state":state,"complete":complete,"expected_count":expected,"count":len(rows),"min_checks":min_checks,"checks":rows,"observed_at":now()}
+ summary=summarize_checks(rows,expected,min_checks)
+ return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,**summary,"observed_at":now()}
 
 def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
  before=pr(r,n,transport=transport,timeout=timeout)
@@ -206,6 +223,59 @@ def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
 def workflow(r,w,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/workflows/{urllib.parse.quote(str(w),safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-workflow/1","repository":r,"id":d.get("id"),"name":d.get("name"),"path":d.get("path"),"state":d.get("state"),"url":d.get("html_url"),"observed_at":now()}
+
+def run(r, run_id, attempt=None, transport="auto", timeout=30):
+ """Read an exact Actions run and optionally one exact rerun attempt."""
+ r=repo(r)
+ def positive(x, label):
+  if isinstance(x,bool) or not str(x).isdigit() or int(x)<1:raise ValueError("invalid " + label + " identifier")
+  return int(x)
+ run_id=positive(run_id, "run")
+ if attempt is not None:attempt=positive(attempt, "attempt")
+ path=f"repos/{r}/actions/runs/{run_id}"
+ if attempt is not None:path+=f"/attempts/{attempt}"
+ d=request("GET",path,transport=transport,timeout=timeout)
+ if not isinstance(d,dict) or d.get("id")!=run_id:raise Error("invalid_json")
+ actual=d.get("run_attempt")
+ if attempt is not None and actual!=attempt:raise Error("attempt_mismatch")
+ return {"schema":"gh-identity-run/1","repository":r,
+  "workflow_id":d.get("workflow_id"),"run_id":d["id"],"attempt":actual,
+  "head_sha":d.get("head_sha"),"event":d.get("event"),
+  "status":d.get("status"),"conclusion":d.get("conclusion"),
+  "created_at":d.get("created_at"),"url":d.get("html_url"),"observed_at":now()}
+
+
+def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
+ """Read all jobs and their steps for one Actions run or exact attempt."""
+ r=repo(r)
+ def ident(value):
+  if isinstance(value,bool) or not str(value).isdigit() or int(value)<1:
+   raise ValueError("invalid job lookup identifier")
+  return int(value)
+ run_id=ident(run_id)
+ if attempt is not None:attempt=ident(attempt)
+ base=f"repos/{r}/actions/runs/{run_id}"
+ if attempt is not None:base+=f"/attempts/{attempt}"
+ rows=[];page=1;total=None
+ while True:
+  data=request("GET",f"{base}/jobs?per_page=100&page={page}",transport=transport,timeout=timeout)
+  if not isinstance(data,dict) or not isinstance(data.get("jobs"),list):raise Error("invalid_json")
+  if total is None:total=data.get("total_count")
+  batch=data["jobs"];rows.extend(batch)
+  if len(batch)<100:break
+  page+=1
+  if page>100:raise Error("pagination_incomplete")
+ if not isinstance(total,int) or len(rows)!=total:raise Error("pagination_incomplete")
+ out=[]
+ for x in rows:
+  out.append({"job_id":x.get("id"),"run_id":x.get("run_id"),"attempt":x.get("run_attempt"),
+   "name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),
+   "started_at":x.get("started_at"),"completed_at":x.get("completed_at"),
+   "url":x.get("html_url"),"steps":[{"number":step.get("number"),"name":step.get("name"),
+   "status":step.get("status"),"conclusion":step.get("conclusion")} for step in (x.get("steps") or [])]})
+ return {"schema":"gh-identity-jobs/1","repository":r,"run_id":run_id,"attempt":attempt,
+  "complete":True,"count":len(out),"jobs":out,"observed_at":now()}
+
 def gh_help(*parts,timeout=15):
  if not gh_available():raise Error("gh_not_found")
  env=os.environ.copy();env.update(GH_PROMPT_DISABLED="1",GH_PAGER="cat");env.pop("GH_REPO",None)
@@ -260,6 +330,9 @@ def main(argv=None):
  x=s.add_parser("comments");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("runs");x.add_argument("repo")
+ x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
+ x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
+ x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
@@ -273,6 +346,9 @@ def main(argv=None):
   elif ns.cmd=="comments":o=comments(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
+  elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
+  elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
+  elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
   else:
