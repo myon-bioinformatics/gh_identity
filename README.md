@@ -141,3 +141,56 @@ honor the supplied remaining timeout. GHI checks elapsed time and charges the
 serialized payload size after they return; it cannot interrupt arbitrary Python
 callbacks. Existing consumer deployment/vendor updates remain tracked in #4;
 this interface and its parity fixtures provide the migration seam.
+
+## Issues and cross-repository PR search
+
+```bash
+# Exact Issue body, state and identity (a PR number is rejected)
+python gh_identity.py issue myon-bioinformatics/gh_identity 20
+# Repository Issues only, excluding PRs
+python gh_identity.py issues myon-bioinformatics/gh_identity --state open
+# Existing repository PR discovery, now reachable from the CLI
+python gh_identity.py prs myon-bioinformatics/gh_identity --state all
+# Cross-repository PR search under a user account
+python gh_identity.py search 'user:myon-bioinformatics is:open' --kind pr
+# Organization search; use the actual organization login
+python gh_identity.py search 'org:YOUR_ORG is:closed is:unmerged' --kind pr --sort created
+# Issue search by labels, author, text or date
+python gh_identity.py search 'user:myon-bioinformatics is:open label:bug' --kind issue --limit 50
+```
+
+Python entry points are `issue(repo, number)`, `issues(repo, state="open")`,
+`pull_requests(repo, state="open")`, and
+`search(query, kind="pr", sort="updated", order="desc")`. All share the existing
+stdlib transport, gh preference, urllib fallback, and cumulative operation budget.
+No new runtime dependency or write operation is introduced.
+
+Search accepts GitHub search syntax, including multiple `repo:` qualifiers,
+`user:`/`org:`, `is:open`/`is:closed`, `author:`, `assignee:`, `label:`,
+`created:`/`updated:`, and PR-specific `is:merged`/`is:unmerged`, `draft:`,
+`head:`/`base:`. GHI appends the selected `is:pr` or `is:issue`; do not supply a
+contradictory kind. Search hits retain repository + number + kind + URL, so the
+same number in different repositories is unambiguous. A free-text `60` is not an
+exact PR-number selector; use `pr OWNER/REPO 60` for exact identity.
+
+`--sort` selects `updated`, `created`, `comments`, or `best-match`; `--order`
+selects `asc`/`desc`. Discovery `--limit` and `--page-limit` default to 100 items
+and 10 pages (`max_items`/`max_pages` in Python). These are separate from the
+existing cumulative `--max-items`/`--max-pages`/`--max-bytes`/`--timeout` limits.
+Global limits raise errors rather than returning a successful partial result.
+Issue listing counts filtered PRs against those global budgets.
+
+Discovery output includes `complete`/`truncated`; search also retains
+`total_count`, `incomplete_results`, and `scope: accessible_search_results`.
+GitHub search exposes at most 1,000 results per query and may omit inaccessible
+or not-yet-indexed data. `complete` only means the observed search response total
+was collected without reported incompleteness, **not** complete fleet enumeration
+or a transactional snapshot. Changing totals and duplicate identities fail;
+short/incomplete pages and discovery limits never become complete results.
+Narrow large searches using repository/date filters. Permission, rate-limit and
+transport failures remain errors, not an empty successful search.
+
+Lists/searches omit full bodies; `issue` returns the selected Issue body. PR hits
+are search observations, not full PR head/base/check or mergeability evidence;
+use `pr`/`observe_pr` to re-read exact current identity before subsequent work.
+See the [GitHub search contract](https://docs.github.com/en/rest/search/search#search-issues-and-pull-requests).

@@ -275,6 +275,101 @@ def pull_requests(r,state="open",max_items=100,max_pages=10,transport="auto",tim
  return {"schema":"gh-identity-pr-discovery/1","repository":r,"state":state,"pull_requests":rows,
   "count":len(rows),"pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted}
 
+
+def _issue_row(d,expected_repo=None,expected_number=None,kind=None,body=False):
+ if not isinstance(d,dict):raise Error("invalid_issue_identity")
+ number=d.get("number");url=d.get("repository_url")
+ if type(number) is not int or number<1 or not isinstance(url,str) or not url.startswith(API+"/repos/"):
+  raise Error("invalid_issue_identity")
+ r=url[len(API+"/repos/"):]
+ try:repo(r)
+ except ValueError:raise Error("invalid_issue_identity")
+ actual="pr" if "pull_request" in d else "issue"
+ if (expected_repo is not None and r.lower()!=expected_repo.lower()) or (expected_number is not None and number!=expected_number) or (kind is not None and actual!=kind):
+  raise Error("invalid_issue_identity")
+ if d.get("state") not in ("open","closed") or not isinstance(d.get("title"),str):raise Error("invalid_issue_identity")
+ if d.get("html_url")!=f"https://github.com/{r}/{'pull' if actual=='pr' else 'issues'}/{number}":raise Error("invalid_issue_identity")
+ if d.get("user") is not None and not isinstance(d["user"],dict):raise Error("invalid_issue_identity")
+ row={"repository":r,"number":number,"kind":actual,"title":d["title"],"state":d["state"],
+      "state_reason":d.get("state_reason"),"url":d["html_url"],"author":(d.get("user") or {}).get("login"),
+      "created_at":d.get("created_at"),"updated_at":d.get("updated_at"),"closed_at":d.get("closed_at")}
+ if actual=="pr":row["draft"]=d.get("draft")
+ if body:
+  if d.get("body") is not None and not isinstance(d["body"],str):raise Error("invalid_issue_body")
+  row["body"]=d.get("body")
+ return row
+
+def issue(r,n,transport="auto",timeout=30):
+ """Read an exact Issue, rejecting PRs returned by the shared REST endpoint."""
+ r=repo(r)
+ if type(n) is not int or n<1:raise ValueError("number must be positive")
+ d=request("GET",f"repos/{r}/issues/{n}",transport=transport,timeout=timeout)
+ return {"schema":"gh-identity-issue/1",**_issue_row(d,r,n,"issue",True),"observed_at":now()}
+
+def issues(r,state="open",max_items=100,max_pages=10,transport="auto",timeout=30):
+ """List repository Issues, excluding PRs while charging all fetched rows."""
+ r=repo(r)
+ if state not in ("open","closed","all"):raise ValueError("invalid state")
+ for v in (max_items,max_pages):
+  if type(v) is not int or v<1:raise ValueError("limits must be positive integers")
+ rows=[];seen=set();complete=False;fetched=0
+ path=f"repos/{r}/issues?state={state}&sort=updated&direction=desc&per_page=100&page=1"
+ while path and fetched<max_pages:
+  batch,headers=_page(path,transport,timeout);fetched+=1
+  if not isinstance(batch,list):raise Error("invalid_json")
+  _BUDGET.get().charge("items",len(batch))
+  for index,d in enumerate(batch):
+   row=_issue_row(d,r)
+   if row["number"] in seen:raise Error("pagination_incomplete")
+   seen.add(row["number"])
+   if row["kind"]=="pr":continue
+   rows.append(row)
+   if len(rows)==max_items:break
+  next_path=_next_page(path,headers,len(batch))
+  consumed=not batch or index==len(batch)-1
+  complete=consumed and next_path is None
+  if len(rows)>=max_items or complete:break
+  path=next_path
+ return {"schema":"gh-identity-issue-discovery/1","repository":r,"state":state,"issues":rows,
+         "count":len(rows),"pages_fetched":fetched,"complete":complete,"truncated":not complete}
+
+def search(query,kind="pr",sort="updated",order="desc",max_items=100,max_pages=10,transport="auto",timeout=30):
+ """Bounded cross-repository Issue/PR search; never a fleet enumeration claim.
+
+ Pass GitHub qualifiers (repo:, org:, user:, is:open/closed, label:, author:,
+ head:, base:, is:merged/unmerged, draft:, created:, updated:) in query.
+ """
+ if not isinstance(query,str) or not query.strip():raise ValueError("query is required")
+ if kind not in ("pr","issue") or sort not in ("updated","created","comments","best-match") or order not in ("asc","desc"):
+  raise ValueError("invalid search selection")
+ for v in (max_items,max_pages):
+  if type(v) is not int or v<1:raise ValueError("limits must be positive integers")
+ effective=query.strip()+" is:"+kind
+ params={"q":effective,"order":order,"per_page":100}
+ if sort!="best-match":params["sort"]=sort
+ rows=[];seen=set();total=None;incomplete=False;complete=False;fetched=0;raw_count=0
+ for page in range(1,min(max_pages,10)+1):
+  params["page"]=page
+  data,_headers=_page("search/issues?"+urllib.parse.urlencode(params),transport,timeout);fetched+=1
+  if not isinstance(data,dict) or type(data.get("total_count")) is not int or data["total_count"]<0 or type(data.get("incomplete_results")) is not bool or not isinstance(data.get("items"),list):raise Error("invalid_search_response")
+  if total is not None and total!=data["total_count"]:raise Error("pagination_incomplete")
+  total=data["total_count"];incomplete=incomplete or data["incomplete_results"];batch=data["items"]
+  if len(batch)>100:raise Error("invalid_search_response")
+  _BUDGET.get().charge("items",len(batch));raw_count+=len(batch)
+  if raw_count>total:raise Error("pagination_incomplete")
+  for d in batch:
+   row=_issue_row(d,kind=kind);key=(row["repository"].lower(),row["number"])
+   if key in seen:raise Error("pagination_incomplete")
+   seen.add(key)
+   if len(rows)<max_items:rows.append(row)
+  complete=not incomplete and len(rows)==total
+  if complete or len(rows)>=max_items or len(batch)<100:break
+ return {"schema":"gh-identity-search/1","kind":kind,"query":effective,"sort":sort,"order":order,
+         "items":rows,"count":len(rows),"total_count":total,"pages_fetched":fetched,
+         "incomplete_results":incomplete,"complete":complete,"truncated":not complete,
+         "scope":"accessible_search_results","observed_at":now()}
+
+
 def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=None,transport="auto",timeout=30):
  r=repo(r)
  if not isinstance(max_items,int) or max_items<1:raise ValueError("max_items must be positive")
@@ -602,6 +697,10 @@ def _main(argv=None):
  s.add_parser("capabilities")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("repos");x.add_argument("owner")
+ x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
+ x=s.add_parser("issues");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("prs");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("pr");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("comments");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
@@ -619,6 +718,10 @@ def _main(argv=None):
   if ns.cmd=="capabilities":o=capabilities()
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
+  elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="issues":o=issues(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
+  elif ns.cmd=="prs":o=pull_requests(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
+  elif ns.cmd=="search":o=search(ns.query,kind=ns.kind,sort=ns.sort,order=ns.order,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="pr":o=pr(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="comments":o=comments(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
@@ -653,7 +756,7 @@ def main(argv=None):
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","pr","comments","reviews",
-              "pull_requests","run_history","runs","variable","set_variable","post_comment",
+              "issue","issues","search","pull_requests","run_history","runs","variable","set_variable","post_comment",
               "resolve_ref","source_identity","checks_for_sha","observe_pr","workflow","run","jobs"):
  globals()[_name]=_bounded(globals()[_name])
 if __name__=="__main__":
