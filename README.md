@@ -101,7 +101,10 @@ flags `--max-pages`, `--max-items`, `--max-bytes`, and `--timeout` accept the sa
 limits before or after the command. Counts must be positive integers; time must
 be positive and finite. Budget exhaustion raises `Error` with `pages_limit`,
 `items_limit`, `bytes_limit`, or `operation_timeout` (CLI exit 2), never a complete
-or green partial result. Existing discovery helpers retain their explicit
+or green partial result. Once exceeded, a budget stays failed until its scope
+exits: catching the exception cannot enable another request in that scope. A
+blocked follow-up write has not started and is not marked uncertain.
+Existing discovery helpers retain their explicit
 `truncated` result for their own smaller discovery limits. A short check response
 with a valid but unmatched total is `complete=false`, `state=incomplete`;
 missing, invalid, changing or exceeded totals raise `pagination_incomplete`.

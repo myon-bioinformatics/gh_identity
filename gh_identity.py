@@ -22,15 +22,19 @@ class _Budget:
   if isinstance(timeout,bool) or not isinstance(timeout,(int,float)) or not math.isfinite(timeout) or timeout<=0:
    raise ValueError("timeout must be positive and finite")
   self.max_pages=max_pages;self.max_items=max_items;self.max_bytes=max_bytes
-  self.pages=0;self.items=0;self.bytes=0;self.deadline=time.monotonic()+timeout
+  self.failure=None;self.pages=0;self.items=0;self.bytes=0;self.deadline=time.monotonic()+timeout
+ def fail(self,code,uncertain=False):
+  if self.failure is None:self.failure=code
+  raise Error(self.failure,uncertain)
  def remaining(self):
+  if self.failure is not None:raise Error(self.failure)
   left=self.deadline-time.monotonic()
-  if left<=0:raise Error("operation_timeout")
+  if left<=0:self.fail("operation_timeout")
   return left
  def charge(self,kind,count):
   self.remaining()
   value=getattr(self,kind)+count
-  if value>getattr(self,"max_"+kind):raise Error(kind+"_limit")
+  if value>getattr(self,"max_"+kind):self.fail(kind+"_limit")
   setattr(self,kind,value)
 
 _BUDGET=contextvars.ContextVar("ghi_operation_budget",default=None)
@@ -64,7 +68,7 @@ def _process(argv,payload,timeout,env=None,mutating=False):
  """Bound both pipes and wall time; never use communicate/capture_output."""
  budget=_BUDGET.get();left=min(timeout,budget.remaining())
  cap=budget.max_bytes-budget.bytes
- if cap<=0:raise Error("bytes_limit")
+ if cap<=0:budget.fail("bytes_limit")
  try:p=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
  except FileNotFoundError as e:raise Error("process_not_found") from e
  except OSError as e:raise Error("process_error") from e
@@ -106,6 +110,7 @@ def _process(argv,payload,timeout,env=None,mutating=False):
  finally:
   if p.poll() is None:p.kill()
   p.wait()
+ if failure in ("bytes_limit","operation_timeout"):budget.fail(failure,mutating)
  if failure:raise Error(failure,mutating)
  raw,err=map(bytes,buffers)
  try:budget.charge("bytes",len(raw)+len(err))
@@ -200,6 +205,7 @@ def _url(method,path,payload=None,timeout=30,mutating=False):
        "timeout":min(timeout,budget.remaining()),"cap":budget.max_bytes-budget.bytes}
  # Credentials go over stdin, never command-line arguments or diagnostics.
  code,raw,err=_process([sys.executable,os.path.abspath(__file__),"--_http-worker"],json.dumps(spec).encode(),timeout,mutating=mutating)
+ if code==9:budget.fail("bytes_limit",mutating)
  if code:raise Error(_HTTP_ERRORS.get(code,"transport_error"),mutating and code not in (3,4,5,6))
  if not raw:return None
  try:return json.loads(raw.decode("utf-8"))

@@ -275,3 +275,45 @@ def test_nested_request_validates_timeout_before_transport(timeout):
         with pytest.raises(ValueError):
             g.request('GET', 'repos/o/r', timeout=timeout)
         transport.assert_not_called()
+
+
+@pytest.mark.parametrize('limits,data,error', [
+    ({'max_items': 1}, [1, 2], 'items_limit'),
+    ({'max_bytes': 1}, [1], 'bytes_limit'),
+    ({'max_pages': 1}, [1] * 100, 'pages_limit'),
+])
+def test_caught_collection_overflow_blocks_all_further_transport(limits, data, error):
+    with g.operation(**limits):
+        with pytest.raises(g.Error, match=error):
+            g.pages('repos/o/r/issues', requester=lambda *a, **k: data)
+        with patch.object(g, '_gh') as transport:
+            with pytest.raises(g.Error, match=error) as exc:
+                g.request('POST', 'repos/o/r/issues', transport='gh', mutating=True)
+            assert not exc.value.uncertain  # This second mutation never started.
+            transport.assert_not_called()
+    with g.operation(), patch.object(g, '_gh', return_value={}) as transport:
+        assert g.request('GET', 'repos/o/r', transport='gh') == {}
+        transport.assert_called_once()
+
+
+@pytest.mark.parametrize('stream', ['stdout', 'stderr'])
+def test_caught_pipe_overflow_blocks_new_process(stream):
+    with g.operation(max_bytes=16):
+        with pytest.raises(g.Error, match='bytes_limit') as exc:
+            g._process([sys.executable, '-c', f'import sys;sys.{stream}.write("x"*100)'], None, 3, mutating=True)
+        assert exc.value.uncertain
+        with patch.object(g.subprocess, 'Popen') as spawn:
+            with pytest.raises(g.Error, match='bytes_limit'):
+                g._process([sys.executable, '-c', 'pass'], None, 3)
+            spawn.assert_not_called()
+
+
+def test_caught_worker_overflow_blocks_new_transport(local_http):
+    with patch.object(g, 'API', local_http), patch.object(g, 'token', return_value=None):
+        with g.operation(max_bytes=128):
+            with pytest.raises(g.Error, match='bytes_limit'):
+                g.request('GET', 'large', transport='urllib')
+            with patch.object(g, '_process') as process:
+                with pytest.raises(g.Error, match='bytes_limit'):
+                    g.request('GET', 'ok', transport='urllib')
+                process.assert_not_called()
