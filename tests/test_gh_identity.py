@@ -189,5 +189,24 @@ class WorkflowRunIdentityTests(unittest.TestCase):
     self.assertEqual(g.main(["run","o/r","123","--attempt","2"]),0)
    self.assertEqual(rn.call_args.kwargs["attempt"],2)
 
+
+class JobsTests(unittest.TestCase):
+ def test_exact_attempt_and_steps(self):
+  data={"total_count":1,"jobs":[{"id":91,"run_id":20,"run_attempt":2,"name":"pytest",
+   "status":"completed","conclusion":"success","steps":[{"number":1,"name":"Run tests",
+   "status":"completed","conclusion":"success"}]}]}
+  with mock.patch.object(g,"request",return_value=data) as req:
+   result=g.jobs("o/r",20,attempt=2)
+   self.assertEqual(result["jobs"][0]["job_id"],91)
+   self.assertEqual(result["jobs"][0]["steps"][0]["number"],1)
+   req.assert_called_once_with("GET","repos/o/r/actions/runs/20/attempts/2/jobs?per_page=100&page=1",transport="auto",timeout=30)
+ def test_incomplete_response_fails(self):
+  with mock.patch.object(g,"request",return_value={"total_count":2,"jobs":[]}):
+   with self.assertRaises(g.Error):g.jobs("o/r",20)
+ def test_invalid_job_lookup_rejected(self):
+  with mock.patch.object(g,"request") as req:
+   with self.assertRaises(ValueError):g.jobs("o/r",0)
+   req.assert_not_called()
+
 if __name__ == "__main__":
  unittest.main()
