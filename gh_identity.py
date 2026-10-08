@@ -69,9 +69,11 @@ def pr(r,n,**k):
  r=repo(r);d=request("GET",f"repos/{r}/pulls/{n}",**k)
  return {"schema":"gh-identity-pr/1","repository":r,"number":n,"state":d.get("state"),"draft":d.get("draft"),"merged":d.get("merged"),"mergeable":d.get("mergeable"),"head_sha":(d.get("head")or{}).get("sha"),"head_ref":(d.get("head")or{}).get("ref"),"base_sha":(d.get("base")or{}).get("sha"),"base_ref":(d.get("base")or{}).get("ref"),"url":d.get("html_url"),"observed_at":now()}
 def comments(r,n,last=None,transport="auto",timeout=30):
- r=repo(r);xs=pages(f"repos/{r}/issues/{n}/comments",transport,timeout)
+ r=repo(r)
+ if last is not None and (type(last) is not int or last<0):raise ValueError("last must be a nonnegative integer")
+ xs=pages(f"repos/{r}/issues/{n}/comments",transport,timeout)
  ds=[{"id":x.get("id"),"author":(x.get("user")or{}).get("login"),"created_at":x.get("created_at"),"chars":len(x.get("body")or""),"preview":re.sub(r"\s+"," ",x.get("body")or"")[:240],"url":x.get("html_url")} for x in xs]
- if last is not None:ds=ds[-last:]
+ if last is not None:ds=ds[-last:] if last else []
  return {"schema":"gh-identity-comments/1","repository":r,"number":n,"total":len(xs),"shown":len(ds),"complete":True,"comments":ds}
 def reviews(r,n,transport="auto",timeout=30):
  r=repo(r);xs=pages(f"repos/{r}/pulls/{n}/reviews",transport,timeout)
@@ -230,7 +232,7 @@ def _min_checks(value):
 def summarize_checks(rows,expected_count,min_checks=1):
  min_checks=_min_checks(min_checks)
  if not isinstance(rows,list):raise ValueError("check rows must be a list")
- normalized=[{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("url") or x.get("html_url"),"annotations_count":x.get("annotations_count",(x.get("output")or{}).get("annotations_count",0))} for x in rows]
+ normalized=[{"id":x.get("id"),"name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),"url":x.get("html_url") or x.get("url"),"annotations_count":x.get("annotations_count",(x.get("output")or{}).get("annotations_count",0))} for x in rows]
  complete=isinstance(expected_count,int) and not isinstance(expected_count,bool) and expected_count==len(normalized)
  bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
  if not complete:state="incomplete"
@@ -308,9 +310,19 @@ def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
   if len(batch)<100:break
   page+=1
   if page>100:raise Error("pagination_incomplete")
- if not isinstance(total,int) or len(rows)!=total:raise Error("pagination_incomplete")
- out=[]
+ if type(total) is not int or total<0 or len(rows)!=total:raise Error("pagination_incomplete")
+ out=[];seen=set()
  for x in rows:
+  if not isinstance(x,dict):raise Error("invalid_json")
+  jid=x.get("id");actual_run=x.get("run_id");actual_attempt=x.get("run_attempt")
+  if type(jid) is not int or jid<1:raise Error("invalid_job_identity")
+  if jid in seen:raise Error("ambiguous_job_identity")
+  seen.add(jid)
+  if type(actual_run) is not int or actual_run!=run_id:raise Error("job_identity_mismatch")
+  if type(actual_attempt) is not int or actual_attempt<1:raise Error("invalid_attempt_identity")
+  if attempt is not None and actual_attempt!=attempt:raise Error("attempt_mismatch")
+  steps=x.get("steps",[])
+  if not isinstance(steps,list) or any(not isinstance(step,dict) for step in steps):raise Error("invalid_json")
   out.append({"job_id":x.get("id"),"run_id":x.get("run_id"),"attempt":x.get("run_attempt"),
    "name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),
    "started_at":x.get("started_at"),"completed_at":x.get("completed_at"),

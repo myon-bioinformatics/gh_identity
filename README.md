@@ -66,3 +66,17 @@ not mean a write did not happen, and must not trigger a blind retry.
 
 This covers existing comment and variable-set operations only. Variable deletion,
 workflow dispatch and guarded PR merge remain separate unfinished work in Issue #2.
+
+## Read observation validation
+
+`jobs()` rejects malformed or duplicate job identities and rows that do not
+match the requested run or explicit attempt. When no attempt is specified,
+observed per-job attempts are preserved and need not all match. This keeps
+partial-rerun observations usable without asserting an unrequested attempt.
+
+`comments(last=N)` accepts nonnegative integers: zero shows no comments while
+retaining the observed total; negative values, booleans and other types fail
+before transport. This is an output limit, not a collection-memory limit.
+Check normalization prefers GitHub's human-facing `html_url`, falling back to
+`url` for pre-normalized consumer rows. Collection byte/time limits and broader
+pagination hardening remain tracked in Issue #12.
