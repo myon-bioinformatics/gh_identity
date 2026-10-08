@@ -1,3 +1,4 @@
+import urllib.parse
 import json, unittest
 from unittest import mock
 import gh_identity as g
@@ -127,7 +128,7 @@ class T(unittest.TestCase):
   page1=[{"id":n,"head_sha":"a"*40,"head_branch":"main","event":"push"} for n in range(100)]
   page2=[{"id":999,"run_attempt":2,"workflow_id":7,"name":"CI","head_sha":target,"head_branch":"feature","event":"pull_request","status":"completed","conclusion":"success"}]
   def fake(method,path,*args,**kwargs):
-   return {"workflow_runs":page1 if "page=1" in path else page2}
+   return {"workflow_runs":page1 if urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["page"] == ["1"] else page2}
   with mock.patch.object(g,"request",side_effect=fake):
    out=g.run_history("o/r",head_sha=target,max_items=10,max_pages=3)
   self.assertEqual([x["run_id"] for x in out["runs"]],[999])
