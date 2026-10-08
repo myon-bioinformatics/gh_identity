@@ -77,6 +77,57 @@ def reviews(r,n,transport="auto",timeout=30):
  r=repo(r);xs=pages(f"repos/{r}/pulls/{n}/reviews",transport,timeout)
  ds=[{"id":x.get("id"),"author":(x.get("user")or{}).get("login"),"state":x.get("state"),"commit_id":x.get("commit_id"),"submitted_at":x.get("submitted_at"),"chars":len(x.get("body")or"")} for x in xs]
  return {"schema":"gh-identity-reviews/1","repository":r,"number":n,"count":len(ds),"complete":True,"reviews":ds}
+
+def pull_requests(r,state="open",max_items=100,max_pages=10,transport="auto",timeout=30):
+ r=repo(r)
+ if state not in {"open","closed","all"}:raise ValueError("invalid state")
+ if not isinstance(max_items,int) or max_items<1:raise ValueError("max_items must be positive")
+ if not isinstance(max_pages,int) or max_pages<1:raise ValueError("max_pages must be positive")
+ rows=[];page=1;exhausted=False;pages_fetched=0
+ while page<=max_pages and len(rows)<max_items:
+  batch=request("GET",f"repos/{r}/pulls?state={state}&sort=updated&direction=desc&per_page=100&page={page}",transport=transport,timeout=timeout)
+  pages_fetched += 1
+  if not isinstance(batch,list):raise Error("invalid_json")
+  consumed=0
+  for x in batch:
+   consumed+=1
+   rows.append({"number":x.get("number"),"title":x.get("title"),"state":x.get("state"),"draft":bool(x.get("draft")),
+    "head_sha":(x.get("head")or{}).get("sha"),"head_ref":(x.get("head")or{}).get("ref"),
+    "base_sha":(x.get("base")or{}).get("sha"),"base_ref":(x.get("base")or{}).get("ref"),
+    "created_at":x.get("created_at"),"updated_at":x.get("updated_at"),"closed_at":x.get("closed_at"),"merged_at":x.get("merged_at"),"url":x.get("html_url")})
+   if len(rows)>=max_items:break
+  if len(batch)<100:exhausted=consumed==len(batch);break
+  page+=1
+ return {"schema":"gh-identity-pr-discovery/1","repository":r,"state":state,"pull_requests":rows,
+  "count":len(rows),"pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted}
+
+def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=None,transport="auto",timeout=30):
+ r=repo(r)
+ if not isinstance(max_items,int) or max_items<1:raise ValueError("max_items must be positive")
+ if not isinstance(max_pages,int) or max_pages<1:raise ValueError("max_pages must be positive")
+ rows=[];page=1;exhausted=False;pages_fetched=0
+ while page<=max_pages and len(rows)<max_items:
+  batch=request("GET",f"repos/{r}/actions/runs?per_page=100&page={page}",transport=transport,timeout=timeout)
+  pages_fetched += 1
+  if not isinstance(batch,dict) or not isinstance(batch.get("workflow_runs"),list):raise Error("invalid_json")
+  raw=batch["workflow_runs"]
+  consumed=0
+  for x in raw:
+   consumed+=1
+   row={"run_id":x.get("id"),"attempt":x.get("run_attempt"),"workflow_id":x.get("workflow_id"),"name":x.get("name"),
+    "status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"head_branch":x.get("head_branch"),
+    "event":x.get("event"),"created_at":x.get("created_at"),"updated_at":x.get("updated_at"),"run_started_at":x.get("run_started_at"),"url":x.get("html_url")}
+   if head_sha is not None and row["head_sha"]!=head_sha:continue
+   if branch is not None and row["head_branch"]!=branch:continue
+   if event is not None and row["event"]!=event:continue
+   rows.append(row)
+   if len(rows)>=max_items:break
+  if len(raw)<100:exhausted=consumed==len(raw);break
+  page+=1
+ return {"schema":"gh-identity-run-discovery/1","repository":r,"runs":rows,"count":len(rows),
+  "pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted,
+  "filters":{"head_sha":head_sha,"branch":branch,"event":event}}
+
 def runs(r,limit=20,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/runs?per_page={min(100,max(1,limit))}",transport=transport,timeout=timeout)
  ds=[{"run_id":x.get("id"),"attempt":x.get("run_attempt"),"status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"event":x.get("event"),"url":x.get("html_url")} for x in (d.get("workflow_runs")or[])[:limit]]

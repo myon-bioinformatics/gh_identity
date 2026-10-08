@@ -1,3 +1,4 @@
+import urllib.parse
 import json, unittest
 from unittest import mock
 import gh_identity as g
@@ -159,6 +160,46 @@ class T(unittest.TestCase):
   x=g.compare_sha({"sha":None},"d"*40)
   self.assertFalse(x["comparable"]); self.assertIsNone(x["same"])
 
+
+ def test_pull_request_discovery_walks_older_pages_and_is_bounded(self):
+  calls=[]
+  def fake(method,path,*args,**kwargs):
+   calls.append(path)
+   page=int(path.rsplit("page=",1)[1])
+   if page==1:return [{"number":n,"title":str(n),"state":"closed","head":{"sha":"a"*40,"ref":"f"},"base":{"sha":"b"*40,"ref":"main"}} for n in range(200,100,-1)]
+   return [{"number":100,"title":"100","state":"closed","head":{"sha":"c"*40,"ref":"old"},"base":{"sha":"b"*40,"ref":"main"}}]
+  with mock.patch.object(g,"request",side_effect=fake):
+   out=g.pull_requests("o/r",state="all",max_items=101,max_pages=3)
+  self.assertEqual(out["pull_requests"][-1]["number"],100)
+  self.assertEqual(out["pages_fetched"],2);self.assertTrue(out["complete"])
+  self.assertEqual(len(calls),2)
+
+ def test_pull_request_discovery_reports_truncation(self):
+  batch=[{"number":n,"head":{},"base":{}} for n in range(100)]
+  with mock.patch.object(g,"request",return_value=batch):
+   out=g.pull_requests("o/r",max_items=50,max_pages=1)
+  self.assertEqual(out["count"],50);self.assertFalse(out["complete"]);self.assertTrue(out["truncated"])
+  self.assertEqual(out["pages_fetched"],1)
+
+ def test_run_history_finds_older_sha_across_pages(self):
+  target="d"*40
+  page1=[{"id":n,"head_sha":"a"*40,"head_branch":"main","event":"push"} for n in range(100)]
+  page2=[{"id":999,"run_attempt":2,"workflow_id":7,"name":"CI","head_sha":target,"head_branch":"feature","event":"pull_request","status":"completed","conclusion":"success"}]
+  def fake(method,path,*args,**kwargs):
+   params=urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+   return {"workflow_runs":page1 if params.get("page") == ["1"] else page2}
+  with mock.patch.object(g,"request",side_effect=fake):
+   out=g.run_history("o/r",head_sha=target,max_items=10,max_pages=3)
+  self.assertEqual([x["run_id"] for x in out["runs"]],[999])
+  self.assertEqual(out["pages_fetched"],2);self.assertTrue(out["complete"])
+
+ def test_run_history_bound_is_explicit_not_latest_equals_relevant(self):
+  batch={"workflow_runs":[{"id":n,"head_sha":"a"*40,"head_branch":"main","event":"push"} for n in range(100)]}
+  with mock.patch.object(g,"request",return_value=batch):
+   out=g.run_history("o/r",max_items=5,max_pages=1)
+  self.assertEqual(out["count"],5);self.assertTrue(out["truncated"]);self.assertFalse(out["complete"])
+  self.assertEqual(out["pages_fetched"],1)
+
 class WorkflowRunIdentityTests(unittest.TestCase):
  def test_exact_run_attempt(self):
   payload={"id":123,"workflow_id":456,"run_attempt":2,"head_sha":"a"*40,
@@ -207,6 +248,56 @@ class JobsTests(unittest.TestCase):
   with mock.patch.object(g,"request") as req:
    with self.assertRaises(ValueError):g.jobs("o/r",0)
    req.assert_not_called()
+
+
+class DiscoveryBoundaryTests(unittest.TestCase):
+ def test_page_and_item_bounds(self):
+  cases=[
+   # batch sizes, max_items, max_pages, returned count, fetched pages, complete
+   ([100],200,1,100,1,False),
+   ([100,100],300,2,200,2,False),
+   ([100],50,3,50,1,False),
+   ([100],100,3,100,1,False),
+   ([100,100],101,3,101,2,False),
+   ([100,0],101,3,100,2,True),
+   ([99],100,3,99,1,True),
+   ([0],100,3,0,1,True),
+   ([99],50,3,50,1,False),
+   ([50],50,3,50,1,True),
+  ]
+  for discover in (g.pull_requests,g.run_history):
+   for sizes,items,pages,count,fetched,complete in cases:
+    with self.subTest(api=discover.__name__,sizes=sizes,items=items,pages=pages):
+     payloads=[]
+     for size in sizes:
+      rows=[{"number":n,"id":n} for n in range(size)]
+      payloads.append(rows if discover is g.pull_requests else {"workflow_runs":rows})
+     with mock.patch.object(g,"request",side_effect=payloads) as request:
+      result=discover("o/r",max_items=items,max_pages=pages,transport="urllib",timeout=7)
+     self.assertEqual(result["count"],count)
+     self.assertEqual(result["pages_fetched"],fetched)
+     self.assertEqual(request.call_count,fetched)
+     self.assertEqual(result["complete"],complete)
+     self.assertEqual(result["truncated"],not complete)
+     for page,call in enumerate(request.call_args_list,1):
+      params=urllib.parse.parse_qs(urllib.parse.urlsplit(call.args[1]).query)
+      self.assertEqual(params["page"],[str(page)])
+      self.assertEqual(params["per_page"],["100"])
+      self.assertEqual(call.kwargs,{"transport":"urllib","timeout":7})
+
+ def test_filter_mismatch_counts_actual_requests(self):
+  row={"id":1,"head_sha":"a"*40,"head_branch":"main","event":"push"}
+  filters=({"head_sha":"b"*40},{"branch":"feature"},{"event":"pull_request"})
+  for filter_ in filters:
+   for sizes,pages,fetched,complete in (([100],1,1,False),([100,100],2,2,False),([100,0],3,2,True),([99],1,1,True)):
+    with self.subTest(filter=filter_,sizes=sizes):
+     with mock.patch.object(g,"request",side_effect=[{"workflow_runs":[row]*n} for n in sizes]) as request:
+      result=g.run_history("o/r",max_items=1,max_pages=pages,**filter_)
+     self.assertEqual(result["runs"],[])
+     self.assertEqual(result["pages_fetched"],fetched)
+     self.assertEqual(request.call_count,fetched)
+     self.assertEqual(result["complete"],complete)
+     self.assertEqual(result["truncated"],not complete)
 
 if __name__ == "__main__":
  unittest.main()
