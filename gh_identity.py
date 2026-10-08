@@ -172,6 +172,27 @@ def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
 def workflow(r,w,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/workflows/{urllib.parse.quote(str(w),safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-workflow/1","repository":r,"id":d.get("id"),"name":d.get("name"),"path":d.get("path"),"state":d.get("state"),"url":d.get("html_url"),"observed_at":now()}
+
+def run(r, run_id, attempt=None, transport="auto", timeout=30):
+ """Read an exact Actions run and optionally one exact rerun attempt."""
+ r=repo(r)
+ def positive(x, label):
+  if isinstance(x,bool) or not str(x).isdigit() or int(x)<1:raise ValueError("invalid " + label + " identifier")
+  return int(x)
+ run_id=positive(run_id, "run")
+ if attempt is not None:attempt=positive(attempt, "attempt")
+ path=f"repos/{r}/actions/runs/{run_id}"
+ if attempt is not None:path+=f"/attempts/{attempt}"
+ d=request("GET",path,transport=transport,timeout=timeout)
+ if not isinstance(d,dict) or d.get("id")!=run_id:raise Error("invalid_json")
+ actual=d.get("run_attempt")
+ if attempt is not None and actual!=attempt:raise Error("attempt_mismatch")
+ return {"schema":"gh-identity-run/1","repository":r,
+  "workflow_id":d.get("workflow_id"),"run_id":d["id"],"attempt":actual,
+  "head_sha":d.get("head_sha"),"event":d.get("event"),
+  "status":d.get("status"),"conclusion":d.get("conclusion"),
+  "created_at":d.get("created_at"),"url":d.get("html_url"),"observed_at":now()}
+
 def gh_help(*parts,timeout=15):
  if not gh_available():raise Error("gh_not_found")
  env=os.environ.copy();env.update(GH_PROMPT_DISABLED="1",GH_PAGER="cat");env.pop("GH_REPO",None)
@@ -226,6 +247,8 @@ def main(argv=None):
  x=s.add_parser("comments");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("runs");x.add_argument("repo")
+ x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
+ x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
@@ -239,6 +262,8 @@ def main(argv=None):
   elif ns.cmd=="comments":o=comments(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
+  elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
+  elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
   else:
