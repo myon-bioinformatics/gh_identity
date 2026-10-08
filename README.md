@@ -29,3 +29,22 @@ python gh_identity.py variable-set OWNER/REPO NAME VALUE --write
 Use `--transport gh` or `--transport urllib` to force a transport; default is `auto`.
 
 See [SPEC.md](SPEC.md) for the v0.1 contract.
+
+## Actions step permalinks
+
+```python
+import gh_identity as ghi
+
+# Pure URL construction from explicit IDs, without network calls:
+url = ghi.step_url("OWNER/REPO", 20, 91, 7, line=1)
+
+# Validate against a complete observation of the exact run attempt:
+observation = ghi.jobs("OWNER/REPO", 20, attempt=2)
+url = ghi.step_url_from_jobs(observation, 91, 7, line=1)
+```
+
+```bash
+python gh_identity.py step-url OWNER/REPO 20 91 7 --line 1
+```
+
+The observation helper requires a unique matching job, matching run/attempt and an existing step number. It does not infer the step number from list position. The pure builder formats explicitly supplied identities; it does not establish that a job, step or log line exists. A line anchor selects the GitHub UI location, not a log API endpoint. Step links are independent of log availability and bounded log retrieval remains a separate Issue #17 phase.

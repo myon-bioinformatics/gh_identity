@@ -366,5 +366,74 @@ class DiscoveryBoundaryTests(unittest.TestCase):
      self.assertEqual(result["complete"],complete)
      self.assertEqual(result["truncated"],not complete)
 
+class StepPermalinkTests(unittest.TestCase):
+ def observation(self,attempt=2):
+  return {"schema":"gh-identity-jobs/1","repository":"o/r","run_id":20,"attempt":attempt,
+   "complete":True,"count":1,"jobs":[{"job_id":91,"run_id":20,"attempt":2,
+   "steps":[{"number":7,"name":"Tests","status":"completed","conclusion":"failure"}]}]}
+
+ def test_pure_link_with_optional_line(self):
+  with mock.patch.object(g,"request") as request:
+   self.assertEqual(g.step_url("o/r",20,91,7,1),"https://github.com/o/r/actions/runs/20/job/91#step:7:1")
+   self.assertEqual(g.step_url("o/r","20","91","7"),"https://github.com/o/r/actions/runs/20/job/91#step:7")
+  request.assert_not_called()
+
+ def test_repository_segments_are_encoded(self):
+  self.assertEqual(g.step_url("日本/リポ",20,91,7),"https://github.com/%E6%97%A5%E6%9C%AC/%E3%83%AA%E3%83%9D/actions/runs/20/job/91#step:7")
+  for repository in ("o/r?x", "o/r#x", "o/r/extra", "o r/r"):
+   with self.subTest(repo=repository),self.assertRaises(ValueError):g.step_url(repository,20,91,7)
+
+ def test_invalid_ids_fail_without_network(self):
+  for field in range(4):
+   for value in (0,-1,True,False,None,1.5,"1.5","1/2","１","+1"," 1",[]):
+    args=[20,91,7,1];args[field]=value
+    if field==3 and value is None:continue
+    with self.subTest(field=field,value=value),mock.patch.object(g,"request") as request:
+     with self.assertRaises(ValueError):g.step_url("o/r",*args)
+     request.assert_not_called()
+
+ def test_observed_step_number_not_list_position(self):
+  self.assertEqual(g.step_url_from_jobs(self.observation(),91,7,1),g.step_url("o/r",20,91,7,1))
+  with self.assertRaises(g.Error) as cm:g.step_url_from_jobs(self.observation(),91,1)
+  self.assertEqual(cm.exception.code,"step_not_found")
+
+ def test_exact_rerun_job_is_required(self):
+  obs=self.observation();obs["jobs"][0]["attempt"]=1
+  with self.assertRaises(g.Error) as cm:g.step_url_from_jobs(obs,91,7)
+  self.assertEqual(cm.exception.code,"attempt_mismatch")
+  obs=self.observation();obs["jobs"][0]["run_id"]=21
+  with self.assertRaises(g.Error) as cm:g.step_url_from_jobs(obs,91,7)
+  self.assertEqual(cm.exception.code,"job_identity_mismatch")
+
+ def test_absent_ambiguous_or_incomplete_data_has_no_link(self):
+  cases=[]
+  obs=self.observation();obs["count"]=2;cases.append((obs,"incomplete_job_observation"))
+  obs=self.observation();obs["jobs"][0]["steps"][0]["number"]=7.0;cases.append((obs,"step_not_found"))
+  obs=self.observation();obs["complete"]=False;cases.append((obs,"incomplete_job_observation"))
+  obs=self.observation();obs["jobs"]=[];obs["count"]=0;cases.append((obs,"step_not_found"))
+  obs=self.observation();obs["jobs"][0]["steps"]=[];cases.append((obs,"step_not_found"))
+  obs=self.observation();obs["jobs"].append(dict(obs["jobs"][0]));obs["count"]=2;cases.append((obs,"ambiguous_job_identity"))
+  obs=self.observation();obs["jobs"][0]["steps"]*=2;cases.append((obs,"ambiguous_step_identity"))
+  obs=self.observation();obs["jobs"][0].pop("run_id");cases.append((obs,"job_identity_mismatch"))
+  obs=self.observation();obs["jobs"][0].pop("steps");cases.append((obs,"invalid_json"))
+  for obs,error in cases:
+   with self.subTest(error=error),mock.patch.object(g,"step_url") as builder:
+    with self.assertRaises(g.Error) as cm:g.step_url_from_jobs(obs,91,7)
+    self.assertEqual(cm.exception.code,error);builder.assert_not_called()
+
+ def test_jobs_observation_connects_to_permalink(self):
+  data={"total_count":1,"jobs":[{"id":91,"run_id":20,"run_attempt":2,
+   "steps":[{"number":7,"name":"Tests","status":"completed","conclusion":"failure"}]}]}
+  with mock.patch.object(g,"request",return_value=data):obs=g.jobs("o/r",20,attempt=2)
+  self.assertEqual(g.step_url_from_jobs(obs,91,7,1),g.step_url("o/r",20,91,7,1))
+
+ def test_cli_is_offline_json(self):
+  with mock.patch.object(g,"request") as request,mock.patch("builtins.print") as out:
+   self.assertEqual(g.main(["step-url","o/r","20","91","7","--line","1"]),0)
+  request.assert_not_called()
+  self.assertEqual(json.loads(out.call_args.args[0]),{"schema":"gh-identity-step-url/1","url":g.step_url("o/r",20,91,7,1)})
+  with mock.patch("sys.stderr"):
+   self.assertEqual(g.main(["step-url","o/r","20","91","0"]),2)
+
 if __name__ == "__main__":
  unittest.main()

@@ -295,6 +295,50 @@ def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
  return {"schema":"gh-identity-jobs/1","repository":r,"run_id":run_id,"attempt":attempt,
   "complete":True,"count":len(out),"jobs":out,"observed_at":now()}
 
+def _positive_identifier(value,label):
+ if isinstance(value,bool) or not isinstance(value,(int,str)) or not re.fullmatch(r"[0-9]+",str(value)) or int(value)<1:
+  raise ValueError("invalid "+label+" identifier")
+ return int(value)
+
+def step_url(r,run_id,job_id,step_number,line=None):
+ """Build a UI permalink from explicit identities; performs no observation."""
+ r=repo(r)
+ run_id=_positive_identifier(run_id,"run")
+ job_id=_positive_identifier(job_id,"job")
+ step_number=_positive_identifier(step_number,"step")
+ if line is not None:line=_positive_identifier(line,"line")
+ encoded="/".join(urllib.parse.quote(part,safe="") for part in r.split("/"))
+ anchor=f"#step:{step_number}"+(f":{line}" if line is not None else "")
+ return f"https://github.com/{encoded}/actions/runs/{run_id}/job/{job_id}{anchor}"
+
+def step_url_from_jobs(observation,job_id,step_number,line=None):
+ """Return a link only for a unique step in a complete jobs() observation."""
+ job_id=_positive_identifier(job_id,"job")
+ step_number=_positive_identifier(step_number,"step")
+ if line is not None:line=_positive_identifier(line,"line")
+ if not isinstance(observation,dict) or observation.get("schema")!="gh-identity-jobs/1" or observation.get("complete") is not True:
+  raise Error("incomplete_job_observation")
+ r=repo(observation.get("repository"))
+ run_id=_positive_identifier(observation.get("run_id"),"run")
+ attempt=observation.get("attempt")
+ if attempt is not None:attempt=_positive_identifier(attempt,"attempt")
+ rows=observation.get("jobs")
+ if not isinstance(rows,list):raise Error("invalid_json")
+ if type(observation.get("count")) is not int or observation["count"]!=len(rows):raise Error("incomplete_job_observation")
+ if any(not isinstance(row,dict) for row in rows):raise Error("invalid_json")
+ matches=[row for row in rows if row.get("job_id")==job_id and type(row.get("job_id")) is int]
+ if not matches:raise Error("step_not_found")
+ if len(matches)!=1:raise Error("ambiguous_job_identity")
+ job=matches[0]
+ if type(job.get("run_id")) is not int or job.get("run_id")!=run_id:raise Error("job_identity_mismatch")
+ if attempt is not None and (type(job.get("attempt")) is not int or job.get("attempt")!=attempt):raise Error("attempt_mismatch")
+ steps=job.get("steps")
+ if not isinstance(steps,list) or any(not isinstance(step,dict) for step in steps):raise Error("invalid_json")
+ matches=[step for step in steps if step.get("number")==step_number and type(step.get("number")) is int]
+ if not matches:raise Error("step_not_found")
+ if len(matches)!=1:raise Error("ambiguous_step_identity")
+ return step_url(r,run_id,job_id,step_number,line)
+
 def gh_help(*parts,timeout=15):
  if not gh_available():raise Error("gh_not_found")
  env=os.environ.copy();env.update(GH_PROMPT_DISABLED="1",GH_PAGER="cat");env.pop("GH_REPO",None)
@@ -352,6 +396,7 @@ def main(argv=None):
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
  x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
+ x=s.add_parser("step-url");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("step_number",type=int);x.add_argument("--line",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
@@ -368,6 +413,7 @@ def main(argv=None):
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
+  elif ns.cmd=="step-url":o={"schema":"gh-identity-step-url/1","url":step_url(ns.repo,ns.run_id,ns.job_id,ns.step_number,ns.line)}
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
   else:
