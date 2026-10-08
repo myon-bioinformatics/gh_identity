@@ -684,6 +684,424 @@ def compare_sha(local,remote_sha):
  rsha=str(remote_sha).lower() if remote_sha else None
  return {"schema":"gh-identity-comparison/1","local_sha":lsha,"remote_sha":rsha,"comparable":bool(lsha and rsha),"same":(lsha==rsha) if lsha and rsha else None,"observed_at":now()}
 
+# Local Git observations migrated from parent git_inspector.py (380d877).
+# Named read-only operations, bounded output; trusted checkout configuration.
+from pathlib import Path
+
+class GitInspectionError(RuntimeError):
+    """A bounded read-only Git observation failed."""
+
+
+def _git_positive(value, name):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(name + " must be a positive integer")
+    return value
+
+
+def _git_root(root):
+    path = Path(root)
+    if not path.exists():
+        raise ValueError("root does not exist")
+    return path
+
+
+def _git_path(value):
+    if not isinstance(value, (str, os.PathLike)):
+        raise TypeError("path must be string or path-like")
+    value = os.fspath(value)
+    if not value or "\x00" in value:
+        raise ValueError("path must be non-empty and contain no NUL")
+    return value
+
+
+def _git_ref(value):
+    if not isinstance(value, str) or not value or "\x00" in value or value.startswith("-"):
+        raise ValueError("revision must be a non-option string without NUL")
+    return value
+
+
+def _git_spawn(command, **kwargs):
+    return subprocess.Popen(command, **kwargs)
+
+
+def _git_drain_bounded(stream, max_bytes, result):
+    """Drain one child pipe fully while retaining at most max_bytes bytes."""
+    kept = bytearray()
+    truncated = False
+    try:
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                break
+            room = max_bytes - len(kept)
+            if room > 0:
+                kept.extend(chunk[:room])
+            if len(chunk) > max(room, 0):
+                truncated = True
+    finally:
+        stream.close()
+    result.append((bytes(kept), truncated))
+
+
+def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None):
+    _git_positive(max_bytes, "max_bytes")
+    if input_bytes is not None and not isinstance(input_bytes, bytes):
+        raise TypeError("input_bytes must be bytes")
+    command = ["git", "-C", str(_git_root(root)), "--no-pager",
+               "--no-optional-locks", "-c", "core.fsmonitor=false", *args]
+    env = os.environ.copy()
+    # Do not let inherited Git process-routing/config overrides redirect a
+    # supposedly local inspection to another worktree/index/object database or
+    # inject an external diff helper. Ordinary locale/identity variables are
+    # harmless observations and remain untouched.
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX",
+                 "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                 "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE",
+                 "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
+                 "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS",
+                 "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+                 "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                 "GIT_CONFIG_NOSYSTEM"):
+        env.pop(name, None)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    try:
+        proc = _git_spawn(
+            command,
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            env=env,
+        )
+    except FileNotFoundError as error:
+        raise GitInspectionError("git executable not found") from error
+    except OSError as error:
+        raise GitInspectionError(type(error).__name__) from error
+
+    stdout_result = []
+    stderr_result = []
+    stdout_thread = threading.Thread(
+        target=_git_drain_bounded, args=(proc.stdout, max_bytes, stdout_result),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_git_drain_bounded, args=(proc.stderr, max_bytes, stderr_result),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    if input_bytes is not None:
+        try:
+            proc.stdin.write(input_bytes)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    returncode = proc.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+
+    raw, truncated = stdout_result[0]
+    # stderr is deliberately drained and bounded even though the public
+    # contract does not expose command stderr.
+    _stderr, _stderr_truncated = stderr_result[0]
+    if returncode not in ok:
+        raise GitInspectionError("git exited with status " + str(returncode))
+    return raw, truncated, returncode
+
+def _git_decode(raw):
+    # Results are JSON-compatible observations. Invalid or byte-truncated UTF-8
+    # is made explicit as U+FFFD instead of leaking lone surrogate code points.
+    return raw.decode("utf-8", "replace")
+
+
+def _git_complete_fields(raw, delimiter, truncated):
+    """Drop a byte-truncated trailing field instead of publishing corruption."""
+    if truncated and not raw.endswith(delimiter):
+        boundary = raw.rfind(delimiter)
+        raw = b"" if boundary < 0 else raw[:boundary + len(delimiter)]
+    fields = raw.split(delimiter)
+    if fields and fields[-1] == b"":
+        fields.pop()
+    return fields
+
+
+def git_status(root=".", *, max_bytes=1_000_000):
+    """Return structured porcelain-v2 status without inventing identity."""
+    raw, truncated, _ = _git_run(
+        root, ["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+        max_bytes=max_bytes,
+    )
+    fields = _git_complete_fields(raw, b"\0", truncated)
+    records = []
+    index = 0
+    while index < len(fields):
+        text = _git_decode(fields[index])
+        kind = text[:1]
+        if kind == "2":
+            parts = text.split(" ", 9)
+            if len(parts) != 10 or index + 1 >= len(fields):
+                if truncated:
+                    break
+                raise GitInspectionError("malformed porcelain-v2 type-2 record")
+            records.append({"kind": "2", "record": text, "path": parts[9],
+                            "orig_path": _git_decode(fields[index + 1])})
+            index += 2
+            continue
+        if kind == "1":
+            parts = text.split(" ", 8)
+            path = parts[8] if len(parts) == 9 else None
+        elif kind == "u":
+            parts = text.split(" ", 10)
+            path = parts[10] if len(parts) == 11 else None
+        elif kind in ("?", "!") and text.startswith(kind + " "):
+            path = text[2:]
+        else:
+            path = None
+        records.append({"kind": kind, "record": text, "path": path})
+        index += 1
+    return {"clean": not records and not truncated, "records": records, "truncated": truncated}
+
+def git_ls_files(root=".", *, include_untracked=False, max_files=10_000,
+             max_bytes=1_000_000):
+    """Return a bounded NUL-safe file inventory.
+
+    The default is tracked-only. include_untracked=True additionally observes
+    untracked-but-not-ignored entries without weakening existing consumers.
+    Combined mode preserves Git's output order; a truncated prefix is not
+    guaranteed to contain any tracked path. Nested untracked repositories may
+    appear as directory entries, and tracked paths may be absent in the worktree.
+    """
+    if not isinstance(include_untracked, bool):
+        raise TypeError("include_untracked must be bool")
+    _git_positive(max_files, "max_files")
+    args = ["ls-files", "-z"]
+    if include_untracked:
+        args.extend(["--cached", "--others", "--exclude-standard"])
+    raw, byte_truncated, _ = _git_run(root, args, max_bytes=max_bytes)
+    paths = [_git_decode(item) for item in _git_complete_fields(raw, b"\0", byte_truncated)]
+    record_truncated = len(paths) > max_files
+    return {"paths": paths[:max_files],
+            "truncated": byte_truncated or record_truncated}
+
+
+def git_diff(root=".", *, staged=False, base=None, head=None, path=None,
+         max_bytes=1_000_000):
+    """Return a bounded patch with external diff/textconv disabled."""
+    args = ["-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
+            "--no-color"]
+    if staged:
+        if base is not None or head is not None:
+            raise ValueError("staged diff cannot also specify revisions")
+        args.append("--cached")
+    elif base is not None:
+        args.append(_git_ref(base))
+        if head is not None:
+            args.append(_git_ref(head))
+    elif head is not None:
+        raise ValueError("head requires base")
+    args.append("--")
+    if path is not None:
+        args.append(_git_path(path))
+    raw, truncated, _ = _git_run(root, args, max_bytes=max_bytes)
+    return {"patch": _git_decode(raw), "truncated": truncated}
+
+
+def git_log(root=".", *, max_count=50, path=None, max_bytes=1_000_000):
+    """Return bounded commit observations; not canonical repository metadata."""
+    _git_positive(max_count, "max_count")
+    fmt = "%H%x1f%aI%x1f%an%x1f%s%x1e"
+    args = ["log", "--no-decorate", "--no-color", "--format=" + fmt,
+            "--max-count=" + str(max_count)]
+    if path is not None:
+        args.extend(["--", _git_path(path)])
+    raw, truncated, _ = _git_run(root, args, max_bytes=max_bytes)
+    rows = []
+    for record in _git_complete_fields(raw, b"\x1e", truncated):
+        record = record.strip(b"\r\n")
+        if not record:
+            continue
+        fields = _git_decode(record).split("\x1f")
+        if len(fields) == 4:
+            rows.append(dict(zip(("commit", "authored_at", "author", "subject"),
+                                 fields)))
+    return {"commits": rows, "truncated": truncated}
+
+
+def git_log_numstat(root=".", *, since=None, max_count=10_000,
+                max_bytes=1_000_000):
+    """Return bounded per-commit file churn using NUL-safe numstat output.
+
+    Dates are committer dates (Git %cs), matching repo_overview's existing
+    display. Binary counts are None. Renames retain both paths. Git's usual
+    history/merge/rename semantics are preserved. A byte-truncated final commit
+    is omitted in full; truncated never masquerades as complete history.
+    """
+    _git_positive(max_count, "max_count")
+    if since is not None:
+        if not isinstance(since, str):
+            raise TypeError("since must be a string or None")
+        if not since or "\x00" in since:
+            raise ValueError("since must be non-empty without NUL")
+    args = ["log", "--no-ext-diff", "--no-textconv", "--no-color",
+            "-z", "--numstat", "--format=%x00%H%x00%cs",
+            "--max-count=" + str(max_count + 1)]
+    if since is not None:
+        args.append("--since=" + since)
+    args.append("--")
+    raw, byte_truncated, _ = _git_run(root, args, max_bytes=max_bytes)
+    fields = _git_complete_fields(raw, b"\0", byte_truncated)
+    commits = []
+    current = None
+    index = 0
+    while index < len(fields):
+        field = fields[index]
+        if field == b"":
+            if current is not None:
+                commits.append(current)
+                current = None
+            if index + 2 >= len(fields):
+                if byte_truncated:
+                    break
+                raise GitInspectionError("incomplete numstat commit header")
+            sha, date = fields[index + 1:index + 3]
+            if (len(sha) not in (40, 64) or any(c not in b"0123456789abcdef" for c in sha)
+                    or len(date) != 10 or date[4:5] != b"-" or date[7:8] != b"-"
+                    or not date.replace(b"-", b"").isdigit()):
+                raise GitInspectionError("malformed numstat commit header")
+            current = {"commit": _git_decode(sha), "date": _git_decode(date), "files": []}
+            index += 3
+            continue
+        if current is None:
+            raise GitInspectionError("numstat record without commit")
+        # Git separates the header from stats with a newline. Split only the
+        # two count separators; tabs/newlines inside the filename are data.
+        parts = field.lstrip(b"\n").split(b"\t", 2)
+        if len(parts) != 3:
+            raise GitInspectionError("malformed numstat file record")
+        added, deleted, path = parts
+        if (added == b"-") != (deleted == b"-") or any(
+                count != b"-" and not count.isdigit() for count in (added, deleted)):
+            raise GitInspectionError("malformed numstat counts")
+        orig_path = None
+        if not path:
+            if index + 2 >= len(fields):
+                if byte_truncated:
+                    current = None
+                    break
+                raise GitInspectionError("incomplete numstat rename")
+            orig_path, path = fields[index + 1:index + 3]
+            if not orig_path or not path:
+                raise GitInspectionError("empty numstat rename path")
+            index += 2
+        current["files"].append({
+            "path": _git_decode(path),
+            "orig_path": _git_decode(orig_path) if orig_path is not None else None,
+            "added": None if added == b"-" else int(added),
+            "deleted": None if deleted == b"-" else int(deleted),
+        })
+        index += 1
+    if current is not None and not byte_truncated:
+        commits.append(current)
+    return {"commits": commits[:max_count],
+            "truncated": byte_truncated or len(commits) > max_count}
+
+
+def git_show(root=".", revision="HEAD", *, path=None, max_bytes=1_000_000):
+    """Show one revision/path with bounded output and no external textconv."""
+    spec = _git_ref(revision)
+    if path is not None:
+        # The path is encoded in the revision:path object expression.
+        # --end-of-options protects revision parsing from option-like specs.
+        spec += ":" + _git_path(path)
+    raw, truncated, _ = _git_run(
+        root, ["-c", "diff.external=", "show", "--no-ext-diff", "--no-textconv",
+               "--no-color", "--end-of-options", spec],
+        max_bytes=max_bytes,
+    )
+    return {"content": _git_decode(raw), "truncated": truncated}
+
+
+def git_blame(root=".", path=None, *, revision="HEAD", start=None, end=None,
+          max_bytes=1_000_000):
+    """Return bounded line-porcelain blame for one explicit path."""
+    if path is None:
+        raise ValueError("path is required")
+    args = ["blame", "--line-porcelain"]
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise ValueError("start and end must be supplied together")
+        _git_positive(start, "start")
+        _git_positive(end, "end")
+        if end < start:
+            raise ValueError("end must be >= start")
+        args.extend(["-L", f"{start},{end}"])
+    args.extend([_git_ref(revision), "--", _git_path(path)])
+    raw, truncated, _ = _git_run(root, args, max_bytes=max_bytes)
+    return {"porcelain": _git_decode(raw), "truncated": truncated}
+
+
+def git_grep(root=".", pattern=None, *, max_bytes=1_000_000):
+    """Return NUL-safe tracked filenames containing a fixed literal pattern.
+
+    Matched line text is deliberately omitted so newline-containing filenames
+    cannot become ambiguous with content records.
+    """
+    if not isinstance(pattern, str) or not pattern or "\x00" in pattern:
+        raise ValueError("pattern must be a non-empty string without NUL")
+    raw, truncated, code = _git_run(
+        root, ["grep", "-z", "-l", "-I", "-F", "-e", pattern, "--"],
+        max_bytes=max_bytes, ok=(0, 1),
+    )
+    paths = [] if code == 1 else [
+        _git_decode(item) for item in _git_complete_fields(raw, b"\0", truncated)]
+    return {"paths": paths, "truncated": truncated}
+
+def git_check_ignore(root=".", paths=(), *, max_paths=1000, max_bytes=1_000_000):
+    """Explain ignore state using bounded NUL-safe stdin and verbose output."""
+    if isinstance(paths, (str, os.PathLike)):
+        raise TypeError("paths must be a sequence")
+    _git_positive(max_paths, "max_paths")
+    paths = tuple(_git_path(p) for p in paths)
+    if len(paths) > max_paths:
+        raise ValueError("too many paths")
+    if not paths:
+        return {"records": [], "truncated": False}
+    payload = b"\0".join(os.fsencode(p) for p in paths) + b"\0"
+    if len(payload) > max_bytes:
+        raise ValueError("path input exceeds byte limit")
+    raw, truncated, _ = _git_run(
+        root, ["check-ignore", "-z", "-v", "--no-index", "--stdin"],
+        max_bytes=max_bytes, ok=(0, 1), input_bytes=payload,
+    )
+    fields = _git_complete_fields(raw, b"\0", truncated)
+    if not truncated and len(fields) % 4:
+        raise GitInspectionError("malformed check-ignore output")
+    records = []
+    for index in range(0, len(fields) - 3, 4):
+        source, line, pattern, path = fields[index:index + 4]
+        pattern_text = _git_decode(pattern)
+        records.append({
+            "path": _git_decode(path),
+            "source": _git_decode(source),
+            "line": int(line or b"0"),
+            "pattern": pattern_text,
+            "status": "not_ignored" if pattern_text.startswith("!") else "ignored",
+        })
+    by_path = {row["path"]: row for row in records}
+    ordered = []
+    for path in paths:
+        row = by_path.get(path)
+        ordered.append(dict(row) if row is not None else {
+            "path": path,
+            "status": "not_measured" if truncated else "not_ignored",
+        })
+    return {"records": ordered, "truncated": truncated}
+
+
 def _main(argv=None):
  argv=list(sys.argv[1:] if argv is None else argv)
  transport="auto"
@@ -695,6 +1113,14 @@ def _main(argv=None):
   del argv[i:i+2]
  a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
  s.add_parser("capabilities")
+ for command in ("git-status", "git-files", "git-diff", "git-log", "git-numstat", "git-show", "git-blame", "git-grep", "git-ignore"):
+  x=s.add_parser(command);x.add_argument("--root",default=".");x.add_argument("--output-bytes",type=int,default=1000000)
+  if command in ("git-diff", "git-blame"):x.add_argument("--path",required=command=="git-blame")
+  if command=="git-diff":x.add_argument("--staged",action="store_true");x.add_argument("--base");x.add_argument("--head")
+  if command in ("git-log", "git-numstat"):x.add_argument("--count",type=int,default=50)
+  if command=="git-show":x.add_argument("revision",nargs="?",default="HEAD");x.add_argument("--path")
+  if command=="git-grep":x.add_argument("pattern")
+  if command=="git-ignore":x.add_argument("paths",nargs="+")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("repos");x.add_argument("owner")
  x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
@@ -716,6 +1142,15 @@ def _main(argv=None):
  except SystemExit as e:return int(e.code)
  try:
   if ns.cmd=="capabilities":o=capabilities()
+  elif ns.cmd=="git-status":o=git_status(ns.root,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-files":o=git_ls_files(ns.root,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-diff":o=git_diff(ns.root,staged=ns.staged,base=ns.base,head=ns.head,path=ns.path,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-log":o=git_log(ns.root,max_count=ns.count,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-numstat":o=git_log_numstat(ns.root,max_count=ns.count,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-show":o=git_show(ns.root,ns.revision,path=ns.path,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-blame":o=git_blame(ns.root,path=ns.path,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-grep":o=git_grep(ns.root,ns.pattern,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-ignore":o=git_check_ignore(ns.root,ns.paths,max_bytes=ns.output_bytes)
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
@@ -735,7 +1170,7 @@ def _main(argv=None):
   else:
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
- except (ValueError,Error) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
+ except (ValueError,Error,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
@@ -750,8 +1185,8 @@ def main(argv=None):
     if index+1>=len(args):raise ValueError("missing limit")
     limits[key]=convert(args[index+1]);del args[index:index+2]
   with operation(**limits):return _main(args)
- except (ValueError,Error) as e:
-  print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr)
+ except (ValueError,Error,GitInspectionError) as e:
+  print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr)
   return 2
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
