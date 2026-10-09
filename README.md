@@ -410,3 +410,13 @@ GHI deliberately retains. That case checks alt plus text, not identical visible
 text. A visually-hidden CSS class was also observed; generic class-based hiding
 cannot be inferred without styles/computed layout. These small captures validate
 specific tag patterns, not complete extraction or CSS fidelity for either site.
+
+Global-site variation: small live Google company-info and Apple accessibility DOM
+captures (2026-10-09) now cover colored inline spans with U+200B zero-width spaces,
+a nested card with decorative SVG, and a paragraph with NBSP and JSON-valued data
+attributes. See `global-sites.json` and `test_global_site_dom.py`. The CLI is
+exercised against saved fragments without repeat HTTP access. Google inline text
+matches exactly and retains U+200B. Card/Apple comparisons explicitly normalize
+whitespace: GHI collapses NBSP outside pre, so these are not byte-exact browser
+innerText claims. SVG and attribute data do not leak into text. No site-specific
+parser branches, cookie actions, or authentication were introduced.
