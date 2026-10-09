@@ -81,6 +81,51 @@ continues in #23. See [GitHub Issues REST](https://docs.github.com/en/rest/issue
 [GitHub Commits REST](https://docs.github.com/en/rest/commits/commits#get-a-commit),
 and [Git shallow-clone behavior](https://git-scm.com/docs/git-clone).
 
+## Repository structure with directory/file exclusions
+
+```bash
+# Top-level files and folders of main; no clone or blob download
+python gh_identity.py tree OWNER/REPO
+# Two levels, with selected folders and file patterns excluded
+python gh_identity.py tree OWNER/REPO --ref main --depth 2 \
+  --exclude-dir vendor --exclude-dir node_modules --exclude-file '*.lock'
+# All included subtrees
+python gh_identity.py tree OWNER/REPO --recursive \
+  --exclude-dir 'docs/generated' --exclude-file '*.png'
+```
+
+The Python API is `tree(repo, ref="main", depth=1, exclude_dirs=(),
+exclude_files=(), transport="auto", timeout=30)`; `depth=None` means recursive.
+It resolves the ref once, then reads tree metadata at that commit and the
+returned subtree SHAs. The output includes commit/tree SHA, full relative paths,
+kind, Git mode and object SHA. It never fetches file bodies, follows symlinks or
+submodules, or invokes clone, diff or blame. No local `.git` is required.
+This feature is independent of the local history inspection work in PR #23.
+
+Depth 1 means root entries, depth 2 adds their direct children. Directory rows
+include `expanded` to distinguish visited directories from depth boundaries.
+There are no implicit exclusions. Repeated `--exclude-dir`/`--exclude-file`
+options use case-sensitive Python fnmatch patterns: patterns without `/` match
+a basename at any depth; patterns containing `/` match the full relative path.
+Use `vendor`, not `vendor/`, to exclude that folder. These are not gitignore
+rules: no negation, and fnmatch `*` can span `/` in a full-path pattern.
+Directories are pruned before any subtree request. File exclusions apply to
+non-directory entries, including symlinks and submodule pointers.
+
+`complete` refers only to `scope: selected_depth_and_exclusions`, not the whole
+repository. If any GitHub tree response is truncated, `complete=false` and
+`truncated=true`. Malformed/duplicate entries, mismatching child identities,
+cycles, permission and transport failures raise errors. Existing operation
+limits cover response bytes/time; tree requests charge max_pages and all
+received entries (even excluded ones) charge max_items. Limit exhaustion raises
+an error rather than claiming a complete list. `excluded_entries` counts only
+observed excluded entries, not unseen children of pruned directories.
+
+Tree metadata uses the existing gh/urllib read transport. Public repository
+reads support the existing anonymous HTTP fallback. GitHub's
+[Git Trees API](https://docs.github.com/en/rest/git/trees#get-a-tree) documents
+tree modes, non-recursive retrieval and upstream truncation.
+
 ## Actions step permalinks
 
 ```python
@@ -487,3 +532,22 @@ ancestor's `visibility:hidden`. Unsupported values are unknown rather than a
 computed-style result. No new CSS engine, dependency, transport, or browser
 launcher is introduced. Regression cases exercise both candidate selection and
 rendering so they cannot disagree about the corrected inline declarations.
+
+## Local Git inspection
+
+Read-only checkout observations now live in this standalone file, migrated from
+parent `git_inspector.py` at `380d877`. Public APIs are `git_status`, `git_ls_files`,
+`git_diff`, `git_log`, `git_log_numstat`, `git_show`, `git_blame`, `git_grep` and
+`git_check_ignore`. Existing GitHub operations and `local_identity` remain separate.
+CLI examples: `python gh_identity.py git-status --root PATH`,
+`python gh_identity.py git-diff --root PATH`,
+`python gh_identity.py git-blame --root PATH --path FILE`.
+Each command has `--output-bytes`; record/path/count bounds remain available on
+Python APIs. These local bounds are independent of GitHub pagination budgets.
+
+The observations never fetch, stage, checkout, reset, commit or push. Git optional
+locks and optional helpers are disabled; byte truncation is explicit. The checkout
+configuration is trusted input, not an isolation boundary for hostile repositories.
+Parent execution location does not imply parent ownership of this implementation.
+A parent compatibility adapter can expose the old function names over these APIs
+once its consumer lock explicitly selects this revision.
