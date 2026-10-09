@@ -3,6 +3,7 @@
 Exit 0: matched, 1: semantic drift, 2: runner error. No network or screenshots.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -39,12 +40,24 @@ def signature(node, pre=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('markdown_module', type=Path)
+    parser.add_argument("--web-ui-module", type=Path, help="optional trusted web_ui.py for CSS/script wrapper integration")
     args = parser.parse_args()
     try:
         spec = importlib.util.spec_from_file_location('roundtrip_markdown', args.markdown_module)
         md = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = md
         spec.loader.exec_module(md)
+        web = ghi = None
+        if args.web_ui_module:
+            for name, path in [('probe_web_ui', args.web_ui_module), ('probe_ghi', Path(__file__).resolve().parents[1] / 'gh_identity.py')]:
+                extra = importlib.util.spec_from_file_location(name, path)
+                module = importlib.util.module_from_spec(extra)
+                sys.modules[name] = module
+                extra.loader.exec_module(module)
+                if name == 'probe_web_ui': web = module
+                else: ghi = module
+        print(json.dumps({'markdown_sha256': hashlib.sha256(args.markdown_module.read_bytes()).hexdigest(),
+                          'web_ui_sha256': hashlib.sha256(args.web_ui_module.read_bytes()).hexdigest() if args.web_ui_module else None}))
         failures = 0
         for name, source in CASES.items():
             markdown = md.html_to_markdown(source)
@@ -52,8 +65,16 @@ def main():
             again = md.html_to_markdown(restored)
             same = signature(md.parse_html_dom(source)) == signature(md.parse_html_dom(restored))
             stable = markdown == again
-            failures += not (same and stable)
-            print(json.dumps({'case': name, 'semantic_match': same, 'markdown_stable': stable}, ensure_ascii=False))
+            wrapper_match = None
+            if web:
+                fragment = '<article id="probe-body">' + source + '</article>'
+                page = web.render_document(trusted_html=fragment,
+                    css='#probe-body { color: #abcdef; }',
+                    stylesheets=web.shared_stylesheets('/assets'),
+                    scripts=web.shared_scripts('/assets'))
+                wrapper_match = ghi.html_content(fragment, ['#probe-body'])['body'] == ghi.html_content(page, ['#probe-body'])['body']
+            failures += not (same and stable and wrapper_match is not False)
+            print(json.dumps({'case': name, 'semantic_match': same, 'markdown_stable': stable, 'web_ui_wrapper_match': wrapper_match}, ensure_ascii=False))
         return 1 if failures else 0
     except Exception as error:
         print(json.dumps({'error': str(error)}), file=sys.stderr)

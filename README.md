@@ -318,3 +318,20 @@ All six Markdown representations stabilized, demonstrating why stability alone
 is insufficient. The probe intentionally exits 1 for that source-preservation
 failure; it is not included as a green CI gate. Exit 2 indicates runner failure.
 A canonical markdown converter fix and recheck remain outstanding.
+
+For optional cross-project wrapper checks, supply an existing trusted web-ui module:
+
+```sh
+python scripts/check_html_roundtrip.py /path/to/vendor/markdown.py \
+  --web-ui-module /path/to/web_ui.py
+```
+
+This reuses web-ui's `render_document`, `shared_stylesheets`, and `shared_scripts`
+to wrap each fragment with inline CSS, shared CSS references and opt-in module
+script references. GHI extraction before/after wrapping must match exactly.
+It prints module SHA-256 identities, requires no vendor changes, and performs no
+network requests. CSS rendering and JS execution are not tested. With web-ui PR
+#43 at `9ee0232494cb124ed24b79ef87980630bc550e31`, all six wrapper cases matched;
+the independent Markdown code-newline failure still correctly yields exit 1.
+This optional composition keeps rendering in web-ui, conversion in markdown,
+and extraction in GHI; consumers can use the same runner with their adopted files.
