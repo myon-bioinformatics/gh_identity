@@ -355,3 +355,29 @@ No repeated network access is needed for replay. Scope is these two observed
 file-preview fragments, not the whole page, file Code tab, or all GitHub layouts.
 No login interaction was performed. This does not resolve the separate Markdown
 round-trip newline drift or establish CSS/JS equivalence for arbitrary pages.
+
+### Optional internal reproduction when a site cannot be inspected
+
+`scripts/serve_dom_lab.py` provides an optional local Gradio fixture renderer.
+Use it to separate local rendering/extraction behavior from an inaccessible site's
+network or access failure; it is not a replacement for live-site evidence or a
+CORS bypass. It does not fetch remote pages and binds only to 127.0.0.1, with public
+sharing disabled. Supply an existing trusted markdown.py:
+
+```sh
+python scripts/serve_dom_lab.py /path/to/vendor/markdown.py
+```
+
+Install Gradio separately in a disposable test environment if needed; it is not
+a GHI runtime dependency. Inspect `#dom-lab-body` in the rendered page and save
+its DOM for offline comparison. For fixture-only generation without Gradio:
+
+```sh
+python scripts/serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixture.html
+python gh_identity.py html-content fixture.html --selector '#dom-lab-body'
+```
+
+The export/extraction path was exercised. Gradio is unavailable in the current
+execution environment, so its server/browser path is prepared but not verified.
+The built-in representative fixture does not reproduce an arbitrary site's DOM,
+computed CSS, JavaScript state, authentication, or network restrictions.
