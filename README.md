@@ -30,6 +30,57 @@ Use `--transport gh` or `--transport urllib` to force a transport; default is `a
 
 See [SPEC.md](SPEC.md) for the v0.1 contract.
 
+## Exact PR, Issue and commit content
+
+```bash
+python gh_identity.py content OWNER/REPO pr 23 --field title --field body
+python gh_identity.py content OWNER/REPO issue 20 --field body
+python gh_identity.py content OWNER/REPO commit FULL_40_CHARACTER_SHA --field body
+```
+
+`content(repo, kind, identifier)` returns `gh-identity-content/1` with exact
+repository/kind/number or SHA, URL, observed_at, title and full body. PR and
+Issue body means the description, not comments. Commit body is the entire
+commit message including its subject, blank lines and trailers. Null and empty
+Issue/PR descriptions remain distinct; missing/malformed content is an error.
+Commit selectors must be full SHAs; resolve a branch/ref first using
+`resolve_ref`, then read that immutable identity. No clone is needed.
+
+```python
+import gh_identity as ghi
+hits = ghi.search('repo:OWNER/REPO is:open', kind='pr')
+if hits['items']:
+    selected = ghi.content_from_hit(hits['items'][0])
+    body_only = ghi.select_content(selected, ['body'])  # offline, no extra GET
+```
+
+Search/list results remain digest-first. `content_from_hit` re-reads the chosen
+repository/number/kind and does not trust an old search body. It also accepts
+an explicit commit identity with repository/kind/sha; commit search is not
+implemented by this change. `select_content` selects exact top-level fields
+and always retains identity/provenance; it does not interpret or execute text.
+Unknown fields raise ValueError. All content calls share existing gh/urllib
+transports and byte/time budgets. Permission/404/oversize failures are errors,
+not successful empty content. `pr()` retains its compact state/head/base API.
+
+### Git history versus GitHub discussion data
+
+Git stores commit messages, trees and blobs, so local show/log/diff/blame can
+reuse the established git_inspector APIs being consolidated in PR #23.
+PR/Issue descriptions and discussions are GitHub records, read via gh/API;
+cloning does not obtain those descriptions. `clone --depth 1` truncates history:
+older blame and comparisons need the relevant objects/history fetched first.
+The local reader does not clone/fetch on its own or pretend missing history is
+complete. This content API introduces no subprocess Git or HTML parser.
+
+Code patches, PR changed-file pagination, remote comparisons and review/comment
+bodies are separate from descriptions and are not returned here. A REST commit
+response's optional files/patch data is deliberately not presented as a complete
+diff. These broader read contracts remain tracked in #20; local Git inspection
+continues in #23. See [GitHub Issues REST](https://docs.github.com/en/rest/issues/issues#get-an-issue),
+[GitHub Commits REST](https://docs.github.com/en/rest/commits/commits#get-a-commit),
+and [Git shallow-clone behavior](https://git-scm.com/docs/git-clone).
+
 ## Actions step permalinks
 
 ```python

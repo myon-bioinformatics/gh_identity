@@ -306,6 +306,49 @@ def issue(r,n,transport="auto",timeout=30):
  d=request("GET",f"repos/{r}/issues/{n}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-issue/1",**_issue_row(d,r,n,"issue",True),"observed_at":now()}
 
+def content(r,kind,identifier,transport="auto",timeout=30):
+ """Read exact PR/Issue body or full commit message; no comments or code diff."""
+ r=repo(r)
+ if kind in ("pr","issue"):
+  if type(identifier) is not int or identifier<1:raise ValueError("number must be positive")
+  d=request("GET",f"repos/{r}/issues/{identifier}",transport=transport,timeout=timeout)
+  # GitHub's Issues endpoint includes PR descriptions. Validate the kind and
+  # exact repository/number rather than silently treating an Issue as a PR.
+  if not isinstance(d,dict) or "body" not in d:raise Error("invalid_content")
+  row=_issue_row(d,r,identifier,kind,True)
+ elif kind=="commit":
+  if not isinstance(identifier,str) or re.fullmatch(r"[0-9a-fA-F]{40}",identifier) is None:
+   raise ValueError("commit requires a full SHA; resolve refs before reading")
+  sha=identifier.lower()
+  d=request("GET",f"repos/{r}/commits/{sha}",transport=transport,timeout=timeout)
+  if not isinstance(d,dict) or d.get("sha")!=sha or not isinstance(d.get("html_url"),str) or d["html_url"].lower()!=f"https://github.com/{r}/commit/{sha}".lower():
+   raise Error("invalid_commit_identity")
+  commit=d.get("commit")
+  if not isinstance(commit,dict) or not isinstance(commit.get("message"),str):raise Error("invalid_content")
+  message=commit["message"]
+  row={"repository":r,"kind":"commit","sha":sha,"url":d["html_url"],
+       "title":message.split("\n",1)[0],"body":message}
+ else:raise ValueError("kind must be pr, issue or commit")
+ return {"schema":"gh-identity-content/1",**row,"observed_at":now(),
+         "content_scope":"description" if kind!="commit" else "commit_message"}
+
+def content_from_hit(hit,transport="auto",timeout=30):
+ """Re-read a selected search/discovery identity; never trust its stale body."""
+ if not isinstance(hit,dict):raise ValueError("hit must be an identity object")
+ kind=hit.get("kind");r=hit.get("repository")
+ if not isinstance(r,str):raise ValueError("hit requires repository")
+ identifier=hit.get("sha") if kind=="commit" else hit.get("number")
+ return content(r,kind,identifier,transport=transport,timeout=timeout)
+
+def select_content(observation,fields=("title","body")):
+ """Select explicit top-level fields offline, retaining identity/provenance."""
+ if not isinstance(observation,dict) or observation.get("schema")!="gh-identity-content/1":
+  raise ValueError("expected a content observation")
+ if not isinstance(fields,(tuple,list)) or any(not isinstance(f,str) or f not in observation for f in fields):
+  raise ValueError("unknown content field")
+ identity=("schema","repository","kind","number","sha","url","observed_at","content_scope")
+ return {key:observation[key] for key in dict.fromkeys((*identity,*fields)) if key in observation}
+
 def issues(r,state="open",max_items=100,max_pages=10,transport="auto",timeout=30):
  """List repository Issues, excluding PRs while charging all fetched rows."""
  r=repo(r)
@@ -698,6 +741,7 @@ def _main(argv=None):
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("repos");x.add_argument("owner")
  x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
+ x=s.add_parser("content");x.add_argument("repo");x.add_argument("kind",choices=("pr","issue","commit"));x.add_argument("identifier");x.add_argument("--field",action="append")
  x=s.add_parser("issues");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("prs");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
@@ -719,6 +763,10 @@ def _main(argv=None):
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="content":
+   identifier=ns.identifier if ns.kind=="commit" else int(ns.identifier)
+   o=content(ns.repo,ns.kind,identifier,transport=transport)
+   if ns.field is not None:o=select_content(o,ns.field)
   elif ns.cmd=="issues":o=issues(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="prs":o=pull_requests(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="search":o=search(ns.query,kind=ns.kind,sort=ns.sort,order=ns.order,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
@@ -756,7 +804,7 @@ def main(argv=None):
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","pr","comments","reviews",
-              "issue","issues","search","pull_requests","run_history","runs","variable","set_variable","post_comment",
+              "issue","content","content_from_hit","issues","search","pull_requests","run_history","runs","variable","set_variable","post_comment",
               "resolve_ref","source_identity","checks_for_sha","observe_pr","workflow","run","jobs"):
  globals()[_name]=_bounded(globals()[_name])
 if __name__=="__main__":
