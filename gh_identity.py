@@ -3,6 +3,8 @@
 from __future__ import annotations
 import argparse,json,os,re,shutil,subprocess,sys,urllib.error,urllib.parse,urllib.request
 from datetime import datetime,timezone
+from html.parser import HTMLParser
+import hashlib
 API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
@@ -305,6 +307,85 @@ def issue(r,n,transport="auto",timeout=30):
  if type(n) is not int or n<1:raise ValueError("number must be positive")
  d=request("GET",f"repos/{r}/issues/{n}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-issue/1",**_issue_row(d,r,n,"issue",True),"observed_at":now()}
+
+class _ContentHTML(HTMLParser):
+ """Small structural reader; deliberately not a browser/CSS engine."""
+ VOID={"area","base","br","col","embed","hr","img","input","link","meta","param","source","track","wbr"}
+ def __init__(self):
+  super().__init__(convert_charrefs=True);self.root={"tag":"document","attrs":{},"children":[]};self.stack=[self.root]
+ def handle_starttag(self,tag,attrs):
+  node={"tag":tag,"attrs":dict(attrs),"children":[]};self.stack[-1]["children"].append(node)
+  if tag not in self.VOID:
+   if len(self.stack)>=256:raise ValueError("HTML nesting limit exceeded")
+   self.stack.append(node)
+ def handle_startendtag(self,tag,attrs):
+  self.handle_starttag(tag,attrs)
+  if tag not in self.VOID:self.handle_endtag(tag)
+ def handle_endtag(self,tag):
+  for i in range(len(self.stack)-1,0,-1):
+   if self.stack[i]["tag"]==tag:del self.stack[i:];break
+ def handle_data(self,data):self.stack[-1]["children"].append(data)
+
+
+def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000):
+ """Extract one explicitly selected body from saved HTML or serialized DOM.
+
+ Selectors are ordered simple #id, .class or tag alternatives, not general CSS.
+ Ambiguous matches fail; no whole-page fallback or network access occurs.
+ """
+ if not isinstance(html,str) or type(max_bytes) is not int or max_bytes<1:raise ValueError("invalid HTML input/limit")
+ if len(html.encode("utf-8"))>max_bytes:raise ValueError("HTML byte limit exceeded")
+ if source_kind not in ("html","dom"):raise ValueError("source_kind must be html or dom")
+ if not isinstance(selectors,(list,tuple)) or not selectors:raise ValueError("selectors required")
+ for selector in selectors:
+  if not isinstance(selector,str) or not re.fullmatch(r"[#.]?[A-Za-z_][A-Za-z0-9_:-]*",selector):raise ValueError("only simple #id, .class or tag selectors supported")
+ parser=_ContentHTML();parser.feed(html);parser.close()
+ def hidden(node):
+  a=node["attrs"];style=a.get("style") or ""
+  return (node["tag"] in {"script","style","template","noscript","nav","header","footer","button","svg"}
+          or "hidden" in a or (a.get("aria-hidden") or "").lower()=="true"
+          or bool(re.search(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)",style,re.I)))
+ nodes=[]
+ def walk(node):
+  if hidden(node):return
+  nodes.append(node)
+  for child in node["children"]:
+   if isinstance(child,dict):walk(child)
+ walk(parser.root)
+ selected=None;used=None
+ for selector in selectors:
+  def matches(n):
+   a=n["attrs"]
+   if selector.startswith("#"):return a.get("id")==selector[1:]
+   if selector.startswith("."):return selector[1:] in (a.get("class") or "").split()
+   return n["tag"]==selector.lower()
+  found=[n for n in nodes if matches(n)]
+  if len(found)>1:raise Error("ambiguous_html_body")
+  if found:selected=found[0];used=selector;break
+ if selected is None:raise Error("html_body_not_found")
+ blocks={"p","div","section","article","h1","h2","h3","h4","h5","h6","ul","ol","li","blockquote","tr","table"}
+ def render(node,pre=False):
+  if isinstance(node,str):return node if pre else re.sub(r"\s+"," ",node)
+  if hidden(node):return ""
+  tag=node["tag"]
+  if tag=="br":return "\n"
+  if tag=="img":return node["attrs"].get("alt") or ""
+  body="".join(render(child,pre or tag=="pre") for child in node["children"])
+  if tag=="pre":return "\n"+body+"\n"
+  if tag in ("td","th"):return body+"\t"
+  if tag in blocks:return "\n"+body+"\n"
+  return body
+ body=render(selected).strip("\n")
+ return {"schema":"gh-identity-html-content/1","body":body,"selector":used,
+         "source_kind":source_kind,"source_sha256":hashlib.sha256(html.encode("utf-8")).hexdigest(),
+         "visibility":"structural_only","identity_verified":False,"observed_at":now()}
+
+
+def _html_content_file(path,selectors,source_kind,max_bytes):
+ if type(max_bytes) is not int or max_bytes<1:raise ValueError("invalid HTML byte limit")
+ with open(path,"rb") as stream:raw=stream.read(max_bytes+1)
+ if len(raw)>max_bytes:raise ValueError("HTML byte limit exceeded")
+ return html_content(raw.decode("utf-8"),selectors,source_kind=source_kind,max_bytes=max_bytes)
 
 def content(r,kind,identifier,transport="auto",timeout=30):
  """Read exact PR/Issue body or full commit message; no comments or code diff."""
@@ -737,6 +818,7 @@ def _main(argv=None):
   if transport not in ("auto","gh","urllib"): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
   del argv[i:i+2]
  a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
+ x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000)
  s.add_parser("capabilities")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("repos");x.add_argument("owner")
@@ -763,6 +845,7 @@ def _main(argv=None):
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes)
   elif ns.cmd=="content":
    identifier=ns.identifier if ns.kind=="commit" else int(ns.identifier)
    o=content(ns.repo,ns.kind,identifier,transport=transport)
@@ -783,7 +866,7 @@ def _main(argv=None):
   else:
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
- except (ValueError,Error) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
+ except (ValueError,Error,OSError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1

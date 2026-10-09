@@ -256,3 +256,42 @@ The stdlib POSIX runner reports hashes and exits 0 on agreement, 1 on CLI/output
 mismatch, or 2 on invalid evidence/runner failure. A temporary recorded `gh`
 process supplies the saved responses; this does not certify live connectivity.
 See the fixture README for capture endpoints and fresh-capture instructions.
+
+### Saved HTML / serialized DOM body text
+
+```sh
+python gh_identity.py html-content saved-page.html \
+  --selector '#issue-description' --selector '.specific-description-body'
+python gh_identity.py html-content saved-dom.html \
+  --selector '#selected-body' --source-kind dom
+```
+
+These selectors are illustrative: inspect the saved document and choose its
+actual unique description/container identifier. Supported selectors are simple
+`#id`, `.class`, or tag names, in priority order; this is not a full CSS selector
+engine. The first existing candidate must be unique. Multiple matches fail,
+including multiple comment bodies; missing candidates never fall back to page
+text. There is deliberately no unverified GitHub layout heuristic yet.
+
+`html_content(text, selectors, source_kind="html")` is an offline stdlib API.
+It removes script/style/template/noscript and navigation/header/footer/button/SVG
+subtrees, explicit hidden/aria-hidden elements and simple inline display:none or
+visibility:hidden. It decodes entities, keeps link text and image alt text, inserts
+block/line/table boundaries, and preserves preformatted code whitespace. CSS
+selectors inside code/text are content and remain intact. It does not execute JS,
+load stylesheets, calculate layout/accessibility, or certify browser-visible text.
+The `dom` label means the caller supplied serialized DOM; it does not launch a
+browser. Caller-chosen containers may still contain unrelated UI elements.
+
+Output records the selected pattern, input SHA-256 and source kind, with
+`visibility: structural_only` and `identity_verified: false`; a saved page alone
+is not authenticated PR/Issue/commit identity evidence. Runtime does no network
+access. UTF-8 input defaults to a 10 MB limit (`--input-bytes`) and nesting is
+bounded. Invalid/missing/ambiguous input exits 2. The usual REST `content` command
+continues returning exact Markdown/message text rather than this normalized text.
+
+The HTML tests currently use synthetic layouts with Japanese, entities, code,
+hidden elements and adjacent comments. Real GitHub HTML/DOM layout validation is
+still outstanding: the capture connector converts GitHub page URLs to REST JSON.
+Saving HTML once allows repeated extraction without repeat requests; fetching an
+HTML page is not necessarily smaller than fetching its API representation.
