@@ -335,3 +335,13 @@ network requests. CSS rendering and JS execution are not tested. With web-ui PR
 the independent Markdown code-newline failure still correctly yields exit 1.
 This optional composition keeps rendering in web-ui, conversion in markdown,
 and extraction in GHI; consumers can use the same runner with their adopted files.
+
+Page-family regressions now model Wiki plus sidebar, file code plus controls,
+PR/Issue description plus replies, commit message plus diff statistics, release
+notes plus assets, and README details/code. Duplicate containers and sign-in pages
+fail closed. These are deliberately synthetic, not recorded GitHub DOM selectors.
+Public page text was inspected at https://github.com/obsproject/obs-studio/wiki
+and https://github.com/python/cpython/blob/main/README.rst on 2026-10-09; this
+confirmed the need to separate navigation/controls from content but did not supply
+raw DOM compatibility evidence. Directly selecting `pre` now preserves its exact
+leading/trailing newlines instead of trimming them as block boundaries.

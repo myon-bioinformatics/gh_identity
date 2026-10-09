@@ -375,7 +375,8 @@ def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000):
   if tag in ("td","th"):return body+"\t"
   if tag in blocks:return "\n"+body+"\n"
   return body
- body=render(selected).strip("\n")
+ body=("".join(render(child,True) for child in selected["children"])
+       if selected["tag"]=="pre" else render(selected).strip("\n"))
  return {"schema":"gh-identity-html-content/1","body":body,"selector":used,
          "source_kind":source_kind,"source_sha256":hashlib.sha256(html.encode("utf-8")).hexdigest(),
          "visibility":"structural_only","identity_verified":False,"observed_at":now()}
