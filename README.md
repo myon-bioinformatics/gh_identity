@@ -439,3 +439,37 @@ are not substituted for empty user content, and no control is activated. These
 are text extraction semantics, not a DOM interaction/accessibility tree API.
 The option is recorded in output. These cases establish neither authenticated
 chat transcript extraction nor whole-site support.
+
+### One-command browser DOM capture (optional Playwright)
+
+Install the optional browser tooling in your test environment once:
+
+```sh
+python -m pip install playwright
+python -m playwright install chromium
+```
+
+Then capture a public page or locally served Gradio fixture in one command:
+
+```sh
+python scripts/capture_browser_dom.py https://chatgpt.com/ --selector h1 --output chatgpt-dom.json
+python scripts/capture_browser_dom.py http://127.0.0.1:7860 --selector '#dom-lab-body' --output local-dom.json
+```
+
+The helper opens one fresh isolated browser context, navigates once, waits for the
+explicit selector, requires one match, and saves outerHTML/textContent/innerText,
+URL, title, time and HTML hash. Existing output files are never overwritten.
+`--headed` shows the browser while capturing; it still closes afterward. No
+login, form input, chat send, consent interaction or retry loop is implemented.
+Page JavaScript and normal subresources still load: one navigation does not mean
+one HTTP request. The byte limit bounds returned selected data after collection,
+not page memory/network volume; timeouts apply per browser operation. A captured
+login/challenge page is not success at retrieving the intended content: output
+always says `content_verified: false`. Exported DOM is a point-in-time observation,
+not proof that dynamic content finished loading or that CSS is portable.
+
+This replaces the environment-specific `cua.createBrowserTab` workflow with a
+portable optional CLI, not the same browser/session. GHI's stdlib runtime stays
+unchanged. Only CLI preflight has been tested here; this environment has no local
+Playwright/Chromium, so this helper's browser path remains unverified. Earlier
+live DOM evidence came from the separate cloud browser.
