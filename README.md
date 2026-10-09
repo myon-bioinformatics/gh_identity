@@ -245,3 +245,14 @@ Lists/searches omit full bodies; `issue` returns the selected Issue body. PR hit
 are search observations, not full PR head/base/check or mergeability evidence;
 use `pr`/`observe_pr` to re-read exact current identity before subsequent work.
 See the [GitHub search contract](https://docs.github.com/en/rest/search/search#search-issues-and-pull-requests).
+
+### Full-response CLI replay
+
+Six recorded public PR/Issue/commit REST responses are retained in
+`tests/fixtures/content_snapshots`. Run
+`python scripts/check_content_snapshots.py tests/fixtures/content_snapshots`
+to compare full and body-selected CLI output against their exact body strings.
+The stdlib POSIX runner reports hashes and exits 0 on agreement, 1 on CLI/output
+mismatch, or 2 on invalid evidence/runner failure. A temporary recorded `gh`
+process supplies the saved responses; this does not certify live connectivity.
+See the fixture README for capture endpoints and fresh-capture instructions.
