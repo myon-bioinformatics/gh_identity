@@ -295,3 +295,26 @@ hidden elements and adjacent comments. Real GitHub HTML/DOM layout validation is
 still outstanding: the capture connector converts GitHub page URLs to REST JSON.
 Saving HTML once allows repeated extraction without repeat requests; fetching an
 HTML page is not necessarily smaller than fetching its API representation.
+
+### HTML / Markdown round-trip probe
+
+```sh
+python scripts/check_html_roundtrip.py /path/to/vendor/markdown.py
+```
+
+This optional stdlib probe loads the explicitly supplied, trusted markdown module;
+it adds no runtime vendor dependency. Six CSS-free HTML examples are converted to
+Markdown, back to HTML, then Markdown again. It checks both normalized structural
+content (including links and preformatted whitespace) and Markdown stability.
+It is not a byte-for-byte HTML reversibility claim or a live GitHub layout test.
+The plain-text `html-content` output is not the round-trip input: text extraction
+already discards links/formatting. Retain the original HTML for this purpose.
+
+Observed with mcp-toolcall-lab's locked markdown.py from
+`c3063e0887c6eb6a531ee774793682ceff8a164d` on 2026-10-09:
+paragraph/link, heading/emphasis, list, quote and table matched; code failed.
+`<pre><code>x\n</code></pre>` gains a trailing newline in the conversion path.
+All six Markdown representations stabilized, demonstrating why stability alone
+is insufficient. The probe intentionally exits 1 for that source-preservation
+failure; it is not included as a green CI gate. Exit 2 indicates runner failure.
+A canonical markdown converter fix and recheck remain outstanding.
