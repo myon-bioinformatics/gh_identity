@@ -3,6 +3,8 @@
 from __future__ import annotations
 import argparse,fnmatch,json,os,re,shutil,subprocess,sys,urllib.error,urllib.parse,urllib.request
 from datetime import datetime,timezone
+from html.parser import HTMLParser
+import hashlib
 API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
@@ -305,6 +307,165 @@ def issue(r,n,transport="auto",timeout=30):
  if type(n) is not int or n<1:raise ValueError("number must be positive")
  d=request("GET",f"repos/{r}/issues/{n}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-issue/1",**_issue_row(d,r,n,"issue",True),"observed_at":now()}
+
+class _ContentHTML(HTMLParser):
+ """Small structural reader; deliberately not a browser/CSS engine."""
+ VOID={"area","base","br","col","embed","hr","img","input","link","meta","param","source","track","wbr"}
+ def __init__(self):
+  super().__init__(convert_charrefs=True);self.root={"tag":"document","attrs":{},"children":[]};self.stack=[self.root]
+ def handle_starttag(self,tag,attrs):
+  node={"tag":tag,"attrs":dict(attrs),"children":[]};self.stack[-1]["children"].append(node)
+  if tag not in self.VOID:
+   if len(self.stack)>=256:raise ValueError("HTML nesting limit exceeded")
+   self.stack.append(node)
+ def handle_startendtag(self,tag,attrs):
+  self.handle_starttag(tag,attrs)
+  if tag not in self.VOID:self.handle_endtag(tag)
+ def handle_endtag(self,tag):
+  for i in range(len(self.stack)-1,0,-1):
+   if self.stack[i]["tag"]==tag:del self.stack[i:];break
+ def handle_data(self,data):self.stack[-1]["children"].append(data)
+
+
+
+def _inline_hidden(style):
+ """Limited inline declaration order, not computed CSS or inherited visibility."""
+ # Keep semicolons inside strings/functions and comments out of the declaration
+ # stream. Unsupported values remain unknown rather than implying visibility.
+ declarations=[];quote=None;depth=0;index=0;clean=[]
+ while index<len(style):
+  char=style[index]
+  if quote:
+   clean.append(char)
+   if char=="\\" and index+1<len(style):
+    index+=1;clean.append(style[index])
+   elif char==quote:quote=None
+  elif style.startswith("/*",index):
+   end=style.find("*/",index+2)
+   if end<0:break
+   clean.append(" ");index=end+1
+  elif char in "\"'":quote=char;clean.append(char)
+  elif char in "([{":depth+=1;clean.append(char)
+  elif char in ")]}":depth=max(0,depth-1);clean.append(char)
+  elif char==";" and not depth:declarations.append("".join(clean));clean=[]
+  else:clean.append(char)
+  index+=1
+ declarations.append("".join(clean));values={}
+ for declaration in declarations:
+  name,sep,value=declaration.partition(":");name=name.strip().lower()
+  if not sep or name not in ("display","visibility"):continue
+  value=value.strip().lower();important=bool(re.search(r"!\s*important$",value))
+  value=re.sub(r"\s*!\s*important$","",value).strip()
+  if not value:continue
+  if important or not values.get(name,(None,False))[1]:values[name]=(value,important)
+ return values.get("display",(None,False))[0]=="none" or values.get("visibility",(None,False))[0]=="hidden"
+
+
+def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000,include_controls=False):
+ """Extract one explicitly selected body from saved HTML or serialized DOM.
+
+ Selectors are ordered simple #id, .class or tag alternatives, not general CSS.
+ Ambiguous matches fail; no whole-page fallback or network access occurs.
+ """
+ if not isinstance(html,str) or type(max_bytes) is not int or max_bytes<1:raise ValueError("invalid HTML input/limit")
+ if len(html.encode("utf-8"))>max_bytes:raise ValueError("HTML byte limit exceeded")
+ if type(include_controls) is not bool:raise ValueError("include_controls must be bool")
+ if source_kind not in ("html","dom"):raise ValueError("source_kind must be html or dom")
+ if not isinstance(selectors,(list,tuple)) or not selectors:raise ValueError("selectors required")
+ for selector in selectors:
+  if not isinstance(selector,str) or not re.fullmatch(r"[#.]?[A-Za-z_][A-Za-z0-9_:-]*",selector):raise ValueError("only simple #id, .class or tag selectors supported")
+ parser=_ContentHTML();parser.feed(html);parser.close()
+ def hidden(node):
+  a=node["attrs"];style=a.get("style") or ""
+  return (node["tag"] in {"script","style","template","noscript","nav","header","footer","svg"}
+          or (node["tag"]=="button" and not include_controls)
+          or "hidden" in a or (a.get("aria-hidden") or "").lower()=="true"
+          or _inline_hidden(style))
+ nodes=[]
+ def walk(node):
+  if hidden(node):return
+  nodes.append(node)
+  for child in node["children"]:
+   if isinstance(child,dict):walk(child)
+ walk(parser.root)
+ selected=None;used=None
+ for selector in selectors:
+  def matches(n):
+   a=n["attrs"]
+   if selector.startswith("#"):return a.get("id")==selector[1:]
+   if selector.startswith("."):return selector[1:] in (a.get("class") or "").split()
+   return n["tag"]==selector.lower()
+  found=[n for n in nodes if matches(n)]
+  if len(found)>1:raise Error("ambiguous_html_body")
+  if found:selected=found[0];used=selector;break
+ if selected is None:raise Error("html_body_not_found")
+ blocks={"p","div","section","article","h1","h2","h3","h4","h5","h6","ul","ol","li","blockquote","tr","table"}
+ def render(node,pre=False):
+  if isinstance(node,str):return node if pre else re.sub(r"\s+"," ",node)
+  if hidden(node):return ""
+  tag=node["tag"]
+  if tag=="br":return "\n"
+  if tag=="img":return node["attrs"].get("alt") or ""
+  body="".join(render(child,pre or tag=="pre") for child in node["children"])
+  if tag=="pre":return "\n"+body+"\n"
+  if tag in ("td","th"):return body+"\t"
+  if tag in blocks:return "\n"+body+"\n"
+  return body
+ body=("".join(render(child,True) for child in selected["children"])
+       if selected["tag"]=="pre" else render(selected).strip("\n"))
+ return {"schema":"gh-identity-html-content/1","body":body,"selector":used,
+         "source_kind":source_kind,"source_sha256":hashlib.sha256(html.encode("utf-8")).hexdigest(),
+         "visibility":"structural_only","include_controls":include_controls,"identity_verified":False,"observed_at":now()}
+
+
+def _html_content_file(path,selectors,source_kind,max_bytes,include_controls=False):
+ if type(max_bytes) is not int or max_bytes<1:raise ValueError("invalid HTML byte limit")
+ with open(path,"rb") as stream:raw=stream.read(max_bytes+1)
+ if len(raw)>max_bytes:raise ValueError("HTML byte limit exceeded")
+ return html_content(raw.decode("utf-8"),selectors,source_kind=source_kind,max_bytes=max_bytes,include_controls=include_controls)
+
+def content(r,kind,identifier,transport="auto",timeout=30):
+ """Read exact PR/Issue body or full commit message; no comments or code diff."""
+ r=repo(r)
+ if kind in ("pr","issue"):
+  if type(identifier) is not int or identifier<1:raise ValueError("number must be positive")
+  d=request("GET",f"repos/{r}/issues/{identifier}",transport=transport,timeout=timeout)
+  # GitHub's Issues endpoint includes PR descriptions. Validate the kind and
+  # exact repository/number rather than silently treating an Issue as a PR.
+  if not isinstance(d,dict) or "body" not in d:raise Error("invalid_content")
+  row=_issue_row(d,r,identifier,kind,True)
+ elif kind=="commit":
+  if not isinstance(identifier,str) or re.fullmatch(r"[0-9a-fA-F]{40}",identifier) is None:
+   raise ValueError("commit requires a full SHA; resolve refs before reading")
+  sha=identifier.lower()
+  d=request("GET",f"repos/{r}/commits/{sha}",transport=transport,timeout=timeout)
+  if not isinstance(d,dict) or d.get("sha")!=sha or not isinstance(d.get("html_url"),str) or d["html_url"].lower()!=f"https://github.com/{r}/commit/{sha}".lower():
+   raise Error("invalid_commit_identity")
+  commit=d.get("commit")
+  if not isinstance(commit,dict) or not isinstance(commit.get("message"),str):raise Error("invalid_content")
+  message=commit["message"]
+  row={"repository":r,"kind":"commit","sha":sha,"url":d["html_url"],
+       "title":message.split("\n",1)[0],"body":message}
+ else:raise ValueError("kind must be pr, issue or commit")
+ return {"schema":"gh-identity-content/1",**row,"observed_at":now(),
+         "content_scope":"description" if kind!="commit" else "commit_message"}
+
+def content_from_hit(hit,transport="auto",timeout=30):
+ """Re-read a selected search/discovery identity; never trust its stale body."""
+ if not isinstance(hit,dict):raise ValueError("hit must be an identity object")
+ kind=hit.get("kind");r=hit.get("repository")
+ if not isinstance(r,str):raise ValueError("hit requires repository")
+ identifier=hit.get("sha") if kind=="commit" else hit.get("number")
+ return content(r,kind,identifier,transport=transport,timeout=timeout)
+
+def select_content(observation,fields=("title","body")):
+ """Select explicit top-level fields offline, retaining identity/provenance."""
+ if not isinstance(observation,dict) or observation.get("schema")!="gh-identity-content/1":
+  raise ValueError("expected a content observation")
+ if not isinstance(fields,(tuple,list)) or any(not isinstance(f,str) or f not in observation for f in fields):
+  raise ValueError("unknown content field")
+ identity=("schema","repository","kind","number","sha","url","observed_at","content_scope")
+ return {key:observation[key] for key in dict.fromkeys((*identity,*fields)) if key in observation}
 
 def issues(r,state="open",max_items=100,max_pages=10,transport="auto",timeout=30):
  """List repository Issues, excluding PRs while charging all fetched rows."""
@@ -1173,6 +1334,7 @@ def _main(argv=None):
   if transport not in ("auto","gh","urllib"): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
   del argv[i:i+2]
  a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
+ x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
  s.add_parser("capabilities")
  for command in ("git-status", "git-files", "git-diff", "git-log", "git-numstat", "git-show", "git-blame", "git-grep", "git-ignore"):
   x=s.add_parser(command);x.add_argument("--root",default=".");x.add_argument("--output-bytes",type=int,default=1000000)
@@ -1188,6 +1350,7 @@ def _main(argv=None):
  x.add_argument("--exclude-dir",action="append",default=[]);x.add_argument("--exclude-file",action="append",default=[])
  x=s.add_parser("repos");x.add_argument("owner")
  x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
+ x=s.add_parser("content");x.add_argument("repo");x.add_argument("kind",choices=("pr","issue","commit"));x.add_argument("identifier");x.add_argument("--field",action="append")
  x=s.add_parser("issues");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("prs");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
@@ -1219,6 +1382,11 @@ def _main(argv=None):
   elif ns.cmd=="tree":o=tree(ns.repo,ns.ref,depth=None if ns.recursive else ns.depth,exclude_dirs=ns.exclude_dir,exclude_files=ns.exclude_file,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes,ns.include_controls)
+  elif ns.cmd=="content":
+   identifier=ns.identifier if ns.kind=="commit" else int(ns.identifier)
+   o=content(ns.repo,ns.kind,identifier,transport=transport)
+   if ns.field is not None:o=select_content(o,ns.field)
   elif ns.cmd=="issues":o=issues(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="prs":o=pull_requests(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="search":o=search(ns.query,kind=ns.kind,sort=ns.sort,order=ns.order,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
@@ -1235,7 +1403,7 @@ def _main(argv=None):
   else:
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
- except (ValueError,Error,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
+ except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
@@ -1256,7 +1424,7 @@ def main(argv=None):
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","pr","comments","reviews",
-              "issue","issues","search","pull_requests","run_history","runs","variable","set_variable","post_comment",
+              "issue","content","content_from_hit","issues","search","pull_requests","run_history","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs"):
  globals()[_name]=_bounded(globals()[_name])
 if __name__=="__main__":

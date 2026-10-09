@@ -1,0 +1,9 @@
+{
+ "captured_on":"2026-10-09",
+ "scope":"Semantic attribute projections of observed public DOM: layout classes and volatile binding IDs removed; text and relevant attributes retained. Not verbatim outerHTML.",
+ "cases":[
+  {"name":"chatgpt-empty-composer","url":"https://chatgpt.com/","selector":"textarea","html":"<textarea aria-label=\"ChatGPT とチャット\" id=\"mobile-composer-prompt\" name=\"prompt\" placeholder=\"ChatGPT に聞く\" required=\"\" rows=\"1\"></textarea>","expected":""},
+  {"name":"gemini-consent-list","url":"https://gemini.google.com/app","selector":"li","html":"<li><gem-icon aria-hidden=\"true\"><mat-icon role=\"img\" aria-hidden=\"true\" data-mat-icon-name=\"warning\" fonticon=\"warning\"></mat-icon></gem-icon><span>サービスの停止を管理し、スパム、不正行為、不正使用から保護するため</span></li>","expected":"サービスの停止を管理し、スパム、不正行為、不正使用から保護するため"},
+  {"name":"claude-accordion-heading","url":"https://claude.ai/login","selector":"h3","html":"<h3 data-hidden=\"\" data-closed=\"\" data-cds=\"AccordionHeader\"><button type=\"button\" data-hidden=\"\" aria-disabled=\"false\" aria-expanded=\"false\"><span>Claudeとは何で、どのように機能しますか？</span><span><span aria-hidden=\"true\"></span></span></button></h3>","expected":"Claudeとは何で、どのように機能しますか？","include_controls":true}
+ ]
+}

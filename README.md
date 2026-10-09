@@ -30,6 +30,57 @@ Use `--transport gh` or `--transport urllib` to force a transport; default is `a
 
 See [SPEC.md](SPEC.md) for the v0.1 contract.
 
+## Exact PR, Issue and commit content
+
+```bash
+python gh_identity.py content OWNER/REPO pr 23 --field title --field body
+python gh_identity.py content OWNER/REPO issue 20 --field body
+python gh_identity.py content OWNER/REPO commit FULL_40_CHARACTER_SHA --field body
+```
+
+`content(repo, kind, identifier)` returns `gh-identity-content/1` with exact
+repository/kind/number or SHA, URL, observed_at, title and full body. PR and
+Issue body means the description, not comments. Commit body is the entire
+commit message including its subject, blank lines and trailers. Null and empty
+Issue/PR descriptions remain distinct; missing/malformed content is an error.
+Commit selectors must be full SHAs; resolve a branch/ref first using
+`resolve_ref`, then read that immutable identity. No clone is needed.
+
+```python
+import gh_identity as ghi
+hits = ghi.search('repo:OWNER/REPO is:open', kind='pr')
+if hits['items']:
+    selected = ghi.content_from_hit(hits['items'][0])
+    body_only = ghi.select_content(selected, ['body'])  # offline, no extra GET
+```
+
+Search/list results remain digest-first. `content_from_hit` re-reads the chosen
+repository/number/kind and does not trust an old search body. It also accepts
+an explicit commit identity with repository/kind/sha; commit search is not
+implemented by this change. `select_content` selects exact top-level fields
+and always retains identity/provenance; it does not interpret or execute text.
+Unknown fields raise ValueError. All content calls share existing gh/urllib
+transports and byte/time budgets. Permission/404/oversize failures are errors,
+not successful empty content. `pr()` retains its compact state/head/base API.
+
+### Git history versus GitHub discussion data
+
+Git stores commit messages, trees and blobs, so local show/log/diff/blame can
+reuse the established git_inspector APIs being consolidated in PR #23.
+PR/Issue descriptions and discussions are GitHub records, read via gh/API;
+cloning does not obtain those descriptions. `clone --depth 1` truncates history:
+older blame and comparisons need the relevant objects/history fetched first.
+The local reader does not clone/fetch on its own or pretend missing history is
+complete. This content API introduces no subprocess Git or HTML parser.
+
+Code patches, PR changed-file pagination, remote comparisons and review/comment
+bodies are separate from descriptions and are not returned here. A REST commit
+response's optional files/patch data is deliberately not presented as a complete
+diff. These broader read contracts remain tracked in #20; local Git inspection
+continues in #23. See [GitHub Issues REST](https://docs.github.com/en/rest/issues/issues#get-an-issue),
+[GitHub Commits REST](https://docs.github.com/en/rest/commits/commits#get-a-commit),
+and [Git shallow-clone behavior](https://git-scm.com/docs/git-clone).
+
 ## Repository structure with directory/file exclusions
 
 ```bash
@@ -239,6 +290,248 @@ Lists/searches omit full bodies; `issue` returns the selected Issue body. PR hit
 are search observations, not full PR head/base/check or mergeability evidence;
 use `pr`/`observe_pr` to re-read exact current identity before subsequent work.
 See the [GitHub search contract](https://docs.github.com/en/rest/search/search#search-issues-and-pull-requests).
+
+### Full-response CLI replay
+
+Six recorded public PR/Issue/commit REST responses are retained in
+`tests/fixtures/content_snapshots`. Run
+`python scripts/check_content_snapshots.py tests/fixtures/content_snapshots`
+to compare full and body-selected CLI output against their exact body strings.
+The stdlib POSIX runner reports hashes and exits 0 on agreement, 1 on CLI/output
+mismatch, or 2 on invalid evidence/runner failure. A temporary recorded `gh`
+process supplies the saved responses; this does not certify live connectivity.
+See the fixture README for capture endpoints and fresh-capture instructions.
+
+### Saved HTML / serialized DOM body text
+
+```sh
+python gh_identity.py html-content saved-page.html \
+  --selector '#issue-description' --selector '.specific-description-body'
+python gh_identity.py html-content saved-dom.html \
+  --selector '#selected-body' --source-kind dom
+```
+
+These selectors are illustrative: inspect the saved document and choose its
+actual unique description/container identifier. Supported selectors are simple
+`#id`, `.class`, or tag names, in priority order; this is not a full CSS selector
+engine. The first existing candidate must be unique. Multiple matches fail,
+including multiple comment bodies; missing candidates never fall back to page
+text. There is deliberately no unverified GitHub layout heuristic yet.
+
+`html_content(text, selectors, source_kind="html")` is an offline stdlib API.
+It removes script/style/template/noscript and navigation/header/footer/button/SVG
+subtrees, explicit hidden/aria-hidden elements and simple inline display:none or
+visibility:hidden. It decodes entities, keeps link text and image alt text, inserts
+block/line/table boundaries, and preserves preformatted code whitespace. CSS
+selectors inside code/text are content and remain intact. It does not execute JS,
+load stylesheets, calculate layout/accessibility, or certify browser-visible text.
+The `dom` label means the caller supplied serialized DOM; it does not launch a
+browser. Caller-chosen containers may still contain unrelated UI elements.
+
+Output records the selected pattern, input SHA-256 and source kind, with
+`visibility: structural_only` and `identity_verified: false`; a saved page alone
+is not authenticated PR/Issue/commit identity evidence. Runtime does no network
+access. UTF-8 input defaults to a 10 MB limit (`--input-bytes`) and nesting is
+bounded. Invalid/missing/ambiguous input exits 2. The usual REST `content` command
+continues returning exact Markdown/message text rather than this normalized text.
+
+The HTML tests currently use synthetic layouts with Japanese, entities, code,
+hidden elements and adjacent comments. Real GitHub HTML/DOM layout validation is
+still outstanding: the capture connector converts GitHub page URLs to REST JSON.
+Saving HTML once allows repeated extraction without repeat requests; fetching an
+HTML page is not necessarily smaller than fetching its API representation.
+
+### HTML / Markdown round-trip probe
+
+```sh
+python scripts/check_html_roundtrip.py /path/to/vendor/markdown.py
+```
+
+This optional stdlib probe loads the explicitly supplied, trusted markdown module;
+it adds no runtime vendor dependency. Six CSS-free HTML examples are converted to
+Markdown, back to HTML, then Markdown again. It checks both normalized structural
+content (including links and preformatted whitespace) and Markdown stability.
+It is not a byte-for-byte HTML reversibility claim or a live GitHub layout test.
+The plain-text `html-content` output is not the round-trip input: text extraction
+already discards links/formatting. Retain the original HTML for this purpose.
+
+Observed with mcp-toolcall-lab's locked markdown.py from
+`c3063e0887c6eb6a531ee774793682ceff8a164d` on 2026-10-09:
+paragraph/link, heading/emphasis, list, quote and table matched; code failed.
+`<pre><code>x\n</code></pre>` gains a trailing newline in the conversion path.
+All six Markdown representations stabilized, demonstrating why stability alone
+is insufficient. The probe intentionally exits 1 for that source-preservation
+failure; it is not included as a green CI gate. Exit 2 indicates runner failure.
+That result applies to the recorded converter pin; it is not a claim about every
+newer markdown revision. A canonical converter fix is being validated separately;
+rerun the same probe with the exact adopted file before changing this baseline.
+
+For optional cross-project wrapper checks, supply an existing trusted web-ui module:
+
+```sh
+python scripts/check_html_roundtrip.py /path/to/vendor/markdown.py \
+  --web-ui-module /path/to/web_ui.py
+```
+
+This reuses web-ui's `render_document`, `shared_stylesheets`, and `shared_scripts`
+to wrap each fragment with inline CSS, shared CSS references and opt-in module
+script references. GHI extraction before/after wrapping must match exactly.
+It prints module SHA-256 identities, requires no vendor changes, and performs no
+network requests. CSS rendering and JS execution are not tested. With web-ui PR
+#43 at `9ee0232494cb124ed24b79ef87980630bc550e31`, all six wrapper cases matched;
+the independent Markdown code-newline failure still correctly yields exit 1.
+This optional composition keeps rendering in web-ui, conversion in markdown,
+and extraction in GHI; consumers can use the same runner with their adopted files.
+
+Page-family regressions now model Wiki plus sidebar, file code plus controls,
+PR/Issue description plus replies, commit message plus diff statistics, release
+notes plus assets, and README details/code. Duplicate containers and sign-in pages
+fail closed. These are deliberately synthetic, not recorded GitHub DOM selectors.
+Public page text was inspected at https://github.com/obsproject/obs-studio/wiki
+and https://github.com/python/cpython/blob/main/README.rst on 2026-10-09; this
+confirmed the need to separate navigation/controls from content but did not supply
+raw DOM compatibility evidence. Directly selecting `pre` now preserves its exact
+leading/trailing newlines instead of trimming them as block boundaries.
+
+Live-browser DOM evidence now exists for two code blocks in the public GHI
+README file preview, captured once on 2026-10-09. See
+`tests/fixtures/browser_dom/file-code.json` and `tests/test_browser_dom.py`.
+The saved `outerHTML` includes actual nested GitHub syntax-highlight spans;
+CLI extraction is compared exactly with the browser's recorded `innerText`.
+No repeated network access is needed for replay. Scope is these two observed
+file-preview fragments, not the whole page, file Code tab, or all GitHub layouts.
+No login interaction was performed. This does not resolve the separate Markdown
+round-trip newline drift or establish CSS/JS equivalence for arbitrary pages.
+
+### Optional internal reproduction when a site cannot be inspected
+
+`scripts/serve_dom_lab.py` provides an optional local Gradio fixture renderer.
+Use it to separate local rendering/extraction behavior from an inaccessible site's
+network or access failure; it is not a replacement for live-site evidence or a
+CORS bypass. It does not fetch remote pages and binds only to 127.0.0.1, with public
+sharing disabled. Supply an existing trusted markdown.py:
+
+```sh
+python scripts/serve_dom_lab.py /path/to/vendor/markdown.py
+```
+
+Install Gradio separately in a disposable test environment if needed; it is not
+a GHI runtime dependency. Inspect `#dom-lab-body` in the rendered page and save
+its DOM for offline comparison. For fixture-only generation without Gradio:
+
+```sh
+python scripts/serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixture.html
+python gh_identity.py html-content fixture.html --selector '#dom-lab-body'
+```
+
+At the initial capture, only the export/extraction path was exercised because
+Gradio was unavailable. Later, web-ui PR #43 at `8ff5bfb` added and passed a
+local Gradio + Chromium DOM integration test
+([CI evidence](https://github.com/myon-bioinformatics/web-ui/actions/runs/37887560280)).
+That validates web-ui's shared reproduction path, not this GHI-specific
+`serve_dom_lab.py` server path, which remains unverified.
+The built-in representative fixture does not reproduce an arbitrary site's DOM,
+computed CSS, JavaScript state, authentication, or network restrictions.
+
+A live OBS Studio Wiki inspection on 2026-10-09 also exposed an important scope
+boundary: `#wiki-body` contains the "Add a custom footer" edit affordance, while
+its `.markdown-body` child contains the article. Do not infer that a body-named
+ID excludes all UI. The first article paragraph DOM is retained in
+`tests/fixtures/browser_dom/wiki-paragraph.html` and matched to observed browser
+text. Source: https://github.com/obsproject/obs-studio/wiki (public, no login).
+This is a paragraph-level capture, not whole-Wiki certification. Selected `pre`
+regressions cover zero, one and two trailing newlines, leading newlines, tabs,
+indentation and Japanese text, independently of the Markdown converter.
+The same capture also retains the four-link help sublist (`wiki-links.html`).
+Its text/order is compared after whitespace normalization, explicitly excluding
+browser-generated list markers and layout spacing from that claim.
+
+Additional live DOM probes outside GitHub (2026-10-09) are in
+`tests/fixtures/browser_dom/simple-sites.json`. Abe Hiroshi's official top page
+uses Shift_JIS (observed `document.characterSet`), legacy font/table layout and
+an entry frameset referring to `menu.htm` and `top.htm`. The child heading was
+captured from the observed `top.htm` reference. Browser-serialized DOM is already
+Unicode; this is not evidence that the UTF-8 file CLI decodes original Shift_JIS
+HTTP bytes. Frame parent markup does not include child documents; no auto-fetch
+or frame traversal has been added.
+
+TOHO's plain news heading matches browser innerText exactly. Its image-backed
+main heading supplies `Moments for Life` in image alt, which innerText omits but
+GHI deliberately retains. That case checks alt plus text, not identical visible
+text. A visually-hidden CSS class was also observed; generic class-based hiding
+cannot be inferred without styles/computed layout. These small captures validate
+specific tag patterns, not complete extraction or CSS fidelity for either site.
+
+Global-site variation: small live Google company-info and Apple accessibility DOM
+captures (2026-10-09) now cover colored inline spans with U+200B zero-width spaces,
+a nested card with decorative SVG, and a paragraph with NBSP and JSON-valued data
+attributes. See `global-sites.json` and `test_global_site_dom.py`. The CLI is
+exercised against saved fragments without repeat HTTP access. Google inline text
+matches exactly and retains U+200B. Card/Apple comparisons explicitly normalize
+whitespace: GHI collapses NBSP outside pre, so these are not byte-exact browser
+innerText claims. SVG and attribute data do not leak into text. No site-specific
+parser branches, cookie actions, or authentication were introduced.
+
+### Public chat UI structural cases
+
+ChatGPT's logged-out top page, Gemini's consent dialog and Claude's login/FAQ
+surface were inspected on 2026-10-09 without accepting consent, signing in,
+entering input or sending chat messages. `chat-surfaces.json` retains documented
+semantic projections of observed DOM (not verbatim captures): empty textarea
+placeholder/label, custom-element icons under aria-hidden, and an accordion
+heading whose text is inside a button. Volatile bindings/layout classes are
+removed; relevant text/attributes remain. Source state is recorded per case.
+
+`html-content --include-controls` / `html_content(..., include_controls=True)`
+opts into button text, useful for FAQ headings. The default still excludes
+buttons. Explicit hidden and aria-hidden subtrees stay excluded in either mode;
+`data-hidden` alone is not treated as HTML `hidden`. Input labels/placeholders
+are not substituted for empty user content, and no control is activated. These
+are text extraction semantics, not a DOM interaction/accessibility tree API.
+The option is recorded in output. These cases establish neither authenticated
+chat transcript extraction nor whole-site support.
+
+### Browser capture ownership
+
+Browser launch/DOM acquisition now belongs to browser-test-kit PR #54:
+https://github.com/myon-bioinformatics/browser-test-kit/pull/54
+
+From that checkout:
+
+```sh
+python examples/capture_browser_dom.py https://chatgpt.com/ --selector h1 --output chatgpt-dom.json
+```
+
+It reuses the kit's existing Playwright/Chromium lane and adds a local browser
+fixture test. GHI owns offline selected-body extraction and GitHub resource
+identity/content; it does not ship the browser launcher or require Playwright.
+Recorded DOM fixtures remain here as consumer regression evidence. Gradio fixture
+reproduction and conversion checks remain optional test helpers, not GHI runtime
+APIs. Neither PR is merged and browser execution validation belongs to the kit CI.
+
+### Inline visibility correction (2026-10-09)
+
+The previous structural reader removed a subtree if *any* inline declaration
+said `display:none` or `visibility:hidden`, even if a later declaration restored
+it. The reader now resolves repeated declarations for each property in order;
+`!important` wins over ordinary declarations, and the last declaration of equal
+importance wins. Comments and semicolons within quoted strings or functions do
+not become extra declarations. This limited rule follows the
+[CSS cascade order](https://www.w3.org/TR/css-cascade-5/#cascade-order).
+
+This is still structural body extraction, not browser `innerText`: `aria-hidden`
+remains excluded for API compatibility even when CSS would display its text.
+Image alt text remains included, and controls remain opt-in. browser-test-kit's
+page-text/capture path has a different visible-text comparison contract; do not
+use equality between these APIs as proof of browser visibility. Use a recorded
+browser `innerText` observation when that is the required reference.
+
+The inline rule does not validate arbitrary CSS values, resolve custom properties,
+stylesheet rules, inheritance, escapes, layout, or a descendant overriding an
+ancestor's `visibility:hidden`. Unsupported values are unknown rather than a
+computed-style result. No new CSS engine, dependency, transport, or browser
+launcher is introduced. Regression cases exercise both candidate selection and
+rendering so they cannot disagree about the corrected inline declarations.
 
 ## Local Git inspection
 

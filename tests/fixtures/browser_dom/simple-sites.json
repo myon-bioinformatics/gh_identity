@@ -1,0 +1,8 @@
+{
+ "captured_on":"2026-10-09",
+ "cases":[
+  {"url":"https://abehiroshi.la.coocan.jp/top.htm","selector":"h1","html":"<h1 align=\"center\">阿部 寛のホームページ</h1>","visible":"阿部 寛のホームページ","expected":"阿部 寛のホームページ","comparison":"exact"},
+  {"url":"https://www.toho.co.jp/","selector":"h2","html":"<h2 class=\"h2-basis mt-0 mb-24 tb-mb-12\">ニュース</h2>","visible":"ニュース","expected":"ニュース","comparison":"exact"},
+  {"url":"https://www.toho.co.jp/","selector":"h1","html":"<h1>\n            <img src=\"common/img/top/heading.webp\" alt=\"Moments for Life\" class=\"heading-img\">\n            その時間が、人生の力となる。\n          </h1>","visible":"その時間が、人生の力となる。","expected":"Moments for Life その時間が、人生の力となる。","comparison":"alt_plus_text"}
+ ]
+}
