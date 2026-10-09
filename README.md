@@ -239,3 +239,22 @@ Lists/searches omit full bodies; `issue` returns the selected Issue body. PR hit
 are search observations, not full PR head/base/check or mergeability evidence;
 use `pr`/`observe_pr` to re-read exact current identity before subsequent work.
 See the [GitHub search contract](https://docs.github.com/en/rest/search/search#search-issues-and-pull-requests).
+
+## Local Git inspection
+
+Read-only checkout observations now live in this standalone file, migrated from
+parent `git_inspector.py` at `380d877`. Public APIs are `git_status`, `git_ls_files`,
+`git_diff`, `git_log`, `git_log_numstat`, `git_show`, `git_blame`, `git_grep` and
+`git_check_ignore`. Existing GitHub operations and `local_identity` remain separate.
+CLI examples: `python gh_identity.py git-status --root PATH`,
+`python gh_identity.py git-diff --root PATH`,
+`python gh_identity.py git-blame --root PATH --path FILE`.
+Each command has `--output-bytes`; record/path/count bounds remain available on
+Python APIs. These local bounds are independent of GitHub pagination budgets.
+
+The observations never fetch, stage, checkout, reset, commit or push. Git optional
+locks and optional helpers are disabled; byte truncation is explicit. The checkout
+configuration is trusted input, not an isolation boundary for hostile repositories.
+Parent execution location does not imply parent ownership of this implementation.
+A parent compatibility adapter can expose the old function names over these APIs
+once its consumer lock explicitly selects this revision.
