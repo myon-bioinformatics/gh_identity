@@ -381,3 +381,16 @@ The export/extraction path was exercised. Gradio is unavailable in the current
 execution environment, so its server/browser path is prepared but not verified.
 The built-in representative fixture does not reproduce an arbitrary site's DOM,
 computed CSS, JavaScript state, authentication, or network restrictions.
+
+A live OBS Studio Wiki inspection on 2026-10-09 also exposed an important scope
+boundary: `#wiki-body` contains the "Add a custom footer" edit affordance, while
+its `.markdown-body` child contains the article. Do not infer that a body-named
+ID excludes all UI. The first article paragraph DOM is retained in
+`tests/fixtures/browser_dom/wiki-paragraph.html` and matched to observed browser
+text. Source: https://github.com/obsproject/obs-studio/wiki (public, no login).
+This is a paragraph-level capture, not whole-Wiki certification. Selected `pre`
+regressions cover zero, one and two trailing newlines, leading newlines, tabs,
+indentation and Japanese text, independently of the Markdown converter.
+The same capture also retains the four-link help sublist (`wiki-links.html`).
+Its text/order is compared after whitespace normalization, explicitly excluding
+browser-generated list markers and layout spacing from that claim.
