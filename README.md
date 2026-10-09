@@ -394,3 +394,19 @@ indentation and Japanese text, independently of the Markdown converter.
 The same capture also retains the four-link help sublist (`wiki-links.html`).
 Its text/order is compared after whitespace normalization, explicitly excluding
 browser-generated list markers and layout spacing from that claim.
+
+Additional live DOM probes outside GitHub (2026-10-09) are in
+`tests/fixtures/browser_dom/simple-sites.json`. Abe Hiroshi's official top page
+uses Shift_JIS (observed `document.characterSet`), legacy font/table layout and
+an entry frameset referring to `menu.htm` and `top.htm`. The child heading was
+captured from the observed `top.htm` reference. Browser-serialized DOM is already
+Unicode; this is not evidence that the UTF-8 file CLI decodes original Shift_JIS
+HTTP bytes. Frame parent markup does not include child documents; no auto-fetch
+or frame traversal has been added.
+
+TOHO's plain news heading matches browser innerText exactly. Its image-backed
+main heading supplies `Moments for Life` in image alt, which innerText omits but
+GHI deliberately retains. That case checks alt plus text, not identical visible
+text. A visually-hidden CSS class was also observed; generic class-based hiding
+cannot be inferred without styles/computed layout. These small captures validate
+specific tag patterns, not complete extraction or CSS fidelity for either site.
