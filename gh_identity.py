@@ -327,6 +327,40 @@ class _ContentHTML(HTMLParser):
  def handle_data(self,data):self.stack[-1]["children"].append(data)
 
 
+
+def _inline_hidden(style):
+ """Limited inline declaration order, not computed CSS or inherited visibility."""
+ # Keep semicolons inside strings/functions and comments out of the declaration
+ # stream. Unsupported values remain unknown rather than implying visibility.
+ declarations=[];quote=None;depth=0;index=0;clean=[]
+ while index<len(style):
+  char=style[index]
+  if quote:
+   clean.append(char)
+   if char=="\\" and index+1<len(style):
+    index+=1;clean.append(style[index])
+   elif char==quote:quote=None
+  elif style.startswith("/*",index):
+   end=style.find("*/",index+2)
+   if end<0:break
+   clean.append(" ");index=end+1
+  elif char in "\"'":quote=char;clean.append(char)
+  elif char in "([{":depth+=1;clean.append(char)
+  elif char in ")]}":depth=max(0,depth-1);clean.append(char)
+  elif char==";" and not depth:declarations.append("".join(clean));clean=[]
+  else:clean.append(char)
+  index+=1
+ declarations.append("".join(clean));values={}
+ for declaration in declarations:
+  name,sep,value=declaration.partition(":");name=name.strip().lower()
+  if not sep or name not in ("display","visibility"):continue
+  value=value.strip().lower();important=bool(re.search(r"!\s*important$",value))
+  value=re.sub(r"\s*!\s*important$","",value).strip()
+  if not value:continue
+  if important or not values.get(name,(None,False))[1]:values[name]=(value,important)
+ return values.get("display",(None,False))[0]=="none" or values.get("visibility",(None,False))[0]=="hidden"
+
+
 def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000,include_controls=False):
  """Extract one explicitly selected body from saved HTML or serialized DOM.
 
@@ -346,7 +380,7 @@ def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000,includ
   return (node["tag"] in {"script","style","template","noscript","nav","header","footer","svg"}
           or (node["tag"]=="button" and not include_controls)
           or "hidden" in a or (a.get("aria-hidden") or "").lower()=="true"
-          or bool(re.search(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)",style,re.I)))
+          or _inline_hidden(style))
  nodes=[]
  def walk(node):
   if hidden(node):return

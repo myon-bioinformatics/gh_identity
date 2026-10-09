@@ -317,7 +317,9 @@ paragraph/link, heading/emphasis, list, quote and table matched; code failed.
 All six Markdown representations stabilized, demonstrating why stability alone
 is insufficient. The probe intentionally exits 1 for that source-preservation
 failure; it is not included as a green CI gate. Exit 2 indicates runner failure.
-A canonical markdown converter fix and recheck remain outstanding.
+That result applies to the recorded converter pin; it is not a claim about every
+newer markdown revision. A canonical converter fix is being validated separately;
+rerun the same probe with the exact adopted file before changing this baseline.
 
 For optional cross-project wrapper checks, supply an existing trusted web-ui module:
 
@@ -377,8 +379,12 @@ python scripts/serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixtur
 python gh_identity.py html-content fixture.html --selector '#dom-lab-body'
 ```
 
-The export/extraction path was exercised. Gradio is unavailable in the current
-execution environment, so its server/browser path is prepared but not verified.
+At the initial capture, only the export/extraction path was exercised because
+Gradio was unavailable. Later, web-ui PR #43 at `8ff5bfb` added and passed a
+local Gradio + Chromium DOM integration test
+([CI evidence](https://github.com/myon-bioinformatics/web-ui/actions/runs/37887560280)).
+That validates web-ui's shared reproduction path, not this GHI-specific
+`serve_dom_lab.py` server path, which remains unverified.
 The built-in representative fixture does not reproduce an arbitrary site's DOM,
 computed CSS, JavaScript state, authentication, or network restrictions.
 
@@ -457,3 +463,27 @@ identity/content; it does not ship the browser launcher or require Playwright.
 Recorded DOM fixtures remain here as consumer regression evidence. Gradio fixture
 reproduction and conversion checks remain optional test helpers, not GHI runtime
 APIs. Neither PR is merged and browser execution validation belongs to the kit CI.
+
+### Inline visibility correction (2026-10-09)
+
+The previous structural reader removed a subtree if *any* inline declaration
+said `display:none` or `visibility:hidden`, even if a later declaration restored
+it. The reader now resolves repeated declarations for each property in order;
+`!important` wins over ordinary declarations, and the last declaration of equal
+importance wins. Comments and semicolons within quoted strings or functions do
+not become extra declarations. This limited rule follows the
+[CSS cascade order](https://www.w3.org/TR/css-cascade-5/#cascade-order).
+
+This is still structural body extraction, not browser `innerText`: `aria-hidden`
+remains excluded for API compatibility even when CSS would display its text.
+Image alt text remains included, and controls remain opt-in. browser-test-kit's
+page-text/capture path has a different visible-text comparison contract; do not
+use equality between these APIs as proof of browser visibility. Use a recorded
+browser `innerText` observation when that is the required reference.
+
+The inline rule does not validate arbitrary CSS values, resolve custom properties,
+stylesheet rules, inheritance, escapes, layout, or a descendant overriding an
+ancestor's `visibility:hidden`. Unsupported values are unknown rather than a
+computed-style result. No new CSS engine, dependency, transport, or browser
+launcher is introduced. Regression cases exercise both candidate selection and
+rendering so they cannot disagree about the corrected inline declarations.

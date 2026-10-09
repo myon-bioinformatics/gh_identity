@@ -53,3 +53,46 @@ def test_cli_saved_dom(tmp_path):
     assert json.loads(run.stdout)['body']==ghi.html_content(HTML,['#description'])['body']
     bad=subprocess.run([sys.executable,str(cli),'html-content',str(path),'--selector','#absent'],capture_output=True,text=True)
     assert bad.returncode==2
+
+
+@pytest.mark.parametrize('style,hidden', [
+    ('display:none;display:inline', False),
+    ('display:inline;display:none', True),
+    ('display:none !important;display:inline', True),
+    ('display:none;display:inline !important', False),
+    ('display:none!important;display:inline!important', False),
+    ('display:inline!important;display:none!important', True),
+    (' DISPLAY : none ! IMPORTANT ; DISPLAY : block ', True),
+    ('visibility:hidden;visibility:visible', False),
+    ('visibility:visible;visibility:hidden', True),
+    ('visibility:hidden!important;visibility:visible', True),
+    ('visibility:hidden!important;visibility:visible!important', False),
+    ('display:none;visibility:visible', True),
+    ('display:block;visibility:hidden', True),
+    ('display: /* explanation */ none', True),
+    ('display:none;/* display:block */', True),
+    ('--sample:";display:none;";display:inline', False),
+    ('--sample:func(;display:none;)', False),
+    ('display:none;display:', True),
+])
+def test_inline_declaration_order_and_importance(style, hidden):
+    from html import escape
+    html='<article id="body">before<span style="'+escape(style, quote=True)+'">MARKER</span>after</article>'
+    out=ghi.html_content(html,['#body'])
+    assert ('MARKER' not in out['body']) is hidden
+    assert 'before' in out['body'] and 'after' in out['body']
+    # Candidate selection and rendering must share the same decision.
+    selected='<article id="body" style="'+escape(style, quote=True)+'">MARKER</article>'
+    if hidden:
+        with pytest.raises(ghi.Error,match='html_body_not_found'):
+            ghi.html_content(selected,['#body'])
+    else:
+        assert ghi.html_content(selected,['#body'])['body']=='MARKER'
+
+
+@pytest.mark.parametrize('include_controls',[False,True])
+def test_structural_aria_hidden_contract_is_not_visual_text(include_controls):
+    html='<main id="body"><span aria-hidden="true" style="display:inline">visual icon</span><span>body</span></main>'
+    out=ghi.html_content(html,['#body'],include_controls=include_controls)
+    assert out['body']=='body'
+    assert out['visibility']=='structural_only'
