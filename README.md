@@ -30,6 +30,51 @@ Use `--transport gh` or `--transport urllib` to force a transport; default is `a
 
 See [SPEC.md](SPEC.md) for the v0.1 contract.
 
+## Repository structure with directory/file exclusions
+
+```bash
+# Top-level files and folders of main; no clone or blob download
+python gh_identity.py tree OWNER/REPO
+# Two levels, with selected folders and file patterns excluded
+python gh_identity.py tree OWNER/REPO --ref main --depth 2 \
+  --exclude-dir vendor --exclude-dir node_modules --exclude-file '*.lock'
+# All included subtrees
+python gh_identity.py tree OWNER/REPO --recursive \
+  --exclude-dir 'docs/generated' --exclude-file '*.png'
+```
+
+The Python API is `tree(repo, ref="main", depth=1, exclude_dirs=(),
+exclude_files=(), transport="auto", timeout=30)`; `depth=None` means recursive.
+It resolves the ref once, then reads tree metadata at that commit and the
+returned subtree SHAs. The output includes commit/tree SHA, full relative paths,
+kind, Git mode and object SHA. It never fetches file bodies, follows symlinks or
+submodules, or invokes clone, diff or blame. No local `.git` is required.
+This feature is independent of the local history inspection work in PR #23.
+
+Depth 1 means root entries, depth 2 adds their direct children. Directory rows
+include `expanded` to distinguish visited directories from depth boundaries.
+There are no implicit exclusions. Repeated `--exclude-dir`/`--exclude-file`
+options use case-sensitive Python fnmatch patterns: patterns without `/` match
+a basename at any depth; patterns containing `/` match the full relative path.
+Use `vendor`, not `vendor/`, to exclude that folder. These are not gitignore
+rules: no negation, and fnmatch `*` can span `/` in a full-path pattern.
+Directories are pruned before any subtree request. File exclusions apply to
+non-directory entries, including symlinks and submodule pointers.
+
+`complete` refers only to `scope: selected_depth_and_exclusions`, not the whole
+repository. If any GitHub tree response is truncated, `complete=false` and
+`truncated=true`. Malformed/duplicate entries, mismatching child identities,
+cycles, permission and transport failures raise errors. Existing operation
+limits cover response bytes/time; tree requests charge max_pages and all
+received entries (even excluded ones) charge max_items. Limit exhaustion raises
+an error rather than claiming a complete list. `excluded_entries` counts only
+observed excluded entries, not unseen children of pruned directories.
+
+Tree metadata uses the existing gh/urllib read transport. Public repository
+reads support the existing anonymous HTTP fallback. GitHub's
+[Git Trees API](https://docs.github.com/en/rest/git/trees#get-a-tree) documents
+tree modes, non-recursive retrieval and upstream truncation.
+
 ## Actions step permalinks
 
 ```python
