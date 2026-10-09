@@ -1,0 +1,15 @@
+{
+ "url": "https://github.com/myon-bioinformatics/gh_identity/blob/main/README.md",
+ "captured_on": "2026-10-09",
+ "scope": "two pre element outerHTML snapshots from the live file preview; not whole page",
+ "cases": [
+  {
+   "html": "<pre>python gh_identity.py capabilities\npython gh_identity.py repo myon-bioinformatics/gh_identity\npython gh_identity.py comments OWNER/REPO 9\npython gh_identity.py variable-get OWNER/REPO NAME\n\n<span class=\"pl-c\"><span class=\"pl-c\">#</span> Explicit write</span>\npython gh_identity.py variable-set OWNER/REPO NAME VALUE --write</pre>",
+   "visible": "python gh_identity.py capabilities\npython gh_identity.py repo myon-bioinformatics/gh_identity\npython gh_identity.py comments OWNER/REPO 9\npython gh_identity.py variable-get OWNER/REPO NAME\n\n# Explicit write\npython gh_identity.py variable-set OWNER/REPO NAME VALUE --write"
+  },
+  {
+   "html": "<pre>python gh_identity.py step-url OWNER/REPO 20 91 7 --line 1</pre>",
+   "visible": "python gh_identity.py step-url OWNER/REPO 20 91 7 --line 1"
+  }
+ ]
+}

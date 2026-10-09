@@ -345,3 +345,13 @@ and https://github.com/python/cpython/blob/main/README.rst on 2026-10-09; this
 confirmed the need to separate navigation/controls from content but did not supply
 raw DOM compatibility evidence. Directly selecting `pre` now preserves its exact
 leading/trailing newlines instead of trimming them as block boundaries.
+
+Live-browser DOM evidence now exists for two code blocks in the public GHI
+README file preview, captured once on 2026-10-09. See
+`tests/fixtures/browser_dom/file-code.json` and `tests/test_browser_dom.py`.
+The saved `outerHTML` includes actual nested GitHub syntax-highlight spans;
+CLI extraction is compared exactly with the browser's recorded `innerText`.
+No repeated network access is needed for replay. Scope is these two observed
+file-preview fragments, not the whole page, file Code tab, or all GitHub layouts.
+No login interaction was performed. This does not resolve the separate Markdown
+round-trip newline drift or establish CSS/JS equivalence for arbitrary pages.
