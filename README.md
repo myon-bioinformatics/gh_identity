@@ -420,3 +420,22 @@ matches exactly and retains U+200B. Card/Apple comparisons explicitly normalize
 whitespace: GHI collapses NBSP outside pre, so these are not byte-exact browser
 innerText claims. SVG and attribute data do not leak into text. No site-specific
 parser branches, cookie actions, or authentication were introduced.
+
+### Public chat UI structural cases
+
+ChatGPT's logged-out top page, Gemini's consent dialog and Claude's login/FAQ
+surface were inspected on 2026-10-09 without accepting consent, signing in,
+entering input or sending chat messages. `chat-surfaces.json` retains documented
+semantic projections of observed DOM (not verbatim captures): empty textarea
+placeholder/label, custom-element icons under aria-hidden, and an accordion
+heading whose text is inside a button. Volatile bindings/layout classes are
+removed; relevant text/attributes remain. Source state is recorded per case.
+
+`html-content --include-controls` / `html_content(..., include_controls=True)`
+opts into button text, useful for FAQ headings. The default still excludes
+buttons. Explicit hidden and aria-hidden subtrees stay excluded in either mode;
+`data-hidden` alone is not treated as HTML `hidden`. Input labels/placeholders
+are not substituted for empty user content, and no control is activated. These
+are text extraction semantics, not a DOM interaction/accessibility tree API.
+The option is recorded in output. These cases establish neither authenticated
+chat transcript extraction nor whole-site support.

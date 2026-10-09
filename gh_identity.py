@@ -327,7 +327,7 @@ class _ContentHTML(HTMLParser):
  def handle_data(self,data):self.stack[-1]["children"].append(data)
 
 
-def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000):
+def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000,include_controls=False):
  """Extract one explicitly selected body from saved HTML or serialized DOM.
 
  Selectors are ordered simple #id, .class or tag alternatives, not general CSS.
@@ -335,6 +335,7 @@ def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000):
  """
  if not isinstance(html,str) or type(max_bytes) is not int or max_bytes<1:raise ValueError("invalid HTML input/limit")
  if len(html.encode("utf-8"))>max_bytes:raise ValueError("HTML byte limit exceeded")
+ if type(include_controls) is not bool:raise ValueError("include_controls must be bool")
  if source_kind not in ("html","dom"):raise ValueError("source_kind must be html or dom")
  if not isinstance(selectors,(list,tuple)) or not selectors:raise ValueError("selectors required")
  for selector in selectors:
@@ -342,7 +343,8 @@ def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000):
  parser=_ContentHTML();parser.feed(html);parser.close()
  def hidden(node):
   a=node["attrs"];style=a.get("style") or ""
-  return (node["tag"] in {"script","style","template","noscript","nav","header","footer","button","svg"}
+  return (node["tag"] in {"script","style","template","noscript","nav","header","footer","svg"}
+          or (node["tag"]=="button" and not include_controls)
           or "hidden" in a or (a.get("aria-hidden") or "").lower()=="true"
           or bool(re.search(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)",style,re.I)))
  nodes=[]
@@ -379,14 +381,14 @@ def html_content(html,selectors,*,source_kind="html",max_bytes=10_000_000):
        if selected["tag"]=="pre" else render(selected).strip("\n"))
  return {"schema":"gh-identity-html-content/1","body":body,"selector":used,
          "source_kind":source_kind,"source_sha256":hashlib.sha256(html.encode("utf-8")).hexdigest(),
-         "visibility":"structural_only","identity_verified":False,"observed_at":now()}
+         "visibility":"structural_only","include_controls":include_controls,"identity_verified":False,"observed_at":now()}
 
 
-def _html_content_file(path,selectors,source_kind,max_bytes):
+def _html_content_file(path,selectors,source_kind,max_bytes,include_controls=False):
  if type(max_bytes) is not int or max_bytes<1:raise ValueError("invalid HTML byte limit")
  with open(path,"rb") as stream:raw=stream.read(max_bytes+1)
  if len(raw)>max_bytes:raise ValueError("HTML byte limit exceeded")
- return html_content(raw.decode("utf-8"),selectors,source_kind=source_kind,max_bytes=max_bytes)
+ return html_content(raw.decode("utf-8"),selectors,source_kind=source_kind,max_bytes=max_bytes,include_controls=include_controls)
 
 def content(r,kind,identifier,transport="auto",timeout=30):
  """Read exact PR/Issue body or full commit message; no comments or code diff."""
@@ -819,7 +821,7 @@ def _main(argv=None):
   if transport not in ("auto","gh","urllib"): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
   del argv[i:i+2]
  a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
- x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000)
+ x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
  s.add_parser("capabilities")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("repos");x.add_argument("owner")
@@ -846,7 +848,7 @@ def _main(argv=None):
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
-  elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes)
+  elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes,ns.include_controls)
   elif ns.cmd=="content":
    identifier=ns.identifier if ns.kind=="commit" else int(ns.identifier)
    o=content(ns.repo,ns.kind,identifier,transport=transport)
