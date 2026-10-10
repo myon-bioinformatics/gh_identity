@@ -686,3 +686,12 @@ python gh_identity.py workflow-runs OWNER/REPO 12345 --start-page 4 --limit 50
 `workflow_run_discovery(repo, workflow_id, *, branch=None, head_sha=None, event=None, max_items=100, max_pages=10, page_size=100, start_page=1)` provides workflow-specific runs. JSON reports `complete`, `truncated`, `limit_reason` and `next_page`/`next_offset`. `next_page` is a page-level continuation, a page-and-offset continuation. Pass both `--start-page` and `--start-offset` to resume within a page without skipping entries. Repeated requests can observe a changed run listing.
 
 Resume note: the CLI accepts `--start-offset N` together with `--start-page N`. A continuation is positional, not an immutable snapshot; newly inserted or deleted workflow runs may shift pages. Byte/time budget errors remain fail-closed and do not promise partial output.
+
+## Optional public repository inventory (Issue #29)
+
+```bash
+python gh_identity.py repo-inventory myon-bioinformatics --fields name,size-kb
+python gh_identity.py repo-inventory myon-bioinformatics --fields name,run-count --sort run-count --order desc --max-repos 20
+```
+
+`repository_inventory(owner, fields=("name",), sort="name", order="asc", max_repos=30, max_pages=5)` selects public, non-archived repositories. Size is GitHub's approximate repository metadata size in KiB, **not** source LOC. Run count is repository-wide Actions `total_count`, not workflow-specific. Run-count fan-out is opt-in; inaccessible values remain null with a reason, not zero. Limits are cumulative, and a partial inventory is not a complete ranking.
