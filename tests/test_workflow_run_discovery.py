@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit, parse_qs
+
 import pytest
 import gh_identity as ghi
 
@@ -8,7 +10,7 @@ def _workflow(*args, **kwargs):
 
 def _page(path, **kwargs):
     assert "/workflows/7/runs?" in path
-    if "page=2" in path:
+    if parse_qs(urlsplit("https://api.github.test/" + path).query).get("page") == ["2"]:
         return {"workflow_runs": []}, {}
     return {"workflow_runs": [
         {"id": 101, "run_attempt": 2, "workflow_id": 7, "head_sha": "a" * 40,
