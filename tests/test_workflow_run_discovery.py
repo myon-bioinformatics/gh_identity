@@ -68,3 +68,55 @@ def test_resume_within_page_without_gap(monkeypatch):
 def test_resume_rejects_bad_offset():
     with pytest.raises(ValueError):
         ghi.workflow_run_discovery("owner/repo", 7, page_size=2, start_offset=2)
+
+
+def test_page_limit_returns_resume_position(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    monkeypatch.setattr(ghi, "_page", _page)
+    out = ghi.workflow_run_discovery("owner/repo", 7, page_size=2, max_pages=1)
+    assert out["truncated"] and not out["complete"]
+    assert out["limit_reason"] == "max_pages"
+    assert (out["next_page"], out["next_offset"]) == (2, 0)
+
+
+def test_resume_at_page_boundary(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    monkeypatch.setattr(ghi, "_page", _page)
+    out = ghi.workflow_run_discovery("owner/repo", 7, page_size=2, max_items=2)
+    assert out["truncated"]
+    assert (out["next_page"], out["next_offset"]) == (2, 0)
+    resumed = ghi.workflow_run_discovery("owner/repo", 7, page_size=2,
+                                          start_page=2, start_offset=0)
+    assert resumed["complete"] and resumed["runs"] == []
+
+
+def test_invalid_run_identity_fails_closed(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    monkeypatch.setattr(ghi, "_page", lambda *a, **k: ({"workflow_runs": [
+        {"id": True, "run_attempt": 1, "workflow_id": 7}]}, {}))
+    with pytest.raises(ghi.Error):
+        ghi.workflow_run_discovery("owner/repo", 7)
+
+
+def test_duplicate_run_identity_fails_closed(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    row = {"id": 100, "run_attempt": 1, "workflow_id": 7}
+    monkeypatch.setattr(ghi, "_page", lambda *a, **k: ({"workflow_runs": [row, row]}, {}))
+    with pytest.raises(ghi.Error):
+        ghi.workflow_run_discovery("owner/repo", 7)
+
+
+def test_transport_failure_propagates(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    def broken(*args, **kwargs):
+        raise ghi.Error("operation_timeout")
+    monkeypatch.setattr(ghi, "_page", broken)
+    with pytest.raises(ghi.Error):
+        ghi.workflow_run_discovery("owner/repo", 7)
+
+
+def test_malformed_page_fails_closed(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    monkeypatch.setattr(ghi, "_page", lambda *a, **k: ({"workflow_runs": None}, {}))
+    with pytest.raises(ghi.Error):
+        ghi.workflow_run_discovery("owner/repo", 7)
