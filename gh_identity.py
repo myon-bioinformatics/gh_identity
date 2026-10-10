@@ -5,6 +5,7 @@ import argparse,fnmatch,json,os,re,shutil,subprocess,sys,urllib.error,urllib.par
 from datetime import datetime,timezone
 from html.parser import HTMLParser
 import hashlib
+import http.client
 API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
@@ -192,6 +193,7 @@ def _gh(method,path,payload=None,timeout=30,mutating=False):
  if code:
   message=(err or raw).decode("utf-8",errors="replace").lower()
   c="authentication_required" if code==4 else "cancelled" if code==2 else "gh_failed"
+  if "http 401" in message:c="authentication_required"
   if "http 403" in message:c="permission_or_rate_limit"
   if "http 404" in message:c="not_found_or_inaccessible"
   raise Error(c,mutating and ("http 5" in message or "timed out" in message))
@@ -817,7 +819,7 @@ def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
   if attempt is not None and actual_attempt!=attempt:raise Error("attempt_mismatch")
   steps=x.get("steps",[])
   if not isinstance(steps,list) or any(not isinstance(step,dict) for step in steps):raise Error("invalid_json")
-  out.append({"job_id":x.get("id"),"run_id":x.get("run_id"),"attempt":x.get("run_attempt"),
+  out.append({"job_id":x.get("id"),"run_id":x.get("run_id"),"attempt":x.get("run_attempt"),"head_sha":x.get("head_sha"),
    "name":x.get("name"),"status":x.get("status"),"conclusion":x.get("conclusion"),
    "started_at":x.get("started_at"),"completed_at":x.get("completed_at"),
    "url":x.get("html_url"),"steps":[{"number":step.get("number"),"name":step.get("name"),
@@ -868,6 +870,366 @@ def step_url_from_jobs(observation,job_id,step_number,line=None):
  if not matches:raise Error("step_not_found")
  if len(matches)!=1:raise Error("ambiguous_step_identity")
  return step_url(r,run_id,job_id,step_number,line)
+
+class _NoLogRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _log_header(headers, name):
+    values = [value for key, value in headers.items() if key.lower() == name.lower()]
+    if len(values) > 1 or any(not isinstance(value, str) for value in values):
+        raise Error("invalid_log_response")
+    return values[0] if values else None
+
+
+def _log_redirect(current, location):
+    if not isinstance(location, str) or not location:
+        raise Error("invalid_log_redirect")
+    if "\\" in location or any(ord(c) <= 32 or ord(c) == 127 for c in location):
+        raise Error("unsafe_log_redirect")
+    try:
+        target = urllib.parse.urlsplit(urllib.parse.urljoin(current, location))
+        host = target.hostname or ""
+        allowed = host.endswith((".actions.githubusercontent.com", ".blob.core.windows.net"))
+        if (target.scheme != "https" or not allowed or target.username is not None
+                or target.password is not None or target.port not in (None, 443)
+                or target.fragment):
+            raise ValueError("redirect")
+    except ValueError:
+        raise Error("unsafe_log_redirect") from None
+    return target.geturl()
+
+
+def _normalize_job_log(raw):
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+        raise Error("unsupported_log_encoding")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        raise Error("invalid_log_encoding") from None
+    bom = "\ufeff" in text
+    text = text.replace("\ufeff", "")
+    original = text
+    # Consume terminal strings, including their contents and unterminated tails.
+    text = re.sub(r"(?:\x1b\]|\x9d)(?:[^\x07\x1b\x9c]|\x1b(?!\\))*(?:\x07|\x1b\\|\x9c|$)", "", text)
+    text = re.sub(r"(?:\x1b[P_X^]|[\x90\x98\x9e\x9f])(?:[^\x1b\x9c]|\x1b(?!\\))*(?:\x1b\\|\x9c|$)", "", text)
+    text = re.sub(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"\x1b[ -/]*[@-Z\\-_]", "", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+    ansi = text != original
+    return text.replace("\r\n", "\n").replace("\r", "\n"), {"bom_removed": bom, "ansi_removed": ansi}
+
+
+def _log_redactions(values):
+    if not isinstance(values, (list, tuple)) or len(values) > 100:
+        raise ValueError("redact must contain at most 100 nonempty strings")
+    if any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("redact must contain nonempty strings")
+    if sum(len(value.encode("utf-8")) for value in values) > 65536:
+        raise ValueError("redaction values exceed 65536 bytes")
+    return tuple(values)
+
+
+def _redact_job_log(text, values):
+    spans = []
+    masks = list(values)
+    for value in re.findall(r"::add-mask::([^\r\n]+)", text, flags=re.I):
+        decoded = re.sub(r"%0A|%0D|%25", lambda match: {"%0A": "\n", "%0D": "\r", "%25": "%"}[match[0].upper()], value, flags=re.I)
+        masks.extend((value, decoded))
+        masks.extend(decoded.split())
+    # Find every mask in the same original text; a short mask must not hide a
+    # token prefix or assignment key from a later, more complete rule.
+    for value in set(masks):
+        normalized, _ = _normalize_job_log(value.encode("utf-8"))
+        if normalized:
+            start = 0
+            while True:
+                index = text.find(normalized, start)
+                if index < 0:
+                    break
+                spans.append((index, index + len(normalized)))
+                start = index + 1
+    patterns = (
+        (r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----|\Z)", 0),
+        (r"(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+", 0),
+        (r"(?i)\bauthorization[ \t]*[:=][ \t]*(?:bearer|token|basic)[ \t]+([^\s]+)", 1),
+        # Credential assignments and signed URL query parameters retain keys.
+        (r"(?i)\b(?:[\w.-]*(?:token|password|passwd|secret|api[_-]?key|access[_-]?key)[\w.-]*|sig|signature|x-amz-credential|x-amz-signature)[ \t]*[=:][ \t]*(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s&;,]+)", 1),
+    )
+    for pattern, group in patterns:
+        spans.extend(match.span(group) for match in re.finditer(pattern, text))
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    pieces = []
+    start = 0
+    for left, right in merged:
+        pieces.extend((text[start:left], "[REDACTED]"))
+        start = right
+    pieces.append(text[start:])
+    return "".join(pieces), {"applied": True, "replacements": len(merged)}
+
+
+def _read_job_log(spec, opener=None):
+    """Private bounded byte reader; the subprocess boundary enforces wall time."""
+    opener = opener or urllib.request.build_opener(_NoLogRedirect())
+    deadline = time.monotonic() + spec["timeout"]
+    url = spec["url"]
+    headers = dict(spec["headers"])
+    redirects = 0
+    seen = {url}
+    cap = spec["cap"]
+    spec["bytes_read"] = 0
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise Error("operation_timeout")
+        return left
+    def truncated(read):
+        if cap < spec["max_bytes"]:
+            raise Error("bytes_limit")
+        return {"complete": False, "truncated": True, "text": None, "text_sha256": None,
+                "bytes_read": read, "limit_bytes": spec["max_bytes"], "redirects": redirects,
+                "redaction": {"applied": False, "replacements": 0},
+                "normalization": {"bom_removed": False, "ansi_removed": False}}
+    while True:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            response = opener.open(req, timeout=remaining())
+        except urllib.error.HTTPError as exc:
+            response = exc
+        except urllib.error.URLError as exc:
+            code = "operation_timeout" if isinstance(exc.reason, TimeoutError) else "transport_error"
+            raise Error(code) from None
+        except TimeoutError:
+            raise Error("operation_timeout") from None
+        except (OSError, http.client.HTTPException):
+            raise Error("transport_error") from None
+        with contextlib.closing(response):
+            remaining()
+            status = response.getcode()
+            rh = response.headers
+            if status in (301, 302, 303, 307, 308):
+                target = _log_redirect(url, _log_header(rh, "Location"))
+                if redirects >= 3 or target in seen:
+                    raise Error("log_redirect_limit")
+                redirects += 1
+                seen.add(target)
+                url = target
+                # A signed storage URL needs no GitHub credentials or API headers.
+                headers = {"Accept": "text/plain", "User-Agent": "gh_identity/0.1"}
+                continue
+            if status == 429 or (status == 403 and (
+                    _log_header(rh, "X-RateLimit-Remaining") == "0" or _log_header(rh, "Retry-After") is not None)):
+                raise Error("rate_limit")
+            errors = {401: "authentication_required", 403: "permission_or_rate_limit",
+                      404: "not_found_or_inaccessible", 410: "log_not_available", 206: "incomplete_log_response"}
+            if status in errors:
+                raise Error(errors[status])
+            if status != 200:
+                raise Error("server_error" if status >= 500 else "invalid_log_response")
+            if _log_header(rh, "Content-Range") is not None:
+                raise Error("incomplete_log_response")
+            encoding = _log_header(rh, "Content-Encoding")
+            if encoding is not None and encoding.lower().strip() not in ("", "identity"):
+                raise Error("unsupported_log_encoding")
+            content_type = _log_header(rh, "Content-Type")
+            if content_type is not None and content_type.split(";", 1)[0].strip().lower() not in ("text/plain", "application/octet-stream"):
+                raise Error("invalid_log_response")
+            length = _log_header(rh, "Content-Length")
+            transfer = _log_header(rh, "Transfer-Encoding")
+            if transfer is not None and (transfer.lower().strip() != "chunked" or length is not None):
+                raise Error("invalid_log_response")
+            if length is not None:
+                if not re.fullmatch(r"[0-9]{1,20}", length):
+                    raise Error("invalid_log_response")
+                length = int(length)
+                if length > cap:
+                    return truncated(0)
+            raw = bytearray()
+            try:
+                while len(raw) <= cap:
+                    remaining()
+                    chunk = response.read(min(65536, cap + 1 - len(raw)))
+                    remaining()
+                    if not isinstance(chunk, bytes):
+                        raise Error("invalid_log_response")
+                    if not chunk:
+                        break
+                    spec["bytes_read"] += len(chunk)
+                    raw.extend(chunk)
+            except TimeoutError:
+                raise Error("operation_timeout") from None
+            except http.client.IncompleteRead as exc:
+                spec["bytes_read"] += len(exc.partial)
+                raise Error("incomplete_log_response") from None
+            except (http.client.HTTPException, OSError):
+                raise Error("incomplete_log_response") from None
+            if len(raw) > cap:
+                return truncated(len(raw))
+            if length is not None and len(raw) != length:
+                raise Error("incomplete_log_response")
+            text, normalization = _normalize_job_log(bytes(raw))
+            text, redaction = _redact_job_log(text, spec["redact"])
+            remaining()
+            return {"complete": True, "truncated": False, "text": text,
+                    "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "bytes_read": len(raw), "limit_bytes": spec["max_bytes"], "redirects": redirects,
+                    "normalization": normalization, "redaction": redaction}
+
+
+def _job_log_worker():
+    # No raw body, signed URL, credential or exception detail leaves this worker.
+    spec = {}
+    try:
+        spec = json.load(sys.stdin)
+        result = _read_job_log(spec)
+    except Error as exc:
+        result = {"error": exc.code, "bytes_read": spec.get("bytes_read", 0)}
+    except Exception:
+        result = {"error": "invalid_log_response", "bytes_read": spec.get("bytes_read", 0) if isinstance(spec, dict) else 0}
+    sys.stdout.write(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _job_log_credential(transport, timeout):
+    value = token()
+    if transport == "urllib":
+        return value, "environment" if value else "anonymous"
+    if transport == "gh" or (transport == "auto" and gh_available()):
+        if value:
+            return value, "environment"
+        env = os.environ.copy()
+        env.update(GH_PROMPT_DISABLED="1", GH_PAGER="cat", GH_HOST="github.com")
+        env.pop("GH_DEBUG", None)
+        try:
+            code, raw, err = _process(["gh", "auth", "token", "--hostname", "github.com"], None, timeout, env)
+        except Error as exc:
+            if exc.code != "process_not_found":
+                raise
+            if transport == "gh":
+                raise Error("gh_not_found") from None
+            return None, "anonymous"
+        if code:
+            if code == 2:
+                raise Error("cancelled")
+            unavailable = code == 4 or (code == 1 and b"no oauth token found" in err.lower())
+            if transport == "auto" and unavailable:
+                return None, "anonymous"
+            raise Error("authentication_required" if unavailable else "gh_failed")
+        try:
+            value = raw.decode("ascii").strip()
+        except UnicodeError:
+            raise Error("invalid_authentication_response") from None
+        if not value or len(value) > 8192 or not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise Error("invalid_authentication_response")
+        return value, "gh"
+    return value, "environment" if value else "anonymous"
+
+
+def _download_job_log(path, *, max_bytes, redact, transport, timeout):
+    budget = _BUDGET.get()
+    deadline = min(budget.deadline, time.monotonic() + timeout)
+    credential, source = _job_log_credential(transport, min(timeout, budget.remaining()))
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "gh_identity/0.1"}
+    if credential:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,8192}", credential):
+            raise Error("invalid_authentication_response")
+        headers["Authorization"] = "Bearer " + credential
+    values = list(redact) + [value for value in (credential, os.getenv("GH_TOKEN"), os.getenv("GITHUB_TOKEN")) if value]
+    left = min(budget.remaining(), deadline - time.monotonic())
+    if left <= 0:
+        budget.fail("operation_timeout")
+    available = budget.max_bytes - budget.bytes
+    if available <= 0:
+        budget.fail("bytes_limit")
+    spec = {"url": API + "/" + path, "headers": headers, "timeout": left,
+            "cap": min(max_bytes, available), "max_bytes": max_bytes, "redact": values}
+    code, raw, err = _process([sys.executable, os.path.abspath(__file__), "--_job-log-worker"],
+                              json.dumps(spec).encode(), left)
+    if code:
+        raise Error("transport_error")
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise Error("invalid_log_response") from None
+    if not isinstance(result, dict):
+        raise Error("invalid_log_response")
+    if type(result.get("bytes_read")) is not int or result["bytes_read"] < 0:
+        raise Error("invalid_log_response")
+    # Charge received bytes on failures too; callers cannot reset a shared
+    # operation's byte budget by catching decode/framing/redaction errors.
+    budget.charge("bytes", max(0, result["bytes_read"] - len(raw) - len(err)))
+    if "error" in result:
+        if result["error"] in ("bytes_limit", "operation_timeout"):
+            budget.fail(result["error"])
+        raise Error(result["error"])
+    return {**result, "transport": "urllib", "credential_source": source}
+
+
+def job_log(r, run_id, job_id, *, attempt, max_bytes=1_000_000, redact=(), transport="auto", timeout=30):
+    """Read a completed job's complete, redacted log under exact attempt identity.
+
+    A local byte cap returns truncated=True and text=None; protocol truncation
+    and operation budget exhaustion raise Error. No prefix or raw log is saved.
+    """
+    r = repo(r)
+    run_id = _positive_identifier(run_id, "run")
+    job_id = _positive_identifier(job_id, "job")
+    attempt = _positive_identifier(attempt, "attempt")
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError("max_bytes must be a positive integer")
+    if transport not in ("auto", "gh", "urllib"):
+        raise ValueError("bad transport")
+    redact = _log_redactions(redact)
+    budget = _BUDGET.get()
+    deadline = min(budget.deadline, time.monotonic() + timeout)
+    def remaining():
+        left = min(budget.remaining(), deadline - time.monotonic())
+        if left <= 0:
+            budget.fail("operation_timeout")
+        return left
+    observed_run = run(r, run_id, attempt=attempt, transport=transport, timeout=remaining())
+    sha = observed_run.get("head_sha")
+    if (type(observed_run.get("run_id")) is not int or observed_run["run_id"] != run_id
+            or type(observed_run.get("attempt")) is not int or observed_run["attempt"] != attempt
+            or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha)):
+        raise Error("invalid_run_identity")
+    observation = jobs(r, run_id, attempt=attempt, transport=transport, timeout=remaining())
+    selected = [job for job in observation["jobs"] if job["job_id"] == job_id]
+    if not selected:
+        raise Error("job_not_found")
+    job = selected[0]
+    if not isinstance(job.get("head_sha"), str) or job["head_sha"].lower() != sha.lower():
+        raise Error("job_identity_mismatch")
+    if job["status"] != "completed":
+        raise Error("job_not_completed")
+    step_urls = []
+    for step in job["steps"]:
+        if type(step["number"]) is not int or step["number"] < 1:
+            raise Error("invalid_step_identity")
+        step_urls.append({"number": step["number"], "url": step_url_from_jobs(observation, job_id, step["number"])})
+    encoded = "/".join(urllib.parse.quote(part, safe="") for part in r.split("/"))
+    result = _download_job_log(f"repos/{encoded}/actions/jobs/{job_id}/logs", max_bytes=max_bytes,
+                               redact=redact, transport=transport, timeout=remaining())
+    remaining()
+    return {"schema": "gh-identity-job-log/1", "repository": r, "run_id": run_id,
+            "job_id": job_id, "attempt": attempt, "head_sha": sha.lower(), "step_urls": step_urls,
+            **result, "observed_at": now()}
+
+
+def _log_redact_env(names):
+    values = []
+    for name in names:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or not os.getenv(name):
+            raise ValueError("redaction environment variable must be set and nonempty")
+        values.append(os.environ[name])
+    return values
+
 
 def gh_help(*parts,timeout=15):
  if not gh_available():raise Error("gh_not_found")
@@ -1361,6 +1723,7 @@ def _main(argv=None):
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
  x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
+ x=s.add_parser("job-log");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("--attempt",type=int,required=True);x.add_argument("--log-bytes",type=int,default=1_000_000);x.add_argument("--redact-env",action="append",default=[])
  x=s.add_parser("step-url");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("step_number",type=int);x.add_argument("--line",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
@@ -1397,6 +1760,7 @@ def _main(argv=None):
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
+  elif ns.cmd=="job-log":o=job_log(ns.repo,ns.run_id,ns.job_id,attempt=ns.attempt,max_bytes=ns.log_bytes,redact=_log_redact_env(ns.redact_env),transport=transport,timeout=_BUDGET.get().remaining())
   elif ns.cmd=="step-url":o={"schema":"gh-identity-step-url/1","url":step_url(ns.repo,ns.run_id,ns.job_id,ns.step_number,ns.line)}
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
@@ -1405,6 +1769,7 @@ def _main(argv=None):
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd=="job-log":return 0 if o["complete"] else 1
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
  return 0
@@ -1425,7 +1790,8 @@ def main(argv=None):
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","pr","comments","reviews",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","runs","variable","set_variable","post_comment",
-              "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs"):
+              "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs","job_log"):
  globals()[_name]=_bounded(globals()[_name])
 if __name__=="__main__":
- raise SystemExit(_http_worker() if sys.argv[1:]==["--_http-worker"] else main())
+ raise SystemExit(_http_worker() if sys.argv[1:]==["--_http-worker"] else
+                  _job_log_worker() if sys.argv[1:]==["--_job-log-worker"] else main())
