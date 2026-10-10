@@ -249,3 +249,7 @@ py_compile
 ```
 
 Compile alone cannot catch `from module import nonexistent_name`; import smoke is mandatory.
+
+## Workflow discovery (PR #28)
+
+`workflow_run_discovery` resolves a workflow ID/path via `workflow()`, then uses the workflow-scoped Actions runs endpoint with branch/event server-side filters and an exact head SHA client-side filter. Limits are per operation. The result schema is `gh-identity-workflow-runs/1` with `runs`, `complete`, `truncated`, `limit_reason`, `pages_fetched` and `next_page`. `max_items` may stop within a page: the current `next_page` is **not** lossless in that case. No silent limit escalation or guaranteed snapshot isolation is promised. Authentication, timeouts, and byte limits may raise errors rather than return partial records.
