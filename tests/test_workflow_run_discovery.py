@@ -8,6 +8,8 @@ def _workflow(*args, **kwargs):
 
 def _page(path, **kwargs):
     assert "/workflows/7/runs?" in path
+    if "page=2" in path:
+        return {"workflow_runs": []}, {}
     return {"workflow_runs": [
         {"id": 101, "run_attempt": 2, "workflow_id": 7, "head_sha": "a" * 40,
          "head_branch": "main", "event": "push", "status": "completed"},
