@@ -1,17 +1,21 @@
 # Workflow-scoped run discovery — Issue #20
 
-## Scope
-Add a bounded, read-only Python API and thin CLI adapter to discover runs for an **explicit workflow ID or path**. Reuse existing `workflow()`, `run_history()`, `run()`, and `jobs()` instead of duplicating identity and pagination code.
+## Design decision
+Provide a callable, small Python function within `gh_identity.py`, plus a thin CLI JSON adapter. This is not a new server/API product: Python is the implementation core and CLI is the user-facing entry point.
 
-## Acceptance criteria
-- [ ] Explicit workflow ID/path, with unambiguous resolution and validation
-- [ ] Branch, exact head SHA and event filters; old runs and rerun attempts included
-- [ ] Bounded pages/items/bytes/time with truthful `complete` / `truncated`
-- [ ] Stable JSON schema and CLI exit/error contract, preserving gh/urllib public read
-- [ ] Offline fixtures for filtering, pagination boundaries, missing workflow, reruns, malformed responses and failures
-- [ ] README and SPEC updated; Python 3.10–3.14 and 3.x same-head CI green
+## Scope and acceptance criteria
+- [ ] Accept explicit workflow **numeric ID or path** (e.g. `.github/workflows/tests.yml`); resolve and verify identity with existing `workflow()`
+- [ ] Filter runs by branch, **exact** head SHA and event; support old runs and preserve run ID and attempt for reruns
+- [ ] Reuse existing `run_history()` / `run()` / `jobs()` where contract-compatible; avoid a second incompatible pager
+- [ ] Surface clear `complete`, `truncated`, `limit_reason`, pages/items/bytes used, and opaque continuation information where feasible. **Do not present partial results as exhaustive.**
+- [ ] Implement bounded automatic continuation/retry within total page/item/byte/time budgets. Prefer server-side filters, smaller page size / smaller response projection when supported, and page-by-page retrieval. If a cap is reached, stop safely and return partial results plus resumable cursor/page; do not silently raise user limits or loop forever.
+- [ ] HTTP 403/429, secondary rate limits, permissions, invalid JSON, malformed pagination, and cancellation/timeout remain distinct failures; use limited backoff only when server-supplied retry hints and remaining time budget permit
+- [ ] A hard aggregate cap cannot be bypassed by merely splitting requests into smaller pages; on size limit, reduce page size **only where API supports it**, or return a truthful partial result. Avoid duplicated results or gaps between resumed requests and document potential drift when underlying run history changes.
+- [ ] Preserve both authenticated gh and anonymous public urllib transport behavior and bounded payload handling
+- [ ] Offline regression fixtures for workflow ID/path, filters, history, reruns, pagination/size caps, resume, malformed data, backoff and exhaustion
+- [ ] README/SPEC API/CLI examples and output/exit contracts; same-head Python 3.10–3.14 plus 3.x CI
 
-## Boundaries
-Do not mark the other Issue #20 checklist entries complete. Do not change writes or reimplement step links/logs. Do not merge until implementation, tests and CI are verified.
+## Explicit boundaries
+Keep job log, workflow steps and other Issue #20 items independent. Avoid speculative complete-run reconstruction or unbounded automatic recovery. Keep PR as Draft until code, offline regressions, docs and same-head CI are complete. Do not merge without validation.
 
-Refs #20. Depends on merged #27.
+Related: Issue #20; merged PR #27.
