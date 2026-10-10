@@ -589,6 +589,7 @@ def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=
   if not isinstance(data,dict) or not isinstance(data.get("workflow_runs"),list):raise Error("invalid_json")
   batch=data["workflow_runs"]
   if len(batch)>page_size:raise Error("invalid_json")
+  if offset and len(batch)<=offset:raise Error("stale_continuation")
   _BUDGET.get().charge("items",len(batch))
   fetched+=1
   for index,item in enumerate(batch):
