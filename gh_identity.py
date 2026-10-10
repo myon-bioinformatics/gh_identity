@@ -289,8 +289,11 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
    else:raise
  keymap={"name":"name","size-kb":"size_kb","run-count":"run_count","updated-at":"updated_at"}
  key=keymap[sort]
- rows.sort(key=lambda x:(x[key] is None,x[key] if x[key] is not None else ""),
-           reverse=order=="desc")
+ # Sort known values only; missing values belong at the end in both orders.
+ known=[row for row in rows if row[key] is not None]
+ missing=[row for row in rows if row[key] is None]
+ known.sort(key=lambda row:row[key],reverse=order=="desc")
+ rows=known+missing
  return {"schema":"gh-identity-repository-inventory/1","owner":owner,"repositories":rows,
          "count":len(rows),"complete":exhausted,"truncated":not exhausted,
          "limit_reason":None if exhausted else ("max_repos" if len(rows)>=max_repos else "max_pages"),
