@@ -120,3 +120,53 @@ def test_malformed_page_fails_closed(monkeypatch):
     monkeypatch.setattr(ghi, "_page", lambda *a, **k: ({"workflow_runs": None}, {}))
     with pytest.raises(ghi.Error):
         ghi.workflow_run_discovery("owner/repo", 7)
+
+
+def test_three_pages_resume_across_boundary(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    records = [
+        {"id": 201+i, "run_attempt": 1, "workflow_id": 7,
+         "head_sha": "a"*40, "head_branch": "main", "event": "push"}
+        for i in range(5)
+    ]
+    visited = []
+    def page(path, **kwargs):
+        q = parse_qs(urlsplit("https://api.github.test/" + path).query)
+        number = int(q["page"][0])
+        visited.append(number)
+        return {"workflow_runs": records[(number-1)*2:number*2]}, {}
+    monkeypatch.setattr(ghi, "_page", page)
+    cursor = (1, 0)
+    found = []
+    for _ in range(4):
+        out = ghi.workflow_run_discovery("owner/repo", 7, page_size=2,
+                 max_items=2, start_page=cursor[0], start_offset=cursor[1])
+        found.extend(row["run_id"] for row in out["runs"])
+        if out["complete"]:
+            break
+        cursor = (out["next_page"], out["next_offset"])
+    assert found == [201, 202, 203, 204, 205]
+    assert visited == [1, 2, 3]
+
+
+def test_cumulative_byte_limit_fails_closed(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    def page(path, **kwargs):
+        ghi._BUDGET.get().charge("bytes", 32)
+        return {"workflow_runs": []}, {}
+    monkeypatch.setattr(ghi, "_page", page)
+    with ghi.operation(max_bytes=16):
+        with pytest.raises(ghi.Error) as exc:
+            ghi.workflow_run_discovery("owner/repo", 7)
+    assert exc.value.code == "bytes_limit"
+
+
+def test_expired_deadline_fails_closed(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    def page(path, **kwargs):
+        ghi._BUDGET.get().deadline = 0
+        ghi._BUDGET.get().remaining()
+    monkeypatch.setattr(ghi, "_page", page)
+    with pytest.raises(ghi.Error) as exc:
+        ghi.workflow_run_discovery("owner/repo", 7)
+    assert exc.value.code == "operation_timeout"
