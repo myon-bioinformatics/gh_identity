@@ -298,7 +298,7 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
     parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
     if parsed.tzinfo is None:return None
     return parsed.astimezone(timezone.utc)
-   except ValueError:return None
+   except (ValueError,OverflowError):return None
   return value
  decorated=[(sort_value(row),row) for row in rows]
  known=[(value,row) for value,row in decorated if value is not None]

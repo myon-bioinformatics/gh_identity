@@ -138,3 +138,35 @@ def test_inventory_equal_values_tiebreak_by_name(monkeypatch,metric,order):
     monkeypatch.setattr(ghi,"request",lambda *a,**k:{"total_count":4})
     out=ghi.repository_inventory("demo",sort=metric,order=order)
     assert [r["name"] for r in out["repositories"]]==["alpha","beta","zeta"]
+
+
+@pytest.mark.parametrize("value",[
+    123, {}, [], "2026-01-01T00:00:00", "not-a-date",
+    "0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00",
+])
+@pytest.mark.parametrize("order",["asc","desc"])
+def test_inventory_unusable_dates_are_missing(monkeypatch,value,order):
+    payload=[{"name":name,"full_name":"demo/"+name,"private":False,
+              "archived":False,"updated_at":date}
+             for name,date in (("missing",value),("known","2026-01-01T00:00:00Z"))]
+    monkeypatch.setattr(ghi,"_page",lambda *a,**k:(payload,{}))
+    out=ghi.repository_inventory("demo",sort="updated-at",order=order)
+    assert [r["name"] for r in out["repositories"]]==["known","missing"]
+
+
+@pytest.mark.parametrize("order",["asc","desc"])
+def test_inventory_equal_instants_tiebreak_by_name(monkeypatch,order):
+    payload=[{"name":name,"full_name":"demo/"+name,"private":False,
+              "archived":False,"updated_at":date}
+             for name,date in (("zeta","2026-01-01T00:00:00Z"),
+                               ("alpha","2026-01-01T09:00:00+09:00"))]
+    monkeypatch.setattr(ghi,"_page",lambda *a,**k:(payload,{}))
+    out=ghi.repository_inventory("demo",sort="updated-at",order=order)
+    assert [r["name"] for r in out["repositories"]]==["alpha","zeta"]
+
+
+def test_inventory_exact_repo_limit_is_conservatively_partial(monkeypatch):
+    monkeypatch.setattr(ghi,"_page",lambda *a,**k:(_repos()[:2],{}))
+    out=ghi.repository_inventory("demo",max_repos=2)
+    assert out["count"]==2 and out["truncated"] and not out["complete"]
+    assert out["limit_reason"]=="max_repos" and out["sort_scope"]=="partial"

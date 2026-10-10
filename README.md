@@ -695,3 +695,5 @@ python gh_identity.py repo-inventory myon-bioinformatics --fields name,run-count
 ```
 
 `repository_inventory(owner, fields=("name",), sort="name", order="asc", max_repos=30, max_pages=5)` selects public, non-archived repositories. Size is GitHub's approximate repository metadata size in KiB, **not** source LOC. Run count is repository-wide Actions `total_count`, not workflow-specific. Run-count fan-out is opt-in; inaccessible values remain null with a reason, not zero. Limits are cumulative, and a partial inventory is not a complete ranking. Ascending and descending sorts place unavailable (null) metric values last; zero is a valid value, not missing. For `updated-at`, timezone-aware ISO timestamps are compared as UTC instants; missing or malformed timestamps sort last. Equal metric values use repository name ascending as a deterministic tie-breaker.
+
+Reaching `max_repos` conservatively reports `truncated=true` and `sort_scope="partial"`, even when the available repository count happens to equal the limit; no extra request is made to prove exhaustion.
