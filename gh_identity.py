@@ -572,7 +572,7 @@ def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=
  if head_sha is not None and (not isinstance(head_sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",head_sha)):
   raise ValueError("invalid head_sha")
  for label,value in (("branch",branch),("event",event)):
-  if value is not None and (not isinstance(value,str) or not value or any(c in value for c in "\\r\\n")):
+  if value is not None and (not isinstance(value,str) or not value or any(c in value for c in "\r\n")):
    raise ValueError("invalid "+label)
  info=workflow(r,workflow_id,transport=transport,timeout=timeout)
  wid=info.get("id")
