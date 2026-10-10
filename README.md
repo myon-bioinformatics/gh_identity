@@ -683,4 +683,6 @@ python gh_identity.py workflow-runs OWNER/REPO .github/workflows/ci.yml --branch
 python gh_identity.py workflow-runs OWNER/REPO 12345 --start-page 4 --limit 50
 ```
 
-`workflow_run_discovery(repo, workflow_id, *, branch=None, head_sha=None, event=None, max_items=100, max_pages=10, page_size=100, start_page=1)` provides workflow-specific runs. JSON reports `complete`, `truncated`, `limit_reason` and `next_page`. `next_page` is a page-level continuation, **not** a lossless cursor if an item limit stops in the middle of a page. Use page-aligned item limits or increase the item budget to avoid skipping rows. Repeated requests can observe a changed run listing.
+`workflow_run_discovery(repo, workflow_id, *, branch=None, head_sha=None, event=None, max_items=100, max_pages=10, page_size=100, start_page=1)` provides workflow-specific runs. JSON reports `complete`, `truncated`, `limit_reason` and `next_page`/`next_offset`. `next_page` is a page-level continuation, a page-and-offset continuation. Pass both `--start-page` and `--start-offset` to resume within a page without skipping entries. Repeated requests can observe a changed run listing.
+
+Resume note: the CLI accepts `--start-offset N` together with `--start-page N`. A continuation is positional, not an immutable snapshot; newly inserted or deleted workflow runs may shift pages. Byte/time budget errors remain fail-closed and do not promise partial output.
