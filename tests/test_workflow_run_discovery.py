@@ -30,7 +30,8 @@ def test_workflow_discovery_limit(monkeypatch):
     monkeypatch.setattr(ghi, "_page", _page)
     out = ghi.workflow_run_discovery("owner/repo", 7, max_items=1, page_size=2)
     assert out["truncated"] and out["limit_reason"] == "max_items"
-    assert out["next_page"] == 2
+    assert out["next_page"] == 1
+    assert out["next_offset"] == 1
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -48,3 +49,18 @@ def test_workflow_discovery_rejects_wrong_workflow(monkeypatch):
         {"id": 101, "run_attempt": 1, "workflow_id": 8}]}, {}))
     with pytest.raises(ghi.Error):
         ghi.workflow_run_discovery("owner/repo", 7)
+
+def test_resume_within_page_without_gap(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    monkeypatch.setattr(ghi, "_page", _page)
+    first = ghi.workflow_run_discovery("owner/repo", 7, max_items=1, page_size=2)
+    second = ghi.workflow_run_discovery("owner/repo", 7, max_items=2, page_size=2,
+                                         start_page=first["next_page"],
+                                         start_offset=first["next_offset"])
+    assert [x["run_id"] for x in first["runs"] + second["runs"]] == [101, 102]
+    assert second["complete"]
+
+
+def test_resume_rejects_bad_offset():
+    with pytest.raises(ValueError):
+        ghi.workflow_run_discovery("owner/repo", 7, page_size=2, start_offset=2)
