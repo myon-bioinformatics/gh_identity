@@ -561,6 +561,70 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
   "pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted,
   "filters":{"head_sha":head_sha,"branch":branch,"event":event}}
 
+def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=None,
+                           max_items=100, max_pages=10, page_size=100, start_page=1, start_offset=0,
+                           transport="auto", timeout=30):
+ """Find runs of one verified workflow with bounded, resumable pagination."""
+ r=repo(r)
+ for label,value in (("max_items",max_items),("max_pages",max_pages),("page_size",page_size),("start_page",start_page)):
+  if type(value) is not int or value<1:raise ValueError("invalid "+label)
+ if page_size>100:raise ValueError("page_size exceeds 100")
+ if type(start_offset) is not int or not 0<=start_offset<page_size:raise ValueError("invalid start_offset")
+ if head_sha is not None and (not isinstance(head_sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",head_sha)):
+  raise ValueError("invalid head_sha")
+ for label,value in (("branch",branch),("event",event)):
+  if value is not None and (not isinstance(value,str) or not value or any(c in value for c in "\r\n")):
+   raise ValueError("invalid "+label)
+ info=workflow(r,workflow_id,transport=transport,timeout=timeout)
+ wid=info.get("id")
+ if type(wid) is not int or wid<1:raise Error("invalid_workflow_identity")
+ if str(workflow_id).isdigit() and str(wid)!=str(workflow_id):raise Error("workflow_identity_mismatch")
+ rows=[];page=start_page;fetched=0;exhausted=False;seen=set();offset=start_offset;next_offset=0
+ while fetched<max_pages and len(rows)<max_items:
+  query={"per_page":str(page_size),"page":str(page)}
+  if branch is not None:query["branch"]=branch
+  if event is not None:query["event"]=event
+  path=f"repos/{r}/actions/workflows/{wid}/runs?"+urllib.parse.urlencode(query)
+  data,_headers=_page(path,transport=transport,timeout=timeout)
+  if not isinstance(data,dict) or not isinstance(data.get("workflow_runs"),list):raise Error("invalid_json")
+  batch=data["workflow_runs"]
+  if len(batch)>page_size:raise Error("invalid_json")
+  if offset and len(batch)<offset:raise Error("stale_continuation")
+  _BUDGET.get().charge("items",len(batch))
+  fetched+=1
+  for index,item in enumerate(batch):
+   if not isinstance(item,dict) or type(item.get("id")) is not int or type(item.get("run_attempt")) is not int:
+    raise Error("invalid_run_identity")
+   if item.get("workflow_id")!=wid:raise Error("workflow_identity_mismatch")
+   if index<offset:continue
+   key=(item["id"],item["run_attempt"])
+   if key in seen:raise Error("duplicate_run_identity")
+   seen.add(key)
+   if head_sha is not None and item.get("head_sha")!=head_sha:continue
+   if branch is not None and item.get("head_branch")!=branch:continue
+   if event is not None and item.get("event")!=event:continue
+   rows.append({"run_id":item["id"],"attempt":item["run_attempt"],"workflow_id":wid,
+    "head_sha":item.get("head_sha"),"head_branch":item.get("head_branch"),
+    "event":item.get("event"),"status":item.get("status"),"conclusion":item.get("conclusion"),
+    "created_at":item.get("created_at"),"url":item.get("html_url")})
+   if len(rows)>=max_items:
+    next_offset=index+1
+    break
+  offset=0
+  if next_offset and next_offset<len(batch):break
+  page+=1
+  next_offset=0
+  if len(batch)<page_size:
+   exhausted=True
+   break
+ return {"schema":"gh-identity-workflow-runs/1","repository":r,"workflow_id":wid,
+  "workflow_path":info.get("path"),"runs":rows,"count":len(rows),
+  "pages_fetched":fetched,"complete":exhausted,"truncated":not exhausted,
+  "limit_reason":None if exhausted else ("max_items" if len(rows)>=max_items else "max_pages"),
+  "next_page":None if exhausted else page,"next_offset":None if exhausted else next_offset,
+  "filters":{"branch":branch,"head_sha":head_sha,"event":event}}
+
+
 def runs(r,limit=20,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/runs?per_page={min(100,max(1,limit))}",transport=transport,timeout=timeout)
  ds=[{"run_id":x.get("id"),"attempt":x.get("run_attempt"),"status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"event":x.get("event"),"url":x.get("html_url")} for x in (d.get("workflow_runs")or[])[:limit]]
@@ -1719,6 +1783,7 @@ def _main(argv=None):
  x=s.add_parser("pr");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("comments");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
+ x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0)
  x=s.add_parser("runs");x.add_argument("repo")
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
@@ -1756,6 +1821,7 @@ def _main(argv=None):
   elif ns.cmd=="pr":o=pr(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="comments":o=comments(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="workflow-runs":o=workflow_run_discovery(ns.repo,ns.workflow_id,branch=ns.branch,head_sha=ns.head_sha,event=ns.event,max_items=ns.limit,max_pages=ns.page_limit,page_size=ns.page_size,start_page=ns.start_page,start_offset=ns.start_offset,transport=transport)
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
@@ -1789,7 +1855,7 @@ def main(argv=None):
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","pr","comments","reviews",
-              "issue","content","content_from_hit","issues","search","pull_requests","run_history","runs","variable","set_variable","post_comment",
+              "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs","job_log"):
  globals()[_name]=_bounded(globals()[_name])
 if __name__=="__main__":

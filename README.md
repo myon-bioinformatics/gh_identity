@@ -675,3 +675,14 @@ configuration is trusted input, not an isolation boundary for hostile repositori
 Parent execution location does not imply parent ownership of this implementation.
 A parent compatibility adapter can expose the old function names over these APIs
 once its consumer lock explicitly selects this revision.
+
+## Workflow-scoped run discovery (PR #28)
+
+```bash
+python gh_identity.py workflow-runs OWNER/REPO .github/workflows/ci.yml --branch main --event push --page-size 50 --page-limit 3
+python gh_identity.py workflow-runs OWNER/REPO 12345 --start-page 4 --limit 50
+```
+
+`workflow_run_discovery(repo, workflow_id, *, branch=None, head_sha=None, event=None, max_items=100, max_pages=10, page_size=100, start_page=1)` provides workflow-specific runs. JSON reports `complete`, `truncated`, `limit_reason` and `next_page`/`next_offset`. `next_page` is a page-level continuation, a page-and-offset continuation. Pass both `--start-page` and `--start-offset` to resume within a page without skipping entries. Repeated requests can observe a changed run listing.
+
+Resume note: the CLI accepts `--start-offset N` together with `--start-page N`. A continuation is positional, not an immutable snapshot; newly inserted or deleted workflow runs may shift pages. Byte/time budget errors remain fail-closed and do not promise partial output.
