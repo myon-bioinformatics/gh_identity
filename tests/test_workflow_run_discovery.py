@@ -233,3 +233,13 @@ def test_real_http_worker_timeout(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_changed_history_rejects_out_of_range_resume(monkeypatch):
+    monkeypatch.setattr(ghi, "workflow", _workflow)
+    monkeypatch.setattr(ghi, "_page", lambda *a, **k: ({"workflow_runs": [
+        {"id": 100, "run_attempt": 1, "workflow_id": 7}]}, {}))
+    with pytest.raises(ghi.Error) as exc:
+        ghi.workflow_run_discovery("owner/repo", 7, page_size=2,
+                                   start_page=1, start_offset=1)
+    assert exc.value.code == "stale_continuation"
