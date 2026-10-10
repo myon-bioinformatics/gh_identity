@@ -595,10 +595,10 @@ def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=
    if not isinstance(item,dict) or type(item.get("id")) is not int or type(item.get("run_attempt")) is not int:
     raise Error("invalid_run_identity")
    if item.get("workflow_id")!=wid:raise Error("workflow_identity_mismatch")
+   if index<offset:continue
    key=(item["id"],item["run_attempt"])
    if key in seen:raise Error("duplicate_run_identity")
    seen.add(key)
-   if index<offset:continue
    if head_sha is not None and item.get("head_sha")!=head_sha:continue
    if branch is not None and item.get("head_branch")!=branch:continue
    if event is not None and item.get("event")!=event:continue
