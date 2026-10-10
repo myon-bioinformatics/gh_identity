@@ -271,7 +271,7 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
         "run_count":None,"run_count_status":"not_requested"}
    rows.append(row)
    if len(rows)>=max_repos:break
-  if len(data)<100:
+  if len(data)<100 and len(rows)<max_repos:
    exhausted=True
    break
   page+=1
