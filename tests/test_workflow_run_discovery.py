@@ -170,3 +170,66 @@ def test_expired_deadline_fails_closed(monkeypatch):
     with pytest.raises(ghi.Error) as exc:
         ghi.workflow_run_discovery("owner/repo", 7)
     assert exc.value.code == "operation_timeout"
+
+
+def test_real_http_worker_byte_limit(monkeypatch):
+    """Exercise urllib worker and parent byte cap using a local HTTP fixture."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            payload = json.dumps({"workflow_runs": [{"id": 1, "run_attempt": 1,
+                       "workflow_id": 7, "padding": "x"*20000}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(ghi, "API", "http://127.0.0.1:%d" % server.server_port)
+    monkeypatch.setattr(ghi, "token", lambda: None)
+    try:
+        with ghi.operation(max_bytes=4096):
+            with pytest.raises(ghi.Error) as exc:
+                ghi._page("repos/owner/repo/actions/workflows/7/runs?page=1",
+                          transport="urllib", timeout=5)
+        assert exc.value.code == "bytes_limit"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_real_http_worker_timeout(monkeypatch):
+    """Slow local server must not bypass the parent's overall deadline."""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(0.3)
+            try:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"workflow_runs":[]}')
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(ghi, "API", "http://127.0.0.1:%d" % server.server_port)
+    monkeypatch.setattr(ghi, "token", lambda: None)
+    try:
+        with ghi.operation(timeout=0.05):
+            with pytest.raises(ghi.Error) as exc:
+                ghi._page("repos/owner/repo/actions/workflows/7/runs?page=1",
+                          transport="urllib", timeout=5)
+        assert exc.value.code == "operation_timeout"
+    finally:
+        server.shutdown()
+        server.server_close()
