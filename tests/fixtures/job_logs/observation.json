@@ -1,0 +1,32 @@
+{
+  "run": {
+    "id": 20,
+    "run_attempt": 2,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success",
+    "html_url": "https://github.com/o/r/actions/runs/20"
+  },
+  "jobs": {
+    "total_count": 1,
+    "jobs": [
+      {
+        "id": 91,
+        "run_id": 20,
+        "run_attempt": 2,
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "Python 3.10",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/o/r/actions/runs/20/job/91",
+        "steps": [
+          {"number": 1, "name": "Set up job", "status": "completed", "conclusion": "success"},
+          {"number": 3, "name": "Run tests", "status": "completed", "conclusion": "success"}
+        ]
+      }
+    ]
+  },
+  "log": "\ufeff2026-10-10T00:00:00Z \u001b[32mセットアップ\u001b[0m\n2026-10-10T00:00:01Z token=FIXTURE_ONLY_\u001b[31mTOKEN\u001b[0m\n2026-10-10T00:00:02Z \u001b]8;;https://example.invalid/fixture\u0007link\u001b]8;;\u0007\n2026-10-10T00:00:03Z tests passed\n",
+  "redact": ["FIXTURE_ONLY_TOKEN"],
+  "sanitized": "2026-10-10T00:00:00Z セットアップ\n2026-10-10T00:00:01Z token=[REDACTED]\n2026-10-10T00:00:02Z link\n2026-10-10T00:00:03Z tests passed\n"
+}

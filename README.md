@@ -143,7 +143,131 @@ url = ghi.step_url_from_jobs(observation, 91, 7, line=1)
 python gh_identity.py step-url OWNER/REPO 20 91 7 --line 1
 ```
 
-The observation helper requires a unique matching job, matching run/attempt and an existing step number. It does not infer the step number from list position. The pure builder formats explicitly supplied identities; it does not establish that a job, step or log line exists. A line anchor selects the GitHub UI location, not a log API endpoint. Step links are independent of log availability and bounded log retrieval remains a separate Issue #17 phase.
+The observation helper requires a unique matching job, matching run/attempt and an existing step number. It does not infer the step number from list position. The pure builder formats explicitly supplied identities; it does not establish that a job, step or log line exists. A line anchor selects the GitHub UI location, not a log API endpoint. Step links are independent of log availability. The bounded job-log API below reuses these helpers; the other read contracts remain tracked in [Issue #20](https://github.com/myon-bioinformatics/gh_identity/issues/20).
+
+## Bounded Actions job-log text
+
+```bash
+# RUN_ID and JOB_ID are numeric; select an exact attempt explicitly.
+python gh_identity.py job-log OWNER/REPO RUN_ID JOB_ID --attempt 2
+
+# Separate the log-body cap from the whole operation's byte/time budget.
+# PRIVATE_VALUE is an already-set environment variable; its value stays off argv.
+python gh_identity.py job-log OWNER/REPO RUN_ID JOB_ID --attempt 2 \
+  --log-bytes 500000 --max-bytes 3000000 --timeout 20 \
+  --redact-env PRIVATE_VALUE
+```
+
+```python
+import os
+import gh_identity as ghi
+
+observation = ghi.job_log(
+    "OWNER/REPO", 20, 91,
+    attempt=2,
+    max_bytes=500_000,
+    redact=(os.environ["PRIVATE_VALUE"],),
+    transport="auto",
+    timeout=20,
+)
+if observation["complete"]:
+    # Decide where to send the sanitized text; the API creates no log file.
+    text = observation["text"]
+else:
+    # The body exceeded max_bytes. No possibly cut secret/prefix is returned.
+    assert observation["truncated"] and observation["text"] is None
+```
+
+`job_log(repo, run_id, job_id, *, attempt, max_bytes=1_000_000, redact=(),
+transport="auto", timeout=30)` requires a positive explicit attempt; it never
+substitutes the latest attempt. It calls the existing `run()` and `jobs()` APIs
+and validates the requested repository/run/attempt, a unique job in the complete
+attempt observation, matching full head SHA, and a completed job before requesting
+its log. A completed job may have failed; completion does not mean a green result.
+`step_urls` are produced by the existing observation helper and pure URL builder.
+They identify observed steps, not byte ranges or verified log-line locations.
+
+The `gh-identity-job-log/1` result carries repository, run ID, job ID, attempt,
+head SHA, observation time, `step_urls`, and the following log fields:
+
+| Field | Meaning |
+| --- | --- |
+| `complete`, `truncated` | `true`/`false` for a complete downloaded body; `false`/`true` when the local log-byte cap is exceeded. |
+| `text` | Normalized, redacted text only after the entire bounded response has been received; otherwise `null`. |
+| `text_sha256` | SHA-256 of the returned sanitized UTF-8 text; `null` when text is withheld. It is not a raw-log hash. |
+| `bytes_read`, `limit_bytes` | Raw body bytes observed and the requested local log cap. A declared oversized Content-Length can stop the read at zero bytes; otherwise an over-limit observation may include one probe byte. This does not claim the full remote size. |
+| `redirects` | Number of validated download redirects followed. Signed download URLs are not returned. |
+| `transport`, `credential_source` | Body transport is `urllib`; credential source is `environment`, `gh`, or `anonymous`. |
+| `redaction`, `normalization` | `redaction.applied` reports whether sanitization ran, even with zero replacement operations; normalization reports BOM/ANSI removal. These flags are false when text is withheld. |
+
+### Transports, credentials and redirects
+
+Run/job metadata retains the existing `auto` policy: prefer `gh`, with `urllib`
+fallback for missing/unauthenticated `gh`. The log body always uses a bounded stdlib
+worker so redirect, decoding and error behavior are consistent across installed
+`gh` versions. Thus `--transport gh` chooses metadata/authentication behavior;
+it does not switch the raw body to `gh run view --log`.
+
+The body request first uses `GH_TOKEN`, then `GITHUB_TOKEN`. With `auto` or `gh`,
+an existing CLI credential can be read using `gh auth token --hostname github.com`
+over bounded pipes when no environment token is available. `auto` permits an
+anonymous public request if `gh` is unavailable or unauthenticated; explicit
+`gh` reports that failure. Cancellation and other CLI failures remain errors.
+Explicit `urllib` never requests a CLI credential.
+The worker receives credentials through stdin, not command-line arguments.
+
+GitHub documents anonymous access to public job logs. Private repositories need
+appropriate access; fine-grained tokens require Actions read permission, while
+classic PATs/OAuth tokens require the `repo` scope. The job-log endpoint returns
+a short-lived redirect to a plain-text download. See the
+[GitHub job-log API](https://docs.github.com/en/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run)
+and [gh auth token](https://cli.github.com/manual/gh_auth_token).
+
+GHI follows at most three manual redirects, restricted to HTTPS subdomains of
+`actions.githubusercontent.com` or `blob.core.windows.net`. Only the initial
+GitHub API request receives Authorization; redirected requests do not inherit
+it. Missing, unsafe and excessive redirects are errors. Tokens and signed URLs
+are omitted from public output and error diagnostics.
+
+### Limits, normalization and failure handling
+
+`max_bytes`/`--log-bytes` caps the raw log body before UTF-8 decoding. An oversized
+body returns a truncated observation with `text=null` and `text_sha256=null`;
+it does not return a prefix, which might cut a secret before it can be recognized.
+CLI exit **1** means this explicit local-limit result. The outer operation's
+`--max-bytes` and `--timeout` still apply cumulatively to metadata, credential
+lookup and body retrieval. Exhausting them raises `bytes_limit` or
+`operation_timeout` and exits **2**. CLI exit **0** means complete sanitized text.
+Network, authentication, identity and malformed/incomplete-response exceptions
+also exit **2**, never an empty or truncated successful body.
+
+Normalization removes UTF-8 BOM characters, ANSI CSI/OSC/DCS sequences and unsafe
+terminal control characters, and converts CRLF/CR newlines to LF before redaction.
+Redaction covers supported GitHub token patterns, the current GitHub credential,
+Authorization credentials, explicit literal values, Actions `add-mask` values/words,
+private-key blocks and credential-like assignments/signed URL queries. Overlapping
+matches are combined before a single replacement pass. This is not a detector for every
+possible secret. Supply application-specific values with `redact=(...)`; this
+accepts a list or tuple of up to 100 nonempty strings, at most 65,536 UTF-8 bytes
+combined. The CLI accepts repeatable `--redact-env NAME` instead of secret values
+on argv. An unset or empty named variable is an argument error.
+
+HTTP 206, Content-Range, a body shorter than its declared Content-Length, and
+broken chunked responses are `incomplete_log_response`, distinct from an
+intentional local cap. HTTP 401 is `authentication_required`; 403 is
+`permission_or_rate_limit` unless response headers identify rate limiting;
+429 is `rate_limit`; 404 is `not_found_or_inaccessible`; 410 is
+`log_not_available`; and 5xx is `server_error`. See [SPEC.md](SPEC.md#bounded-job-log-contract)
+for identity, redirect, encoding and response-format errors. Only UTF-8 plain
+text is decoded; compressed responses and UTF-16/32 BOMs fail with
+`unsupported_log_encoding`, and invalid UTF-8 is `invalid_log_encoding`.
+
+The API/CLI does not automatically write raw logs, signed URLs or secret hashes
+to files or JUnit evidence. Offline regressions use synthetic log fixtures;
+routine JUnit results contain test outcomes and compact identity. Live GitHub
+verification is an explicit separate operation. This addition implements only
+Issue #20's job-log slice; its other API and contract-validation work remains
+unfinished.
 
 ## Write receipts and CLI exit codes
 
