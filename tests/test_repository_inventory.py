@@ -67,8 +67,8 @@ def test_inventory_invalid_options(kw):
 ])
 def test_inventory_missing_metrics_sort_last(monkeypatch,metric,field,order,expected):
     sizes={"zero":0,"five":5,"twenty":20,"missing":None}
-    dates={"zero":"2026-01-01","five":"2026-02-01",
-           "twenty":"2026-03-01","missing":None}
+    dates={"zero":"2026-01-01T00:00:00Z","five":"2026-02-01T00:00:00Z",
+           "twenty":"2026-03-01T00:00:00Z","missing":None}
     fixtures=[{"name":name,"full_name":"demo/"+name,"private":False,
                "archived":False,"size":size,"updated_at":dates[name]}
               for name,size in sizes.items()]
