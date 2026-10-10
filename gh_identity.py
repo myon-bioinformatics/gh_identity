@@ -1195,7 +1195,8 @@ def job_log(r, run_id, job_id, *, attempt, max_bytes=1_000_000, redact=(), trans
         return left
     observed_run = run(r, run_id, attempt=attempt, transport=transport, timeout=remaining())
     sha = observed_run.get("head_sha")
-    if (type(observed_run.get("attempt")) is not int or observed_run["attempt"] != attempt
+    if (type(observed_run.get("run_id")) is not int or observed_run["run_id"] != run_id
+            or type(observed_run.get("attempt")) is not int or observed_run["attempt"] != attempt
             or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha)):
         raise Error("invalid_run_identity")
     observation = jobs(r, run_id, attempt=attempt, transport=transport, timeout=remaining())

@@ -76,6 +76,7 @@ def test_api_observes_exact_attempt_and_reuses_observed_step_links():
 
 @pytest.mark.parametrize('change,error', [
     ('wrong_run', 'invalid_json'),
+    ('run_id_float', 'invalid_run_identity'),
     ('wrong_run_attempt', 'attempt_mismatch'),
     ('missing_sha', 'invalid_run_identity'),
     ('wrong_job_run', 'job_identity_mismatch'),
@@ -92,6 +93,7 @@ def test_bad_identity_or_incomplete_observation_blocks_log_request(change, error
     run, jobs = data['run'], data['jobs']
     job = jobs['jobs'][0]
     if change == 'wrong_run': run['id'] = 21
+    elif change == 'run_id_float': run['id'] = 20.0
     elif change == 'wrong_run_attempt': run['run_attempt'] = 3
     elif change == 'missing_sha': run.pop('head_sha')
     elif change == 'wrong_job_run': job['run_id'] = 21
