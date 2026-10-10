@@ -108,3 +108,33 @@ def test_inventory_missing_metrics_with_bounded_partial_results(monkeypatch):
     assert [r["name"] for r in out["repositories"]]==["known","missing"]
     assert out["count"]==2 and out["truncated"] and not out["complete"]
     assert out["limit_reason"]=="max_repos" and out["sort_scope"]=="partial"
+
+
+@pytest.mark.parametrize("order,expected",[
+    ("asc",["early","offset","late","invalid","missing"]),
+    ("desc",["late","offset","early","invalid","missing"]),
+])
+def test_inventory_dates_normalized_and_malformed_last(monkeypatch,order,expected):
+    timestamps={"early":"2026-01-01T00:00:00Z",
+                "offset":"2026-01-01T10:00:00+09:00",
+                "late":"2026-01-01T02:00:00Z",
+                "invalid":"not-an-iso-date","missing":None}
+    payload=[{"name":name,"full_name":"demo/"+name,"private":False,
+              "archived":False,"size":0,"updated_at":date}
+             for name,date in timestamps.items()]
+    monkeypatch.setattr(ghi,"_page",lambda *a,**k:(payload,{}))
+    out=ghi.repository_inventory("demo",sort="updated-at",order=order)
+    assert [r["name"] for r in out["repositories"]]==expected
+    assert out["complete"] and out["sort_scope"]=="complete"
+
+
+@pytest.mark.parametrize("metric",["run-count","size-kb","updated-at"])
+@pytest.mark.parametrize("order",["asc","desc"])
+def test_inventory_equal_values_tiebreak_by_name(monkeypatch,metric,order):
+    payload=[{"name":name,"full_name":"demo/"+name,"private":False,
+              "archived":False,"size":4,"updated_at":"2026-01-01T00:00:00Z"}
+             for name in ("zeta","alpha","beta")]
+    monkeypatch.setattr(ghi,"_page",lambda *a,**k:(payload,{}))
+    monkeypatch.setattr(ghi,"request",lambda *a,**k:{"total_count":4})
+    out=ghi.repository_inventory("demo",sort=metric,order=order)
+    assert [r["name"] for r in out["repositories"]]==["alpha","beta","zeta"]
