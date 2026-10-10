@@ -240,6 +240,64 @@ def repositories(owner,transport="auto",timeout=30):
  xs=pages(f"users/{owner}/repos?sort=full_name",transport,timeout)
  rows=[{"full_name":x.get("full_name"),"archived":x.get("archived"),"updated_at":x.get("updated_at"),"url":x.get("html_url")} for x in xs]
  return {"schema":"gh-identity-repositories/1","owner":owner,"complete":True,"count":len(rows),"repositories":rows}
+def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
+                         max_repos=30, max_pages=5, transport="auto", timeout=30):
+ """Bounded public non-archived repository inventory; run counts are opt-in."""
+ if not isinstance(owner,str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})",owner):
+  raise ValueError("invalid owner")
+ allowed={"name","size-kb","run-count","updated-at"}
+ if isinstance(fields,str):fields=tuple(x.strip() for x in fields.split(","))
+ else:fields=tuple(fields)
+ if not fields or any(x not in allowed for x in fields):raise ValueError("invalid fields")
+ if sort not in allowed or order not in ("asc","desc"):raise ValueError("invalid sort/order")
+ if type(max_repos) is not int or not 1<=max_repos<=1000:raise ValueError("invalid max_repos")
+ if type(max_pages) is not int or not 1<=max_pages<=100:raise ValueError("invalid max_pages")
+ need_counts="run-count" in fields or sort=="run-count"
+ rows=[];page=1;exhausted=False;pages_fetched=0
+ while page<=max_pages and len(rows)<max_repos:
+  data,_headers=_page("users/"+owner+"/repos?per_page=100&page="+str(page),
+                      transport=transport,timeout=timeout)
+  if not isinstance(data,list) or len(data)>100:raise Error("invalid_json")
+  _BUDGET.get().charge("items",len(data))
+  pages_fetched+=1
+  for item in data:
+   if not isinstance(item,dict):raise Error("invalid_json")
+   if item.get("private") is not False or item.get("archived") is not False:continue
+   name=item.get("name");full=item.get("full_name")
+   if not isinstance(name,str) or full!=owner+"/"+name:raise Error("invalid_repository_identity")
+   size=item.get("size")
+   if type(size) is not int or size<0:size=None
+   row={"name":name,"full_name":full,"size_kb":size,"updated_at":item.get("updated_at"),
+        "run_count":None,"run_count_status":"not_requested"}
+   rows.append(row)
+   if len(rows)>=max_repos:break
+  if len(data)<100:
+   exhausted=True
+   break
+  page+=1
+ for row in rows:
+  if not need_counts:continue
+  try:
+   result=request("GET","repos/"+row["full_name"]+"/actions/runs?per_page=1",
+                  transport=transport,timeout=timeout)
+   count=result.get("total_count") if isinstance(result,dict) else None
+   if type(count) is not int or count<0:raise Error("invalid_json")
+   row["run_count"]=count;row["run_count_status"]="available"
+  except Error as exc:
+   if exc.code in ("authentication_required","permission_or_rate_limit","not_found_or_inaccessible"):
+    row["run_count_status"]=exc.code
+   else:raise
+ keymap={"name":"name","size-kb":"size_kb","run-count":"run_count","updated-at":"updated_at"}
+ key=keymap[sort]
+ rows.sort(key=lambda x:(x[key] is None,x[key] if x[key] is not None else ""),
+           reverse=order=="desc")
+ return {"schema":"gh-identity-repository-inventory/1","owner":owner,"repositories":rows,
+         "count":len(rows),"complete":exhausted,"truncated":not exhausted,
+         "limit_reason":None if exhausted else ("max_repos" if len(rows)>=max_repos else "max_pages"),
+         "pages_fetched":pages_fetched,"sort":sort,"order":order,
+         "sort_scope":"complete" if exhausted else "partial",
+         "fields":list(fields),"measured_at":now()}
+
 def pr(r,n,**k):
  r=repo(r);d=request("GET",f"repos/{r}/pulls/{n}",**k)
  return {"schema":"gh-identity-pr/1","repository":r,"number":n,"state":d.get("state"),"draft":d.get("draft"),"merged":d.get("merged"),"mergeable":d.get("mergeable"),"head_sha":(d.get("head")or{}).get("sha"),"head_ref":(d.get("head")or{}).get("ref"),"base_sha":(d.get("base")or{}).get("sha"),"base_ref":(d.get("base")or{}).get("ref"),"url":d.get("html_url"),"observed_at":now()}
@@ -1775,6 +1833,7 @@ def _main(argv=None):
  depth_args=x.add_mutually_exclusive_group();depth_args.add_argument("--depth",type=int,default=1);depth_args.add_argument("--recursive",action="store_true")
  x.add_argument("--exclude-dir",action="append",default=[]);x.add_argument("--exclude-file",action="append",default=[])
  x=s.add_parser("repos");x.add_argument("owner")
+ x=s.add_parser("repo-inventory");x.add_argument("owner");x.add_argument("--fields",default="name");x.add_argument("--sort",choices=("name","size-kb","run-count","updated-at"),default="name");x.add_argument("--order",choices=("asc","desc"),default="asc");x.add_argument("--max-repos",type=int,default=30);x.add_argument("--page-limit",type=int,default=5)
  x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("content");x.add_argument("repo");x.add_argument("kind",choices=("pr","issue","commit"));x.add_argument("identifier");x.add_argument("--field",action="append")
  x=s.add_parser("issues");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
@@ -1809,6 +1868,7 @@ def _main(argv=None):
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="tree":o=tree(ns.repo,ns.ref,depth=None if ns.recursive else ns.depth,exclude_dirs=ns.exclude_dir,exclude_files=ns.exclude_file,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
+  elif ns.cmd=="repo-inventory":o=repository_inventory(ns.owner,fields=ns.fields,sort=ns.sort,order=ns.order,max_repos=ns.max_repos,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes,ns.include_controls)
   elif ns.cmd=="content":
@@ -1854,7 +1914,7 @@ def main(argv=None):
   return 2
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
-for _name in ("_gh","_url","request","pages","repository","repositories","pr","comments","reviews",
+for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs","job_log"):
  globals()[_name]=_bounded(globals()[_name])
