@@ -289,11 +289,25 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
    else:raise
  keymap={"name":"name","size-kb":"size_kb","run-count":"run_count","updated-at":"updated_at"}
  key=keymap[sort]
- # Sort known values only; missing values belong at the end in both orders.
- known=[row for row in rows if row[key] is not None]
- missing=[row for row in rows if row[key] is None]
- known.sort(key=lambda row:row[key],reverse=order=="desc")
- rows=known+missing
+ # Normalize timestamps to UTC before ordering; malformed values sort as missing.
+ def sort_value(row):
+  value=row[key]
+  if sort=="updated-at":
+   if not isinstance(value,str):return None
+   try:
+    parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
+    if parsed.tzinfo is None:return None
+    return parsed.astimezone(timezone.utc)
+   except ValueError:return None
+  return value
+ decorated=[(sort_value(row),row) for row in rows]
+ known=[(value,row) for value,row in decorated if value is not None]
+ missing=[row for value,row in decorated if value is None]
+ # Stable secondary name order, even for equal metric values.
+ known.sort(key=lambda pair:pair[1]["name"])
+ known.sort(key=lambda pair:pair[0],reverse=order=="desc")
+ missing.sort(key=lambda row:row["name"])
+ rows=[row for _,row in known]+missing
  return {"schema":"gh-identity-repository-inventory/1","owner":owner,"repositories":rows,
          "count":len(rows),"complete":exhausted,"truncated":not exhausted,
          "limit_reason":None if exhausted else ("max_repos" if len(rows)>=max_repos else "max_pages"),
