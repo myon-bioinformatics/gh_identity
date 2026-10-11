@@ -65,7 +65,7 @@ def test_cli_json_text_and_exclude_override(fake, capsys):
     assert g.main(["pr-status", "o/r", "7"]) == 0
     assert json.loads(capsys.readouterr().out)["schema"] == "gh-identity-pr-status/1"
     assert g.main(["pr-status", "o/r", "7", "--text", "--exclude-event", "workflow_dispatch"]) == 0
-    assert capsys.readouterr().out.startswith("#7 open draft")
+    assert capsys.readouterr().out.startswith("o/r#7 T\n#7 open draft")
     assert fake["runs"] == (SHA, ("workflow_dispatch",))
 
 
