@@ -21,6 +21,11 @@
 - `python gh_identity.py overview --offline`: ローカル観測だけ。
 - `python gh_identity.py overview --repo OWNER/REPO`: Git外/remote曖昧時の明示指定。
 
+overview（引数なしを含む）だけtextが既定で、既存subcommandはJSONのままとする。
+README/SPECにこの差を明記する。argparseの共通parentで --json を定義し、
+トップレベルとoverview parserの両方へ適用する。default=argparse.SUPPRESSとして
+子parserの既定値が親の指定を上書きしないようにし、両位置と重複指定をfixture化する。
+
 テキストとJSONは同じPython API `overview(...)` の結果を描画する。
 既存subcommandのJSON出力やゲート用終了コードを勝手に変更しない。
 
@@ -105,11 +110,17 @@ metadataの目安をコメント本文へ適用せず、本文に240文字/8 KiB
 stdoutの表示では本文の区切り、種類/id、著者、created_at/updated_at、元URL、
 原文のchars/body_sha256を併記し、全文の範囲を明示する。
 本文の改行・段落・空白を保つ。危険な端末制御文字は可逆なエスケープ表現にして
-示し、元の本文を黙って削除しない。JSONではbodyに完全な原文を保持する。
+示し、元の本文を黙って削除しない。textの規則は先に「\ → \\」、
+続いてLF/TAB以外のC0（CRを含む）・DEL・C1を「\xNN」（2桁小文字hex）へ
+変換する。LF/TABはそのまま保持する。literalな「\x1b」と実際のESCを区別し、
+逆変換fixtureで原文に戻ることを検証する。JSONではbodyに完全な原文を保持する。
 秘密入りremote URL、トークン、生のAPIエラーメッセージを出力しない。
 取得自体のbyte/time予算は維持するが、取得途中の本文を「全文」として出さない。
 本文が予算を超える場合はその対象を取得不足と明示し、原因・id・元URLを出す。
 これは正常時に抜粋へ置換する仕様ではなく、完全取得できなかった失敗状態である。
+CIで実行するとstdoutの本文全文がActions等のログに保存される。private repoでも
+同じ挙動であることをREADME/SPECに明記する。ユーザー指定の全文表示は維持し、
+CI検証はsynthetic fixtureを使ってprivateな実本文をログへ出さない。
 
 ## repoとrefの決定
 
@@ -135,18 +146,65 @@ GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
 - ローカル観測は既存のbounded Git inspection経路を再利用する。
   現行 `local_identity` の独自subprocess経路をコピーして新parserを増やさない。
   足りないroot/remote/ref比較は共通の検証済みwrapperに追加する。
-- 最新一般コメントの取得は、API側の順序/末尾取得を保証できる経路にする。
-  `comments(last=1)` が全ページを読む既存実装を既定入口でそのまま使わない。
-  上限付き昇順の先頭ページを「最新コメント」と呼ばない。
-- APIで保証されたcreated順/updated順とIDを記録する。同時刻ならIDで安定化。
-  取得範囲内の最大日時しか保証できないなら `latest_observed` と明示する。
-- 初期予算案: 操作全体20秒・HTTPページ/リクエスト12回・受信2 MiB。
-  PR候補とIssue候補の表示はそれぞれ最大3件、PRの一般コメント最大2件、
-  Issueの一般コメント最大1件、threadは1ページ/20件まで。
-  個々のAPI呼び出しで全体予算をリセットしない。
-- 12回に収まらない詳細は追加コマンドへ譲る。完全性を捏造して予算を隠さない。
-  まずlocal→default branch→PR/Issue選択→双方の最新コメント→CI→threadの順で
-  優先し、追加したIssue情報がthread詳細のfan-outで予算切れにならないようにする。
+- 更新順候補は `issues?state=all&sort=updated&direction=desc&per_page=100`
+  を最大2ページ読み、`pull_request` キーでPR/Issueを分離する。同じ応答を共有し、
+  open PRとopen/closed Issueの候補を別々に選ぶ。最新作成open PRは
+  `pulls?state=open&sort=created&direction=desc` の1ページで取得する。
+  既存の正規化を再利用する薄い候補取得を追加し、同じAPIを別用途で重複取得しない。
+- 2ページがPRばかりでIssueが見つからなくても「Issueなし」としない。
+  `selection_status=not_found_within_window`、`latest=null`、
+  `pages_fetched=N`、`exhausted=false`、`next_page` を保持し、
+  textは「最新Issue: 未観測（Nページ内に見つからず）」とする。
+  全ページの終端を確認して初めて `selection_status=none` を許容する。
+  権限不足/timeoutは別の `selection_status=error`。候補の表示上限と
+  最新候補の選択/一覧の完全性を別フィールドにする。
+- 最新一般コメントは `issues/{n}/comments?per_page=1&page=1` の
+  response Linkを読み、`rel="last"` があればその末尾ページを1回取得する。
+  静止した一覧なら1対象につき最大2回（0/1件なら通常1回）で本文全文を取れる。
+  全履歴の `comments(last=1)` は使わず、無効なdirection指定にも依存しない。
+  注目Issue本文は更新順候補のbodyを再利用し、余分なIssue GETを避ける。
+- 末尾ページ方式は同時投稿/削除がある一覧の原子的な最新保証ではない。
+  最後の応答にさらにnextがあれば `latest_observed` として不完全性を示し、
+  空になった末尾、矛盾したLink、同時更新を観測した場合も完了と称さない。
+  自動再探索で予算を超えない。page番号を永続的な件数と扱わない。
+- gh/urllib共通transportでresponse headersをboundedに取り出せる拡張が必要。
+  現行JSON-only transportからLinkが読めると仮定しない。
+  rel=lastはHTTPS/api.github.com・同じrepo/number/path・per_page=1・正のpageを
+  検証し、任意URLを追わない。API認証を外部URLへ転送しない。
+- 最新review submissionもbounded末尾取得を使い、最大2回を予約する。
+  一般コメント/review/inline/threadの種類は保持し、任意本文から重要度を推測しない。
+- APIで保証されたcreated順/updated順とIDを記録する。同時刻の安定化は
+  観測内に限り、ページ外を含む全順序を保証しない。
+- 操作全体の初期予算を20秒・HTTP要求20回・受信2 MiBへ変更する。
+  HTTP要求は失敗/transport fallbackも数え、個々のAPIで予算をリセットしない。
+  基本取得の設計上限は下表の19回で、残り1回を予備とする。
+  rate limit/timeout/追加paginationが必要ならその項目をpartial/unknownで止める。
+
+| 取得 | 最大HTTP要求 | 共有/上限 |
+|---|---:|---|
+| repository/default branch名 | 1 | 共有metadata |
+| default branchの最新commit | 1 | SHA/件名を同時取得 |
+| 現branchのopen PR候補 | 1 | head repo/ref照合、曖昧なら候補 |
+| 最新作成open PR | 1 | 1ページ |
+| 最新更新PR/Issueの混在候補 | 2 | 最大2ページを両用途で共有 |
+| 注目PRの不足metadata | 1 | current PR取得/候補で揃えば0回 |
+| 最新一般コメント（PR最大2＋Issue1） | 6 | 各対象最大2回、同一PRは統合 |
+| 注目PRの最新review submission | 2 | 末尾取得、状態/IDを保持 |
+| 注目PR同一headのchecks | 1 | 1ページ、不足はincomplete |
+| 注目PRのthread概要 | 1 | 1ページ/20件、返信の追加取得なし |
+| コメント対象PRのhead再確認 | 2 | 各1回、staleを検出 |
+| 合計 | 19 | 操作上限20回、予備1回 |
+
+- PR候補とIssue候補は各最大3件。thread詳細をoverviewでfan-outしない。
+  `checks_for_sha` 等の現行関数が全ページを読む場合はoverview向けのbounded
+  呼出し口を追加し、一覧の全体を完全取得したと誤記しない。run/log/artifact取得は
+  既定overviewで追加実行せず、既存コマンドを次の入口として示す。
+- GraphQLが403等で使えない場合は1回で打ち切り、再試行やRESTからの解決状態推測を
+  行わない。`unknown (graphql unavailable)` と元のエラー分類を保持する。
+  permission/rate limit/proxyを識別できない応答からプロキシ原因と断定しない。
+- まずlocal→default branch→PR/Issue選択→双方の本文全文→head再確認→CI→review→thread
+  の順で優先する。追加paginationやfallbackで余裕が減った場合はreview/threadを
+  未観測にして本文を優先し、通常時の全文表示を省略オプションへ変更しない。
 - ネットワーク/APIが失敗しても取得済みlocal/remoteの観測を保持して出力する。
   401、403、404、timeout、missing、truncated、未実行を区別し、0件に置換しない。
 - PR選択/CI/コメントを読む間のhead変更は、注目PRの最後のhead再確認で
@@ -170,14 +228,17 @@ GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
   100件超のコメント、ページ上限、権限不足、部分結果、途中head変更を検証。
 - PR無しでIssueだけある、closed Issueが最新更新、Issue本文だけの更新、
   古いコメントの編集、Issueコメント無し、PR混在ページ、Issue検索/一覧の
-  上限到達を検証。未観測と0件を区別し、PR/Issueのリンクを創作しない。
+  上限到達、2ページ全部PR、終端確認済み0件、末尾コメントの追加/削除を検証。
+  未観測と0件を区別し、PR/Issueのリンクを創作しない。
 - 長文の結論が末尾、先頭がfrom/to等のヘッダ、日本語/絵文字/改行、短い本文、
   空本文をfixtureに含める。引数なしで末尾まで原文が保持され、240文字や8 KiBで
   切られないこと、chars/hash/source identityと取得上限の失敗表示を検証する。
 - stdoutのmetadata件数上限と本文全文の保持、秘密入りremote/端末制御文字の除去、stderr分離、
-  text/JSONの観測一致、終了コード、既存CLI互換性を検証。
+  text/JSONの観測一致、バックスラッシュ/実ESC/CR/LF/TABの逆変換、
+  --jsonの両配置、GraphQL失敗時の再試行ゼロ、終了コード、既存CLI互換性を検証。
 - fake transport/Git fixtureで、help/offline時の外部APIゼロ、全実行のmutationゼロ、
-  全体のrequest/byte/time上限、重複取得抑制を検証する。
+  全体のrequest/byte/time上限、19回の最大構成・20回を超えないfallback、
+  本文優先の打ち切り、重複取得抑制を検証する。
 - README先頭の第一例を `python gh_identity.py` にする。SPECへ契約を追加し、
   pytest/JUnitとPython 3.10〜3.14＋最新stable CIで確認する。
 - 実装は①boundedな概要API・引数なし分岐・renderer、②最新コメントの効率取得、
@@ -185,3 +246,12 @@ GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
 
 このPRの段階では提案の記録のみ。実装/実データでの取得件数・時間・出力サイズの
 検証が済むまでは、引数なしoverviewが利用可能になったとは記載しない。
+
+## レビュー反映記録（2026-10-11）
+
+review 5482275860のS1/S2/N1〜N4を仕様へ反映。HTTP予算は内訳19回＋予備1回、
+混在Issue窓の未観測、末尾コメントとLink対応、可逆escape、overviewだけtext、
+GraphQL再試行禁止、CIへの全文記録を明文化。実装/動作検証は後続のまま。
+
+API根拠: [Issue comments](https://docs.github.com/en/rest/issues/comments)、
+[pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)。
