@@ -1865,6 +1865,71 @@ def git_status(root=".", *, max_bytes=1_000_000):
         index += 1
     return {"clean": not records and not truncated, "records": records, "truncated": truncated}
 
+def _git_head(root):
+    """Current branch name ("" when detached) and HEAD commit."""
+    branch = _git_decode(_git_run(root, ["branch", "--show-current"])[0]).strip()
+    sha = _git_decode(_git_run(root, ["rev-parse", "--verify", "HEAD"])[0]).strip()
+    return {"branch": branch, "head_sha": sha}
+
+
+def _git_branch_exists(root, name):
+    return _git_run(root, ["show-ref", "--verify", "--quiet", "refs/heads/" + name], ok=(0, 1))[2] == 0
+
+
+def git_switch(root=".", branch=None, *, create=False, previous=False, write=False):
+    """Plan, or with write=True perform, one `git switch` and verify the result.
+
+    Exactly one of: switch to an existing local branch, create a new branch
+    (`-c`), or return to the previous branch (`-`). Without write nothing is
+    changed. Existing-branch switches use --no-guess so a remote-tracking
+    branch is never created implicitly.
+    """
+    if previous == (branch is not None):
+        raise ValueError("give a branch name or previous=True, not both")
+    if create and previous:
+        raise ValueError("create cannot be combined with previous")
+    before = _git_head(root)
+    out = {"schema": "gh-identity-git-switch/1", "status": "planned", "mutation_status": "not_attempted",
+           "verification_status": "not_attempted", "before": before}
+    if previous:
+        target = _git_decode(_git_run(root, ["rev-parse", "--abbrev-ref", "--verify", "@{-1}"],
+                                      ok=(0, 128))[0]).strip()
+        if not target:
+            # Empty when there is no previous position or it was a detached
+            # HEAD; `git switch -` itself refuses a commit there.
+            raise GitInspectionError("previous position is not a branch")
+        args = ["switch", "-"]
+    else:
+        name = _git_ref(branch)
+        # Validate as a branch name without touching refs.
+        if _git_run(root, ["check-ref-format", "--branch", name], ok=(0, 1, 128))[2] != 0:
+            raise ValueError("invalid branch name")
+        exists = _git_branch_exists(root, name)
+        if create and exists:
+            raise GitInspectionError("branch already exists")
+        if not create and not exists:
+            raise GitInspectionError("local branch not found")
+        target = name
+        args = ["switch", "-c", name] if create else ["switch", "--no-guess", name]
+    out.update(target=target, command=["git", *args])
+    if not write:
+        return out
+    try:
+        _git_run(root, args)
+    except GitInspectionError as error:
+        out.update(status="mutation_failed", mutation_status="failed", error=str(error))
+        return out
+    out["mutation_status"] = "succeeded"
+    after = _git_head(root)
+    out["after"] = after
+    verified = after["branch"] == target
+    if create:
+        verified = verified and after["head_sha"] == before["head_sha"]
+    out.update(verified=verified, verification_status="verified" if verified else "mismatch",
+               status="verified" if verified else "verification_mismatch")
+    return out
+
+
 def git_ls_files(root=".", *, include_untracked=False, max_files=10_000,
              max_bytes=1_000_000):
     """Return a bounded NUL-safe file inventory.
@@ -2122,6 +2187,7 @@ def _main(argv=None):
   if command=="git-show":x.add_argument("revision",nargs="?",default="HEAD");x.add_argument("--path")
   if command=="git-grep":x.add_argument("pattern")
   if command=="git-ignore":x.add_argument("paths",nargs="+")
+ x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
  depth_args=x.add_mutually_exclusive_group();depth_args.add_argument("--depth",type=int,default=1);depth_args.add_argument("--recursive",action="store_true")
@@ -2166,6 +2232,12 @@ def _main(argv=None):
   elif ns.cmd=="git-blame":o=git_blame(ns.root,path=ns.path,max_bytes=ns.output_bytes)
   elif ns.cmd=="git-grep":o=git_grep(ns.root,ns.pattern,max_bytes=ns.output_bytes)
   elif ns.cmd=="git-ignore":o=git_check_ignore(ns.root,ns.paths,max_bytes=ns.output_bytes)
+  elif ns.cmd=="git-switch":
+   if ns.create and ns.branch is not None:raise ValueError("use either BRANCH or -c NEW_BRANCH")
+   if ns.create:o=git_switch(ns.root,ns.create,create=True,write=ns.write)
+   elif ns.branch=="-":o=git_switch(ns.root,previous=True,write=ns.write)
+   elif ns.branch:o=git_switch(ns.root,ns.branch,write=ns.write)
+   else:raise ValueError("branch required")
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="tree":o=tree(ns.repo,ns.ref,depth=None if ns.recursive else ns.depth,exclude_dirs=ns.exclude_dir,exclude_files=ns.exclude_file,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
@@ -2210,7 +2282,7 @@ def _main(argv=None):
  if ns.cmd in ("checks","head-runs"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
  if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
- if ns.cmd in ("comment","variable-set"):
+ if ns.cmd in ("comment","variable-set","git-switch"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
  return 0
 def main(argv=None):
