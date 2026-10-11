@@ -37,6 +37,8 @@
 | 基準との比較 | local SHAとGitHub基準SHAの一致、比較可能ならahead/behind | SHAが違うだけで「rebase必要」と断定しない |
 | 現在のPR | 現branchに対応するopen PRの番号/件名/URL/head/base/draft | ブランチ名だけでforkの別PRを選ばない |
 | 直近のPR | 最新作成open PR 1件、最新更新open PR 1件、ほか最大3件 | created順とupdated順を混ぜた「最新」にしない |
+| 直近のIssue | 最新更新Issueをopen/closed両方から選び、番号・件名・state・updated_at・URL、ほか最大2件 | Issue更新をPR更新で代用せず、closedを未完了と称さない |
+| Issueの最新コメント | 注目Issueの著者・created_at/updated_at・240文字preview・元URL | Issue本体のupdated_atを最新コメント日時と混同しない |
 | 直近コメント | 注目PRの最新一般コメントの著者/日時/短文/URL | review、inline、threadを一般コメントに混ぜない |
 | レビュー | 最新review submission、観測した未解決thread件数と完全性 | CHANGES_REQUESTEDを重大度に変換しない |
 | 同一headのCI | checksの状態/内訳、必要ならrunの状態とURL | 0 checksをgreenにせず、別SHAの成功を使わない |
@@ -48,6 +50,17 @@
 同じPRが複数枠に出る場合は表示を統合し、選択理由を複数記録する。
 現在branchに複数の候補がある場合は候補を示し、一意と捏造しない。
 closed/merged PRを含む履歴の全探索は追加コマンドに譲り、既定で走らせない。
+
+IssueはPRとは独立して、updated_at降順でopen/closedを含む直近最大3件を
+表示する。閉じられたIssueの直近更新も観測し、stateを明示する。
+RESTのIssue一覧に含まれるPRは除外し、同じPRをIssue枠に重複表示しない。
+「注目Issue」は最新更新Issueとし、その最新一般コメントを最大1件表示する。
+本文の短いpreviewも添え、コメント無しでもIssue側の方針・残件が見えるようにする。
+Issueの本文更新・close/reopen・ラベル等でupdated_atが変わっていても、
+「最新コメントが付いた」「残件が完了した」とは推測しない。
+最新コメントはcreated_atによる最新投稿とupdated_at（編集日時）を分ける。
+現在PRとIssueの関連は明示的な参照・GitHubの関連情報が観測できた場合だけ示し、
+番号や題名の類似から勝手に関連付けない。PRが無くてもIssue枠を出す。
 
 ## 既定出力のイメージ
 
@@ -69,6 +82,12 @@ latest-updated open PR: #42 | updated_at=2026-10-11T05:55:00Z
 latest conversation (#42): reviewer, 2026-10-11T05:55:00Z
   「境界ケースは確認済みです。READMEの例も更新してください。」
   https://github.com/example/demo/pull/42#issuecomment-123
+latest-updated Issue: #40 Confirm rollout | open | updated_at=2026-10-11T05:58:00Z
+  body: 「残件はIssueで追跡します。新しい確認結果を追加しました。」
+  https://github.com/example/demo/issues/40
+latest Issue comment (#40): maintainer | created_at=2026-10-11T05:58:00Z
+  「追加検証が必要な項目をIssue本文に記録しました。」
+  https://github.com/example/demo/issues/40#issuecomment-124
 reviews (#42): COMMENTED | unresolved threads=unknown (permission denied)
 checks @ aaaaaaa: pending | success=5 in_progress=1
 other open PRs (shown=1, total=unknown): #41 Update docs
@@ -76,7 +95,7 @@ next: python gh_identity.py observe-pr example/demo 42
 next: python gh_identity.py review-observations example/demo 42
 ```
 
-標準出力はこの程度の密度（目安25行・最大8 KiB）を上限とし、全コメント、
+標準出力はこの程度の密度（目安30行・最大8 KiB）を上限とし、全コメント、
 全diff、ジョブログ、artifact本文、全repo一覧、help全文を展開しない。
 コメントpreviewは各240文字まで。改行/制御文字は表示用に正規化する。
 秘密入りremote URL、トークン、生のAPIエラーメッセージを出力しない。
@@ -100,7 +119,7 @@ GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
 
 ## 取得、上限と状態
 
-- 既存 `repository` / `resolve_ref` / `pull_requests` / `comments` /
+- 既存 `repository` / `resolve_ref` / `pull_requests` / `issues` / `issue` / `comments` /
   `reviews` / `review_observations` / `checks_for_sha` / `head-runs` 系を再利用。
   呼び出し間で同じPR・head・metadataを再取得しないための共有観測を持つ。
 - ローカル観測は既存のbounded Git inspection経路を再利用する。
@@ -112,10 +131,12 @@ GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
 - APIで保証されたcreated順/updated順とIDを記録する。同時刻ならIDで安定化。
   取得範囲内の最大日時しか保証できないなら `latest_observed` と明示する。
 - 初期予算案: 操作全体20秒・HTTPページ/リクエスト12回・受信2 MiB。
-  PR候補の表示は最大3件、一般コメント最大2件、threadは1ページ/20件まで。
+  PR候補とIssue候補の表示はそれぞれ最大3件、PRの一般コメント最大2件、
+  Issueの一般コメント最大1件、threadは1ページ/20件まで。
   個々のAPI呼び出しで全体予算をリセットしない。
 - 12回に収まらない詳細は追加コマンドへ譲る。完全性を捏造して予算を隠さない。
-  まずlocal→default branch→PR選択→最新コメント→CI→threadの順で優先する。
+  まずlocal→default branch→PR/Issue選択→双方の最新コメント→CI→threadの順で
+  優先し、追加したIssue情報がthread詳細のfan-outで予算切れにならないようにする。
 - ネットワーク/APIが失敗しても取得済みlocal/remoteの観測を保持して出力する。
   401、403、404、timeout、missing、truncated、未実行を区別し、0件に置換しない。
 - PR選択/CI/コメントを読む間のhead変更は、注目PRの最後のhead再確認で
@@ -137,6 +158,9 @@ GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
   古さが不明な場合を区別。SHA相違だけからbehind数やrebase必要性を創作しない。
 - PR無し、branch一致が複数、最新作成と最新更新が別PR、同日時、コメント無し、
   100件超のコメント、ページ上限、権限不足、部分結果、途中head変更を検証。
+- PR無しでIssueだけある、closed Issueが最新更新、Issue本文だけの更新、
+  古いコメントの編集、Issueコメント無し、PR混在ページ、Issue検索/一覧の
+  上限到達を検証。未観測と0件を区別し、PR/Issueのリンクを創作しない。
 - stdoutの予算とpreview短縮、秘密入りremote/端末制御文字の除去、stderr分離、
   text/JSONの観測一致、終了コード、既存CLI互換性を検証。
 - fake transport/Git fixtureで、help/offline時の外部APIゼロ、全実行のmutationゼロ、
