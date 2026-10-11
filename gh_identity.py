@@ -1104,6 +1104,56 @@ def pr_status(r,n,*,last=3,exclude_events=("dynamic",),transport="auto",timeout=
                          if (c["conclusion"] or c["status"]) not in ("success","skipped","neutral")]},
   "comments":talk(cs,"created_at"),"reviews":talk(rs,"submitted_at"),"observed_at":now()}
 
+def item_status(r,n,*,last=3,exclude_events=("dynamic",),transport="auto",timeout=30):
+ """PR -> pr_status (with title); Issue -> state, title and latest comments."""
+ r=repo(r);n=_positive_identifier(n,"number")
+ d=request("GET",f"repos/{r}/issues/{n}",transport=transport,timeout=timeout)
+ row=_issue_row(d,r,n)
+ if row["kind"]=="pr":
+  return {**pr_status(r,n,last=last,exclude_events=exclude_events,transport=transport,timeout=timeout),"kind":"pr","title":row["title"]}
+ if type(last) is not int or not 0<=last<=20:raise ValueError("last must be 0-20")
+ cs=comments(r,n,transport=transport,timeout=timeout)["comments"]
+ return {"schema":"gh-identity-issue-status/1","repository":r,"number":n,"kind":"issue","title":row["title"],
+         "state":row["state"],"updated_at":d.get("updated_at"),"url":d.get("html_url"),
+         "comments":[{k:x.get(k) for k in ("author","created_at","preview","url")} for x in cs[-last:]] if last else [],
+         "observed_at":now()}
+
+def parse_status_targets(tokens):
+ """OWNER/REPO sets the repository for following bare numbers; OWNER/REPO#N is explicit."""
+ current=None;targets=[]
+ for token in tokens:
+  if re.fullmatch(r"[0-9]+",token):
+   if current is None:raise ValueError("a number needs a preceding OWNER/REPO")
+   targets.append((current,int(token)))
+  elif "#" in token:
+   name,_,number=token.partition("#")
+   if not re.fullmatch(r"[0-9]+",number):raise ValueError("expected OWNER/REPO#NUMBER")
+   targets.append((repo(name),int(number)))
+  else:
+   current=repo(token)
+ if not targets:raise ValueError("no PR or Issue number given")
+ if len(targets)>20:raise ValueError("at most 20 targets")
+ return targets
+
+def status_many(tokens,*,last=3,exclude_events=("dynamic",),transport="auto",timeout=30):
+ """Several PRs/Issues, possibly across repositories; one failure does not hide the rest."""
+ items=[]
+ for r,n in parse_status_targets(tokens):
+  try:items.append(item_status(r,n,last=last,exclude_events=exclude_events,transport=transport,timeout=timeout))
+  except (Error,ValueError) as e:items.append({"repository":r,"number":n,"kind":None,"error":getattr(e,"code","invalid_argument")})
+ return items[0] if len(items)==1 and "error" not in items[0] else {"schema":"gh-identity-status-list/1","items":items,"observed_at":now()}
+
+def render_status(o):
+ out=[]
+ for item in o["items"] if "items" in o else [o]:
+  if item.get("error"):out.append(f"{item['repository']}#{item['number']}: error {item['error']}")
+  elif item.get("kind")=="issue":
+   out.append(f"{item['repository']}#{item['number']} issue {item['state']} updated={item['updated_at']} {item['title']}")
+   out+=[f"comment {x.get('author')} {x.get('created_at')}: {(x.get('preview') or '')[:200]}" for x in item["comments"]]
+  else:
+   out.append(f"{item['repository']}#{item['number']} {item.get('title') or ''}".rstrip());out.append(render_pr_status(item))
+ return "\n".join(out)
+
 def render_pr_status(o):
  p=o["pr"];lines=[f"#{o['number']} {p['state']}{' draft' if p['draft'] else ''} merged={p['merged']} {p['mergeable_state']} head={p['head_sha'][:8]} {p['head_ref']} -> {p['base_ref']}"]
  r=o["runs"];lines.append(f"runs: {r['state']} {r['by_conclusion']}"+(f" (excluded {r['excluded_count']})" if r["excluded_count"] else ""))
@@ -2433,7 +2483,7 @@ def _main(argv=None):
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1)
  x=s.add_parser("observe-pr");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--min-checks",type=int,default=1)
- x=s.add_parser("pr-status",help="compact PR head status: runs, unfinished checks, latest comments/reviews");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--last",type=int,default=3);x.add_argument("--exclude-event",action="append",default=None,metavar="EVENT");x.add_argument("--text",action="store_true",help="human-readable lines instead of JSON")
+ x=s.add_parser("pr-status",help="compact status of PRs/Issues: OWNER/REPO N [N...] or OWNER/REPO#N ...");x.add_argument("targets",nargs="+",metavar="OWNER/REPO|N|OWNER/REPO#N");x.add_argument("--last",type=int,default=3);x.add_argument("--exclude-event",action="append",default=None,metavar="EVENT");x.add_argument("--text",action="store_true",help="human-readable lines instead of JSON")
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
  x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
@@ -2497,7 +2547,7 @@ def _main(argv=None):
   elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="checks":o=checks_for_sha(ns.repo,ns.sha,ns.min_checks,transport)
   elif ns.cmd=="observe-pr":o=observe_pr(ns.repo,ns.number,ns.min_checks,transport)
-  elif ns.cmd=="pr-status":o=pr_status(ns.repo,ns.number,last=ns.last,exclude_events=tuple(ns.exclude_event) if ns.exclude_event is not None else ("dynamic",),transport=transport)
+  elif ns.cmd=="pr-status":o=status_many(ns.targets,last=ns.last,exclude_events=tuple(ns.exclude_event) if ns.exclude_event is not None else ("dynamic",),transport=transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
@@ -2509,7 +2559,7 @@ def _main(argv=None):
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
- if ns.cmd=="pr-status" and ns.text:print(render_pr_status(o))
+ if ns.cmd=="pr-status" and ns.text:print(render_status(o))
  else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.

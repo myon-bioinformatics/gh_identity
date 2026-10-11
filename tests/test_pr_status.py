@@ -10,6 +10,10 @@ SHA = "b" * 40
 @pytest.fixture
 def fake(monkeypatch):
     calls = {}
+    monkeypatch.setattr(g, "request", lambda method, path, **k: {
+        "number": int(path.rsplit("/", 1)[1]), "repository_url": g.API + "/repos/o/r", "state": "open",
+        "title": "T", "html_url": "https://github.com/o/r/pull/" + path.rsplit("/", 1)[1],
+        "user": {"login": "u"}, "pull_request": {}})
     monkeypatch.setattr(g, "pr", lambda r, n, **k: {"state": "open", "draft": True, "merged": False,
         "mergeable_state": "unstable", "head_sha": SHA, "head_ref": "work/x", "base_ref": "main", "url": "u"})
 
@@ -63,3 +67,36 @@ def test_cli_json_text_and_exclude_override(fake, capsys):
     assert g.main(["pr-status", "o/r", "7", "--text", "--exclude-event", "workflow_dispatch"]) == 0
     assert capsys.readouterr().out.startswith("#7 open draft")
     assert fake["runs"] == (SHA, ("workflow_dispatch",))
+
+
+@pytest.mark.parametrize("tokens,expected", [
+    (["o/r", "7"], [("o/r", 7)]),
+    (["o/r", "7", "8", "x/y", "1"], [("o/r", 7), ("o/r", 8), ("x/y", 1)]),
+    (["o/r#7", "x/y#2"], [("o/r", 7), ("x/y", 2)]),
+])
+def test_targets_mix_repositories_and_numbers(tokens, expected):
+    assert g.parse_status_targets(tokens) == expected
+
+
+@pytest.mark.parametrize("tokens", [["7"], ["o/r"], ["o/r#x"], ["o/r", *map(str, range(1, 22))]])
+def test_bad_targets(tokens):
+    with pytest.raises(ValueError):
+        g.parse_status_targets(tokens)
+
+
+def test_many_mixes_pr_issue_and_errors(fake, monkeypatch):
+    def issue_endpoint(method, path, **k):
+        n = int(path.rsplit("/", 1)[1])
+        if n == 404:
+            raise g.Error("not_found")
+        row = {"number": n, "repository_url": g.API + "/repos/o/r", "state": "open", "title": f"T{n}",
+               "html_url": f"https://github.com/o/r/{'pull' if n == 7 else 'issues'}/{n}", "user": {"login": "u"},
+               "updated_at": "t"}
+        return {**row, "pull_request": {}} if n == 7 else row
+    monkeypatch.setattr(g, "request", issue_endpoint)
+    out = g.status_many(["o/r", "7", "9", "404"], last=1)
+    kinds = [(i["number"], i.get("kind"), i.get("error")) for i in out["items"]]
+    assert kinds == [(7, "pr", None), (9, "issue", None), (404, None, "not_found")]
+    assert out["items"][0]["title"] == "T7" and out["items"][1]["comments"][0]["author"] == "u4"
+    text = g.render_status(out)
+    assert "o/r#9 issue open updated=t T9" in text and "o/r#404: error not_found" in text

@@ -753,7 +753,15 @@ python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
 
 ```bash
 python gh_identity.py pr-status OWNER/REPO NUMBER [--text] [--last 3] [--exclude-event EVENT ...]
+python gh_identity.py pr-status OWNER/REPO 145 169 OTHER/REPO 12 --text   # several, across repositories
+python gh_identity.py pr-status OWNER/REPO#169 OTHER/REPO#12 --text        # explicit form
 ```
+
+Up to 20 targets. A bare number belongs to the last `OWNER/REPO` given. Each
+number may be a PR (full status below) or an Issue (state, title, `updated_at`
+and the latest comments). One target prints that item; several print
+`gh-identity-status-list/1` with `items`, where a failing target becomes
+`{"error": ...}` instead of hiding the others.
 
 One look at a PR's current head: PR state (`draft`, `merged`,
 `mergeable_state`, head/base), the head's workflow runs (Copilot's `dynamic`
