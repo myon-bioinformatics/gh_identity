@@ -100,3 +100,16 @@ def test_many_mixes_pr_issue_and_errors(fake, monkeypatch):
     assert out["items"][0]["title"] == "T7" and out["items"][1]["comments"][0]["author"] == "u4"
     text = g.render_status(out)
     assert "o/r#9 issue open updated=t T9" in text and "o/r#404: error not_found" in text
+
+
+def test_labels_are_reported_for_issues_and_prs(fake, monkeypatch):
+    def endpoint(method, path, **k):
+        n = int(path.rsplit("/", 1)[1])
+        row = {"number": n, "repository_url": g.API + "/repos/o/r", "state": "open", "title": "T",
+               "html_url": f"https://github.com/o/r/{'pull' if n == 7 else 'issues'}/{n}", "user": {"login": "u"},
+               "labels": [{"name": "type:tracking"}, {"name": "priority:high"}, "junk", {"name": 3}]}
+        return {**row, "pull_request": {}} if n == 7 else row
+    monkeypatch.setattr(g, "request", endpoint)
+    out = g.status_many(["o/r", "7", "9"], last=0)
+    assert [i["labels"] for i in out["items"]] == [["priority:high", "type:tracking"]] * 2
+    assert g.render_status(out).count("labels: priority:high, type:tracking") == 2

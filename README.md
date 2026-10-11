@@ -777,6 +777,8 @@ number may be a PR (full status below) or an Issue (state, title, `updated_at`
 and the latest comments). One target prints that item; several print
 `gh-identity-status-list/1` with `items`, where a failing target becomes
 `{"error": ...}` instead of hiding the others.
+Every item carries its `labels` (sorted names), so a labelling scheme such as
+`status:*` / `priority:*` / `type:*` can be read back across repositories.
 
 One look at a PR's current head: PR state (`draft`, `merged`,
 `mergeable_state`, head/base), the head's workflow runs (Copilot's `dynamic`

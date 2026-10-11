@@ -544,7 +544,8 @@ def _issue_row(d,expected_repo=None,expected_number=None,kind=None,body=False):
  if d.get("user") is not None and not isinstance(d["user"],dict):raise Error("invalid_issue_identity")
  row={"repository":r,"number":number,"kind":actual,"title":d["title"],"state":d["state"],
       "state_reason":d.get("state_reason"),"url":d["html_url"],"author":(d.get("user") or {}).get("login"),
-      "created_at":d.get("created_at"),"updated_at":d.get("updated_at"),"closed_at":d.get("closed_at")}
+      "created_at":d.get("created_at"),"updated_at":d.get("updated_at"),"closed_at":d.get("closed_at"),
+      "labels":sorted(x.get("name") for x in (d.get("labels") or []) if isinstance(x,dict) and isinstance(x.get("name"),str))}
  if actual=="pr":row["draft"]=d.get("draft")
  if body:
   if d.get("body") is not None and not isinstance(d["body"],str):raise Error("invalid_issue_body")
@@ -1110,11 +1111,11 @@ def item_status(r,n,*,last=3,exclude_events=("dynamic",),transport="auto",timeou
  d=request("GET",f"repos/{r}/issues/{n}",transport=transport,timeout=timeout)
  row=_issue_row(d,r,n)
  if row["kind"]=="pr":
-  return {**pr_status(r,n,last=last,exclude_events=exclude_events,transport=transport,timeout=timeout),"kind":"pr","title":row["title"]}
+  return {**pr_status(r,n,last=last,exclude_events=exclude_events,transport=transport,timeout=timeout),"kind":"pr","title":row["title"],"labels":row["labels"]}
  if type(last) is not int or not 0<=last<=20:raise ValueError("last must be 0-20")
  cs=comments(r,n,transport=transport,timeout=timeout)["comments"]
  return {"schema":"gh-identity-issue-status/1","repository":r,"number":n,"kind":"issue","title":row["title"],
-         "state":row["state"],"updated_at":d.get("updated_at"),"url":d.get("html_url"),
+         "state":row["state"],"labels":row["labels"],"updated_at":d.get("updated_at"),"url":d.get("html_url"),
          "comments":[{k:x.get(k) for k in ("author","created_at","preview","url")} for x in cs[-last:]] if last else [],
          "observed_at":now()}
 
@@ -1149,9 +1150,12 @@ def render_status(o):
   if item.get("error"):out.append(f"{item['repository']}#{item['number']}: error {item['error']}")
   elif item.get("kind")=="issue":
    out.append(f"{item['repository']}#{item['number']} issue {item['state']} updated={item['updated_at']} {item['title']}")
+   if item.get("labels"):out.append("labels: "+", ".join(item["labels"]))
    out+=[f"comment {x.get('author')} {x.get('created_at')}: {(x.get('preview') or '')[:200]}" for x in item["comments"]]
   else:
-   out.append(f"{item['repository']}#{item['number']} {item.get('title') or ''}".rstrip());out.append(render_pr_status(item))
+   out.append(f"{item['repository']}#{item['number']} {item.get('title') or ''}".rstrip())
+   if item.get("labels"):out.append("labels: "+", ".join(item["labels"]))
+   out.append(render_pr_status(item))
  return "\n".join(out)
 
 def render_pr_status(o):
