@@ -749,6 +749,38 @@ python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
 - `workflow-runs --head-sha` now sends `head_sha` to the API as well, so a
   busy repository no longer pages until `bytes_limit` before finding the head.
 
+## Waiting for checks with progress (`wait-checks`)
+
+```bash
+python gh_identity.py wait-checks OWNER/REPO SHA [--interval 60] [--wait-timeout 900] \
+  [--min-checks N] [--ignore-check copilot-pull-request-reviewer]
+```
+
+Polls the check-runs of one SHA (the first poll is immediate, then every
+`--interval` seconds, 5-600) until the state is `green` or `failed`, or until
+`--wait-timeout` (max 3600). Each poll is its own bounded operation; the global
+`--timeout` bounds one poll. Progress goes to stderr, one block per poll:
+
+```text
+[0s] pending in_progress=2 success=17
+  waiting (2): Python pytest oracles, runtime-browser
+[60s] pending in_progress=1 success=18
+  Python pytest oracles: in_progress -> success
+  waiting (1): runtime-browser
+```
+
+stdout is one JSON object (`gh-identity-wait-checks/1`) with the final check
+summary plus `initial` and `final` snapshots, every per-check `transitions`
+entry (`from` -> `to`, with `at_seconds`; a check that appears later starts
+from `absent`), `ignored`, `failed_checks`, `polls` and `timed_out`.
+
+- A completed failure ends the wait at once (`failed`): the SHA cannot turn green.
+- `--ignore-check NAME` drops a check before judging (it is still listed in `ignored`).
+- Use `--min-checks` with the expected number of checks, counting ignored ones:
+  right after a push only a few checks may exist, and those alone can already be
+  all green. Ignored checks that are present are subtracted before judging.
+- Exit `0` only for `green`; `1` for `failed`, `pending` at timeout or incomplete; `2` for invalid input.
+
 ## Run artifacts: listing and one bounded member
 
 ```bash

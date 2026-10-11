@@ -1082,6 +1082,69 @@ def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30,*,requester=No
  summary=summarize_checks(rows,expected,min_checks)
  return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,**summary,"observed_at":now()}
 
+def _checks_snapshot(summary,elapsed):
+ return {"at_seconds":round(elapsed,1),"state":summary["state"],"count":summary["count"],"by_conclusion":summary["by_conclusion"]}
+
+def _checks_progress(summary,ignored,elapsed,changed):
+ counts=" ".join(f"{k}={v}" for k,v in summary["by_conclusion"].items()) or "no checks"
+ skip=f" (ignored {len(ignored)})" if ignored else ""
+ lines=[f"[{int(elapsed)}s] {summary['state']} {counts}{skip}"]
+ lines+=[f"  {c['name']}: {c['from']} -> {c['to']}" for c in changed]
+ waiting=[c["name"] for c in summary["checks"] if c["status"]!="completed"]
+ if waiting:lines.append(f"  waiting ({len(waiting)}): {', '.join(waiting[:5])}{' ...' if len(waiting)>5 else ''}")
+ return "\n".join(lines)
+
+def wait_checks(r,sha,*,min_checks=1,interval=60,wait_timeout=900,ignore=(),transport="auto",timeout=30,
+                progress=None,sleep=None,clock=None):
+ """Poll check-runs on one SHA until green or failed, or until wait_timeout.
+
+ Reports the first and the last snapshot plus every per-check transition seen
+ between polls (queued -> in_progress -> success ...). Each poll is its own
+ bounded operation. `ignore` drops named checks (e.g. a reviewer bot that
+ errors) before the state is judged; they stay listed.
+ """
+ if not re.fullmatch(r"[0-9a-fA-F]{40}",str(sha)):raise ValueError("invalid sha")
+ if isinstance(interval,bool) or not isinstance(interval,(int,float)) or not 5<=interval<=600:raise ValueError("interval must be 5-600 seconds")
+ if isinstance(wait_timeout,bool) or not isinstance(wait_timeout,(int,float)) or not 0<wait_timeout<=3600:raise ValueError("wait_timeout must be 1-3600 seconds")
+ if _BUDGET.get() is not None:raise ValueError("wait_checks runs its own bounded polls; call it outside operation()")
+ sleep=sleep or time.sleep;clock=clock or time.monotonic
+ ignore=set(ignore);start=clock();polls=0;first=None;seen={};transitions=[]
+ while True:
+  polls+=1
+  raw=checks_for_sha(r,sha,min_checks,transport,timeout)
+  kept=[c for c in raw["checks"] if c["name"] not in ignore]
+  ignored=[c for c in raw["checks"] if c["name"] in ignore]
+  expected=raw["expected_count"]-len(ignored) if isinstance(raw["expected_count"],int) else None
+  # min_checks counts every check, ignored ones included (as in the README);
+  # judge the kept checks against the same total minus what was ignored.
+  floor=max(1,min_checks-len(ignored))
+  summary=summarize_checks(kept,expected,floor) if raw["complete"] else {**summarize_checks(kept,None,floor),"state":"incomplete"}
+  elapsed=clock()-start
+  changed=[]
+  for c in kept:
+   key=c["id"] if c.get("id") is not None else c["name"]
+   now_state=c["conclusion"] or c["status"] or "unknown"
+   before=seen.get(key)
+   if before is not None and before!=now_state:
+    changed.append({"name":c["name"],"from":before,"to":now_state,"at_seconds":round(elapsed,1)})
+   elif before is None and first is not None:
+    changed.append({"name":c["name"],"from":"absent","to":now_state,"at_seconds":round(elapsed,1)})
+   seen[key]=now_state
+  transitions+=changed
+  if first is None:first=_checks_snapshot(summary,elapsed)
+  if progress:progress(_checks_progress(summary,ignored,elapsed,changed))
+  # A completed failure means this SHA can no longer turn green: stop early.
+  bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
+  failed=[c["name"] for c in kept if c["status"]=="completed" and c["conclusion"] in bad]
+  if failed and summary["state"]=="pending":summary={**summary,"state":"failed"}
+  done=summary["state"] in ("green","failed")
+  if done or elapsed+interval>wait_timeout:
+   return {"schema":"gh-identity-wait-checks/1","repository":repo(r),"sha":sha.lower(),**summary,
+           "initial":first,"final":_checks_snapshot(summary,elapsed),"transitions":transitions,
+           "ignored":[{"name":c["name"],"conclusion":c["conclusion"],"status":c["status"]} for c in ignored],
+           "failed_checks":failed,"polls":polls,"elapsed_seconds":round(elapsed,1),"timed_out":not done,"observed_at":now()}
+  sleep(interval)
+
 def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
  before=pr(r,n,transport=transport,timeout=timeout)
  ch=checks_for_sha(r,before["head_sha"],min_checks,transport,timeout)
@@ -2400,6 +2463,7 @@ def _main(argv=None):
  x=s.add_parser("artifacts");x.add_argument("repo");x.add_argument("run_id",type=int)
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1)
+ x=s.add_parser("wait-checks",help="poll check-runs on a SHA until green/failed; progress on stderr");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1);x.add_argument("--interval",type=float,default=60);x.add_argument("--wait-timeout",type=float,default=900);x.add_argument("--ignore-check",action="append",default=[],metavar="NAME");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
  x=s.add_parser("observe-pr");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--min-checks",type=int,default=1)
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
@@ -2463,6 +2527,7 @@ def _main(argv=None):
   elif ns.cmd=="artifacts":o=artifacts(ns.repo,ns.run_id,transport=transport)
   elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="checks":o=checks_for_sha(ns.repo,ns.sha,ns.min_checks,transport)
+  elif ns.cmd=="wait-checks":o=wait_checks(ns.repo,ns.sha,min_checks=ns.min_checks,interval=ns.interval,wait_timeout=ns.wait_timeout,ignore=ns.ignore_check,transport=transport,timeout=ns.poll_timeout,progress=lambda line:print(line,file=sys.stderr,flush=True))
   elif ns.cmd=="observe-pr":o=observe_pr(ns.repo,ns.number,ns.min_checks,transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
@@ -2478,7 +2543,7 @@ def _main(argv=None):
  print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.
- if ns.cmd in ("checks","head-runs"):return 0 if o["state"]=="green" else 1
+ if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
  if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
  if ns.cmd in ("comment","variable-set","git-switch"):
@@ -2493,6 +2558,10 @@ def main(argv=None):
     index=args.index(flag)
     if index+1>=len(args):raise ValueError("missing limit")
     limits[key]=convert(args[index+1]);del args[index:index+2]
+  # wait-checks spans many bounded polls; --timeout then bounds each poll.
+  if args[:1]==["wait-checks"]:
+   if set(limits)-{"timeout"}:raise ValueError("wait-checks accepts --timeout only (per poll)")
+   return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
   with operation(**limits):return _main(args)
  except (ValueError,Error,GitInspectionError) as e:
   print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr)
