@@ -695,6 +695,21 @@ name, or a previous detached position fails before any change. Local changes
 that `git switch` refuses are reported as `mutation_failed`, never forced.
 Exit `0` for `planned` or `verified`, otherwise `1` (`2` for invalid input).
 
+## Where am I (`local-position`)
+
+```bash
+python gh_identity.py local-position [--root PATH]
+```
+
+Local only (no network): absolute `cwd`, the Git top level and `cwd` relative
+to it, the checkout HEAD (`sha`, branch or detached, commit time, subject),
+staged / unstaged / untracked counts, and the GitHub `owner/name` of `origin`.
+The remote URL itself is never printed, so credentials or proxy addresses in it
+cannot leak; a non-GitHub remote reports `not_github`. Outside a checkout,
+`git` is `null` with `not_a_checkout` (or `no_commit` before the first commit).
+Those two come only from an explicit Git answer; a missing `git`, a permission
+error or a broken `.git` is `git_error` with a short `detail`, never an absence.
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash
@@ -771,6 +786,37 @@ change), the check-run summary with only the checks that need attention
 conversation comments and reviews as 240-character previews with URLs.
 `--text` prints the same as short lines. This is an observation (exit `0`),
 not a gate: use `checks` or `wait-checks` to gate.
+## Waiting for checks with progress (`wait-checks`)
+
+```bash
+python gh_identity.py wait-checks OWNER/REPO SHA [--interval 60] [--wait-timeout 900] \
+  [--min-checks N] [--ignore-check copilot-pull-request-reviewer]
+```
+
+Polls the check-runs of one SHA (the first poll is immediate, then every
+`--interval` seconds, 5-600) until the state is `green` or `failed`, or until
+`--wait-timeout` (max 3600). Each poll is its own bounded operation; the global
+`--timeout` bounds one poll. Progress goes to stderr, one block per poll:
+
+```text
+[0s] pending in_progress=2 success=17
+  waiting (2): Python pytest oracles, runtime-browser
+[60s] pending in_progress=1 success=18
+  Python pytest oracles: in_progress -> success
+  waiting (1): runtime-browser
+```
+
+stdout is one JSON object (`gh-identity-wait-checks/1`) with the final check
+summary plus `initial` and `final` snapshots, every per-check `transitions`
+entry (`from` -> `to`, with `at_seconds`; a check that appears later starts
+from `absent`), `ignored`, `failed_checks`, `polls` and `timed_out`.
+
+- A completed failure ends the wait at once (`failed`): the SHA cannot turn green.
+- `--ignore-check NAME` drops a check before judging (it is still listed in `ignored`).
+- Use `--min-checks` with the expected number of checks, counting ignored ones:
+  right after a push only a few checks may exist, and those alone can already be
+  all green. Ignored checks that are present are subtracted before judging.
+- Exit `0` only for `green`; `1` for `failed`, `pending` at timeout or incomplete; `2` for invalid input.
 
 ## Run artifacts: listing and one bounded member
 

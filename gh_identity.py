@@ -1164,6 +1164,69 @@ def render_pr_status(o):
   lines+=[f"{label} {x.get('author')} {x.get(when)}{' '+x['state'] if x.get('state') else ''}: {(x.get('preview') or '')[:200]}" for x in rows]
  return "\n".join(lines)
 
+def _checks_snapshot(summary,elapsed):
+ return {"at_seconds":round(elapsed,1),"state":summary["state"],"count":summary["count"],"by_conclusion":summary["by_conclusion"]}
+
+def _checks_progress(summary,ignored,elapsed,changed):
+ counts=" ".join(f"{k}={v}" for k,v in summary["by_conclusion"].items()) or "no checks"
+ skip=f" (ignored {len(ignored)})" if ignored else ""
+ lines=[f"[{int(elapsed)}s] {summary['state']} {counts}{skip}"]
+ lines+=[f"  {c['name']}: {c['from']} -> {c['to']}" for c in changed]
+ waiting=[c["name"] for c in summary["checks"] if c["status"]!="completed"]
+ if waiting:lines.append(f"  waiting ({len(waiting)}): {', '.join(waiting[:5])}{' ...' if len(waiting)>5 else ''}")
+ return "\n".join(lines)
+
+def wait_checks(r,sha,*,min_checks=1,interval=60,wait_timeout=900,ignore=(),transport="auto",timeout=30,
+                progress=None,sleep=None,clock=None):
+ """Poll check-runs on one SHA until green or failed, or until wait_timeout.
+
+ Reports the first and the last snapshot plus every per-check transition seen
+ between polls (queued -> in_progress -> success ...). Each poll is its own
+ bounded operation. `ignore` drops named checks (e.g. a reviewer bot that
+ errors) before the state is judged; they stay listed.
+ """
+ if not re.fullmatch(r"[0-9a-fA-F]{40}",str(sha)):raise ValueError("invalid sha")
+ if isinstance(interval,bool) or not isinstance(interval,(int,float)) or not 5<=interval<=600:raise ValueError("interval must be 5-600 seconds")
+ if isinstance(wait_timeout,bool) or not isinstance(wait_timeout,(int,float)) or not 0<wait_timeout<=3600:raise ValueError("wait_timeout must be 1-3600 seconds")
+ if _BUDGET.get() is not None:raise ValueError("wait_checks runs its own bounded polls; call it outside operation()")
+ sleep=sleep or time.sleep;clock=clock or time.monotonic
+ ignore=set(ignore);start=clock();polls=0;first=None;seen={};transitions=[]
+ while True:
+  polls+=1
+  raw=checks_for_sha(r,sha,min_checks,transport,timeout)
+  kept=[c for c in raw["checks"] if c["name"] not in ignore]
+  ignored=[c for c in raw["checks"] if c["name"] in ignore]
+  expected=raw["expected_count"]-len(ignored) if isinstance(raw["expected_count"],int) else None
+  # min_checks counts every check, ignored ones included (as in the README);
+  # judge the kept checks against the same total minus what was ignored.
+  floor=max(1,min_checks-len(ignored))
+  summary=summarize_checks(kept,expected,floor) if raw["complete"] else {**summarize_checks(kept,None,floor),"state":"incomplete"}
+  elapsed=clock()-start
+  changed=[]
+  for c in kept:
+   key=c["id"] if c.get("id") is not None else c["name"]
+   now_state=c["conclusion"] or c["status"] or "unknown"
+   before=seen.get(key)
+   if before is not None and before!=now_state:
+    changed.append({"name":c["name"],"from":before,"to":now_state,"at_seconds":round(elapsed,1)})
+   elif before is None and first is not None:
+    changed.append({"name":c["name"],"from":"absent","to":now_state,"at_seconds":round(elapsed,1)})
+   seen[key]=now_state
+  transitions+=changed
+  if first is None:first=_checks_snapshot(summary,elapsed)
+  if progress:progress(_checks_progress(summary,ignored,elapsed,changed))
+  # A completed failure means this SHA can no longer turn green: stop early.
+  bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
+  failed=[c["name"] for c in kept if c["status"]=="completed" and c["conclusion"] in bad]
+  if failed and summary["state"]=="pending":summary={**summary,"state":"failed"}
+  done=summary["state"] in ("green","failed")
+  if done or elapsed+interval>wait_timeout:
+   return {"schema":"gh-identity-wait-checks/1","repository":repo(r),"sha":sha.lower(),**summary,
+           "initial":first,"final":_checks_snapshot(summary,elapsed),"transitions":transitions,
+           "ignored":[{"name":c["name"],"conclusion":c["conclusion"],"status":c["status"]} for c in ignored],
+           "failed_checks":failed,"polls":polls,"elapsed_seconds":round(elapsed,1),"timed_out":not done,"observed_at":now()}
+  sleep(interval)
+
 def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
  before=pr(r,n,transport=transport,timeout=timeout)
  ch=checks_for_sha(r,before["head_sha"],min_checks,transport,timeout)
@@ -2320,6 +2383,73 @@ def checkout_head(root="."):
             "timestamp": _rm_time(fields[0], "timestamp"), "subject": fields[1].splitlines()[0]}
 
 
+_RM_REMOTE = (re.compile(r"(?:https?|ssh|git)://(?:[^@/]+@)?github\.com(?::\d+)?/([^/]+)/([^/]+?)(?:\.git)?/?"),
+              re.compile(r"[^@\s/]+@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?"))
+
+
+def remote_repository(root=".", remote="origin"):
+    """owner/name of a GitHub remote, or None; the URL itself is never returned.
+
+    Credentials, proxies and non-GitHub hosts are not echoed: an unrecognised
+    remote yields {"full_name": None, "reason": "not_github"}.
+    """
+    if not isinstance(remote, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", remote):
+        raise ValueError("remote must be a plain remote name")
+    raw, _, code = _git_run(root, ["remote", "get-url", remote], max_bytes=4096, ok=(0, 2, 128))
+    if code:
+        return {"remote": remote, "full_name": None, "reason": "no_remote"}
+    url = _git_decode(raw).strip()
+    for pattern in _RM_REMOTE:
+        match = pattern.fullmatch(url)
+        if match:
+            try:
+                return {"remote": remote, "full_name": _rm_full_name(match.group(1) + "/" + match.group(2)), "reason": None}
+            except ValueError:
+                break
+    return {"remote": remote, "full_name": None, "reason": "not_github"}
+
+
+def local_position(root="."):
+    """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
+
+    Local only (no network). Only an explicit Git answer becomes an absence:
+    not_a_checkout (exit 128 and no .git above cwd) or no_commit (HEAD does not
+    verify). Anything else (no git executable, permissions, a broken .git,
+    output bounds) is git_error with a short detail, never an absence.
+    """
+    cwd = os.path.abspath(os.fspath(root))
+    base = {"schema": "gh-identity-local-position/1", "cwd": cwd}
+    def failed(error):
+        return {**base, "git": None, "reason": "git_error", "detail": str(error)}
+    try:
+        raw, _, code = _git_run(root, ["rev-parse", "--show-toplevel"], max_bytes=64 * 1024, ok=(0, 128))
+        if code == 128:
+            here = Path(cwd)
+            if any((folder / ".git").exists() for folder in (here, *here.parents)):
+                return failed("rev-parse failed inside a .git tree")
+            return {**base, "git": None, "reason": "not_a_checkout"}
+        top = _git_decode(raw).strip()
+        if _git_run(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], max_bytes=4096, ok=(0, 1))[2] == 1:
+            return {**base, "git": None, "reason": "no_commit"}
+        head = checkout_head(root)
+        status = git_status(root)
+        remote = remote_repository(root)
+    except (GitInspectionError, ValueError) as error:
+        return failed(error)
+    kinds = Counter()
+    for record in status["records"]:
+        if record["kind"] == "?":
+            kinds["untracked"] += 1
+        elif record["kind"] in ("1", "2", "u"):
+            xy = record["record"].split(" ", 2)[1]
+            kinds["staged"] += xy[0] != "."
+            kinds["unstaged"] += xy[1] != "."
+    return {**base,
+            "git": {"top_level": top, "relative": os.path.relpath(cwd, top), "head": head,
+                    "changes": {k: kinds.get(k, 0) for k in ("staged", "unstaged", "untracked")},
+                    "changes_truncated": status["truncated"], "remote": remote}}
+
+
 def repository_metadata(root=".", *, repository, source_sha=None, expected_sha=None, generated_at=None):
     """Minimal public record: repository, checkout HEAD, optional source commit.
 
@@ -2459,6 +2589,7 @@ def _main(argv=None):
   if command=="git-grep":x.add_argument("pattern")
   if command=="git-ignore":x.add_argument("paths",nargs="+")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
+ x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -2482,6 +2613,7 @@ def _main(argv=None):
  x=s.add_parser("artifacts");x.add_argument("repo");x.add_argument("run_id",type=int)
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1)
+ x=s.add_parser("wait-checks",help="poll check-runs on a SHA until green/failed; progress on stderr");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1);x.add_argument("--interval",type=float,default=60);x.add_argument("--wait-timeout",type=float,default=900);x.add_argument("--ignore-check",action="append",default=[],metavar="NAME");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
  x=s.add_parser("observe-pr");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--min-checks",type=int,default=1)
  x=s.add_parser("pr-status",help="compact status of PRs/Issues: OWNER/REPO N [N...] or OWNER/REPO#N ...");x.add_argument("targets",nargs="+",metavar="OWNER/REPO|N|OWNER/REPO#N");x.add_argument("--last",type=int,default=3);x.add_argument("--exclude-event",action="append",default=None,metavar="EVENT");x.add_argument("--text",action="store_true",help="human-readable lines instead of JSON")
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
@@ -2511,6 +2643,7 @@ def _main(argv=None):
    elif ns.branch=="-":o=git_switch(ns.root,previous=True,write=ns.write)
    elif ns.branch:o=git_switch(ns.root,ns.branch,write=ns.write)
    else:raise ValueError("branch required")
+  elif ns.cmd=="local-position":o=local_position(ns.root)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")
    if ns.format=="v1":
@@ -2546,6 +2679,7 @@ def _main(argv=None):
   elif ns.cmd=="artifacts":o=artifacts(ns.repo,ns.run_id,transport=transport)
   elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="checks":o=checks_for_sha(ns.repo,ns.sha,ns.min_checks,transport)
+  elif ns.cmd=="wait-checks":o=wait_checks(ns.repo,ns.sha,min_checks=ns.min_checks,interval=ns.interval,wait_timeout=ns.wait_timeout,ignore=ns.ignore_check,transport=transport,timeout=ns.poll_timeout,progress=lambda line:print(line,file=sys.stderr,flush=True))
   elif ns.cmd=="observe-pr":o=observe_pr(ns.repo,ns.number,ns.min_checks,transport)
   elif ns.cmd=="pr-status":o=status_many(ns.targets,last=ns.last,exclude_events=tuple(ns.exclude_event) if ns.exclude_event is not None else ("dynamic",),transport=transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
@@ -2563,7 +2697,7 @@ def _main(argv=None):
  else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.
- if ns.cmd in ("checks","head-runs"):return 0 if o["state"]=="green" else 1
+ if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
  if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
  if ns.cmd in ("comment","variable-set","git-switch"):
@@ -2578,6 +2712,10 @@ def main(argv=None):
     index=args.index(flag)
     if index+1>=len(args):raise ValueError("missing limit")
     limits[key]=convert(args[index+1]);del args[index:index+2]
+  # wait-checks spans many bounded polls; --timeout then bounds each poll.
+  if args[:1]==["wait-checks"]:
+   if set(limits)-{"timeout"}:raise ValueError("wait-checks accepts --timeout only (per poll)")
+   return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
   with operation(**limits):return _main(args)
  except (ValueError,Error,GitInspectionError) as e:
   print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr)
