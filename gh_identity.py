@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """gh_identity: stdlib-only GitHub operations with gh-first/urllib fallback."""
 from __future__ import annotations
+from collections import Counter
 import argparse,fnmatch,json,os,re,shutil,subprocess,sys,urllib.error,urllib.parse,urllib.request
 from datetime import datetime,timezone
 from html.parser import HTMLParser
@@ -785,7 +786,11 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
  if not isinstance(max_pages,int) or max_pages<1:raise ValueError("max_pages must be positive")
  rows=[];page=1;exhausted=False;pages_fetched=0
  while page<=max_pages and len(rows)<max_items:
-  batch,_headers=_page(f"repos/{r}/actions/runs?per_page=100&page={page}",transport=transport,timeout=timeout)
+  query={"per_page":"100","page":str(page)}
+  # Server-side filters keep pages small; the client-side checks below still verify them.
+  for key,value in (("head_sha",head_sha),("branch",branch),("event",event)):
+   if value is not None:query[key]=value
+  batch,_headers=_page(f"repos/{r}/actions/runs?"+urllib.parse.urlencode(query),transport=transport,timeout=timeout)
   pages_fetched += 1
   if not isinstance(batch,dict) or not isinstance(batch.get("workflow_runs"),list):raise Error("invalid_json")
   raw=batch["workflow_runs"]
@@ -803,8 +808,15 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
    if len(rows)>=max_items:break
   if len(raw)<100:exhausted=consumed==len(raw);break
   page+=1
+ bad={"failure","cancelled","timed_out","action_required","startup_failure","stale"}
+ if not rows:state="missing"
+ elif any(x["status"]!="completed" for x in rows):state="pending"
+ elif any(x["conclusion"] in bad for x in rows):state="failed"
+ else:state="green"
  return {"schema":"gh-identity-run-discovery/1","repository":r,"runs":rows,"count":len(rows),
   "pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted,
+  "state":state if exhausted else "incomplete",
+  "by_conclusion":dict(sorted(Counter(x["conclusion"] or x["status"] or "unknown" for x in rows).items())),
   "filters":{"head_sha":head_sha,"branch":branch,"event":event}}
 
 def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=None,
@@ -830,6 +842,9 @@ def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=
   query={"per_page":str(page_size),"page":str(page)}
   if branch is not None:query["branch"]=branch
   if event is not None:query["event"]=event
+  # Without this the API returns every run and the client filter pages
+  # through megabytes until bytes_limit; the client check below still verifies.
+  if head_sha is not None:query["head_sha"]=head_sha
   path=f"repos/{r}/actions/workflows/{wid}/runs?"+urllib.parse.urlencode(query)
   data,_headers=_page(path,transport=transport,timeout=timeout)
   if not isinstance(data,dict) or not isinstance(data.get("workflow_runs"),list):raise Error("invalid_json")
@@ -1043,7 +1058,8 @@ def summarize_checks(rows,expected_count,min_checks=1):
  elif any(x["conclusion"] in bad for x in normalized):state="failed"
  elif not any(x["conclusion"]=="success" for x in normalized):state="failed"
  else:state="green"
- return {"state":state,"complete":complete,"expected_count":expected_count,"count":len(normalized),"min_checks":min_checks,"checks":normalized}
+ by_conclusion=dict(sorted(Counter(x["conclusion"] or x["status"] or "unknown" for x in normalized).items()))
+ return {"state":state,"complete":complete,"expected_count":expected_count,"count":len(normalized),"min_checks":min_checks,"by_conclusion":by_conclusion,"checks":normalized}
 
 def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30,*,requester=None):
  min_checks=_min_checks(min_checks);r=repo(r);rows=[];expected=None
@@ -2034,6 +2050,9 @@ def _main(argv=None):
   x=s.add_parser(command);x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0)
  x=s.add_parser("runs");x.add_argument("repo")
+ x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("checks");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1)
+ x=s.add_parser("observe-pr");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--min-checks",type=int,default=1)
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
  x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
@@ -2075,6 +2094,11 @@ def _main(argv=None):
    o={"inline-comments":inline_comments,"review-threads":review_threads,"review-observations":review_observations}[ns.cmd](ns.repo,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="workflow-runs":o=workflow_run_discovery(ns.repo,ns.workflow_id,branch=ns.branch,head_sha=ns.head_sha,event=ns.event,max_items=ns.limit,max_pages=ns.page_limit,page_size=ns.page_size,start_page=ns.start_page,start_offset=ns.start_offset,transport=transport)
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
+  elif ns.cmd=="head-runs":
+   if not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
+   o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,event=ns.event,transport=transport)
+  elif ns.cmd=="checks":o=checks_for_sha(ns.repo,ns.sha,ns.min_checks,transport)
+  elif ns.cmd=="observe-pr":o=observe_pr(ns.repo,ns.number,ns.min_checks,transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
@@ -2088,6 +2112,9 @@ def _main(argv=None):
  except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
+ # Gate-style exit codes: 0 only when everything observed is complete and green.
+ if ns.cmd in ("checks","head-runs"):return 0 if o["state"]=="green" else 1
+ if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
  return 0

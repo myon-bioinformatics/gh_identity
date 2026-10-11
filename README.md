@@ -687,6 +687,29 @@ python gh_identity.py workflow-runs OWNER/REPO 12345 --start-page 4 --limit 50
 
 Resume note: the CLI accepts `--start-offset N` together with `--start-page N`. A continuation is positional, not an immutable snapshot; newly inserted or deleted workflow runs may shift pages. Byte/time budget errors remain fail-closed and do not promise partial output.
 
+## Same-head gates: runs, checks and PR staleness
+
+Read-only gates for "is this exact head green?". Exit code is `0` only when the
+observation is complete and green, `1` when it is pending, failed, missing,
+incomplete or stale, and `2` for invalid input.
+
+```bash
+python gh_identity.py head-runs OWNER/REPO HEAD_SHA [--event pull_request] [--limit 100] [--page-limit 10]
+python gh_identity.py checks OWNER/REPO HEAD_SHA [--min-checks 1]
+python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
+```
+
+- `head-runs` lists every workflow run for one head (with workflow `name`),
+  filtered by the API (`head_sha`, `event`) and re-verified client-side; it
+  reports `state` (`green` / `pending` / `failed` / `missing` / `incomplete`)
+  and `by_conclusion`.
+- `checks` is the CLI for `checks_for_sha`; its summary now includes
+  `by_conclusion`.
+- `observe-pr` reads the PR head, its checks, conversation and reviews, then
+  re-reads the head; `stale` is true if the head moved meanwhile.
+- `workflow-runs --head-sha` now sends `head_sha` to the API as well, so a
+  busy repository no longer pages until `bytes_limit` before finding the head.
+
 ## Optional public repository inventory (Issue #29)
 
 ```bash
