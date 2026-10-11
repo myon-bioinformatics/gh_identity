@@ -39,7 +39,7 @@
 | 直近のPR | 最新作成open PR 1件、最新更新open PR 1件、ほか最大3件 | created順とupdated順を混ぜた「最新」にしない |
 | 直近のIssue | 最新更新Issueをopen/closed両方から選び、番号・件名・state・updated_at・URL、ほか最大2件 | Issue更新をPR更新で代用せず、closedを未完了と称さない |
 | Issueの最新コメント | 注目Issueの著者・created_at/updated_at・全文・元URL | Issue本体のupdated_atを最新コメント日時と混同しない |
-| 直近コメント | 注目PRの最新一般コメントの著者/日時/短文/URL | review、inline、threadを一般コメントに混ぜない |
+| 直近コメント | 注目PRの最新一般コメントの著者/日時/全文/URL | review、inline、threadを一般コメントに混ぜない |
 | レビュー | 最新review submission、観測した未解決thread件数と完全性 | CHANGES_REQUESTEDを重大度に変換しない |
 | 同一headのCI | checksの状態/内訳、必要ならrunの状態とURL | 0 checksをgreenにせず、別SHAの成功を使わない |
 | 続きを見る入口 | 実際のrepo/番号/SHAを入れた個別コマンドを最大3本 | 毎回help全文や全機能を並べない |
