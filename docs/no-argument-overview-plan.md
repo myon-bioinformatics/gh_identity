@@ -38,7 +38,7 @@
 | 現在のPR | 現branchに対応するopen PRの番号/件名/URL/head/base/draft | ブランチ名だけでforkの別PRを選ばない |
 | 直近のPR | 最新作成open PR 1件、最新更新open PR 1件、ほか最大3件 | created順とupdated順を混ぜた「最新」にしない |
 | 直近のIssue | 最新更新Issueをopen/closed両方から選び、番号・件名・state・updated_at・URL、ほか最大2件 | Issue更新をPR更新で代用せず、closedを未完了と称さない |
-| Issueの最新コメント | 注目Issueの著者・created_at/updated_at・先頭240文字の抜粋・元URL | Issue本体のupdated_atを最新コメント日時と混同しない |
+| Issueの最新コメント | 注目Issueの著者・created_at/updated_at・全文・元URL | Issue本体のupdated_atを最新コメント日時と混同しない |
 | 直近コメント | 注目PRの最新一般コメントの著者/日時/短文/URL | review、inline、threadを一般コメントに混ぜない |
 | レビュー | 最新review submission、観測した未解決thread件数と完全性 | CHANGES_REQUESTEDを重大度に変換しない |
 | 同一headのCI | checksの状態/内訳、必要ならrunの状態とURL | 0 checksをgreenにせず、別SHAの成功を使わない |
@@ -55,7 +55,7 @@ IssueはPRとは独立して、updated_at降順でopen/closedを含む直近最�
 表示する。閉じられたIssueの直近更新も観測し、stateを明示する。
 RESTのIssue一覧に含まれるPRは除外し、同じPRをIssue枠に重複表示しない。
 「注目Issue」は最新更新Issueとし、その最新一般コメントを最大1件表示する。
-本文の先頭抜粋も添え、コメント無しでもIssue側の方針・残件が見えるようにする。
+注目Issueの本文も全文で添え、コメント無しでもIssue側の方針・残件が見えるようにする。
 Issueの本文更新・close/reopen・ラベル等でupdated_atが変わっていても、
 「最新コメントが付いた」「残件が完了した」とは推測しない。
 最新コメントはcreated_atによる最新投稿とupdated_at（編集日時）を分ける。
@@ -95,21 +95,21 @@ next: python gh_identity.py observe-pr example/demo 42
 next: python gh_identity.py review-observations example/demo 42
 ```
 
-標準出力はこの程度の密度（目安30行・最大8 KiB）を上限とし、全コメント、
-全diff、ジョブログ、artifact本文、全repo一覧、help全文を展開しない。
-コメント表示はAIによる意味要約ではなく、表示用に改行/空白・制御文字を整えた
-先頭240文字の機械的抜粋とする。「結論」「重要点」「指摘の要約」と称さない。
-本文に記述ルールを要求せず、from/to等のヘッダを自動的に意味判断して捨てない。
-元本文のchars、body_sha256、抜粋文字数、preview_truncated、省略表示、元URLを
-併記する。正規化前のbody hashと表示用の抜粋は別フィールドで保持する。
-先頭にメタ情報があって結論が末尾にある場合、抜粋が役立たないことは許容する。
-省略された本文から承認・完了・重大度を推測せず、詳細確認には全文を使う。
-全文の取得・表示は必要時の明示操作とし、コメントの種類/id/source URLを指定して
-byte/time上限つきで返す入口を実装範囲に含める。現在のcomments CLIが全文を
-取得できると誤記しない。全文要求でも上限に達したら不完全であることを示す。
-意味を保った要約を別途行う場合は原文との区別が必要で、既定overviewでは行わない。
+標準出力は概要metadataを目安30行でまとめ、選択した最新コメントの本文は
+引数なしで全文を出す。PR最大2件と注目Issue1件の最新一般コメントが対象。
+注目Issueの本文も全文で出し、方針がコメントではなく本文にある場合も拾う。
+ほかのIssue/PRは件名・state・日時・URLまでとし、履歴全件は展開しない。
+metadataの目安をコメント本文へ適用せず、本文に240文字/8 KiB等の表示上限を
+設けない。全文を読むための追加オプションや二回目の呼び出しを要求しない。
+本文をAI要約・先頭抜粋・重要行抽出に置換しない。from/to等のヘッダも保持する。
+stdoutの表示では本文の区切り、種類/id、著者、created_at/updated_at、元URL、
+原文のchars/body_sha256を併記し、全文の範囲を明示する。
+本文の改行・段落・空白を保つ。危険な端末制御文字は可逆なエスケープ表現にして
+示し、元の本文を黙って削除しない。JSONではbodyに完全な原文を保持する。
 秘密入りremote URL、トークン、生のAPIエラーメッセージを出力しない。
-表示の短縮とAPI取得の不完全性は別々に記録する。
+取得自体のbyte/time予算は維持するが、取得途中の本文を「全文」として出さない。
+本文が予算を超える場合はその対象を取得不足と明示し、原因・id・元URLを出す。
+これは正常時に抜粋へ置換する仕様ではなく、完全取得できなかった失敗状態である。
 
 ## repoとrefの決定
 
@@ -172,9 +172,9 @@ GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
   古いコメントの編集、Issueコメント無し、PR混在ページ、Issue検索/一覧の
   上限到達を検証。未観測と0件を区別し、PR/Issueのリンクを創作しない。
 - 長文の結論が末尾、先頭がfrom/to等のヘッダ、日本語/絵文字/改行、短い本文、
-  空本文をfixtureに含める。抜粋を意味要約と称さず、正しいchars/hash/省略表示を
-  保持し、全文の明示取得もbody/source identityと上限を検証する。
-- stdoutの予算とpreview短縮、秘密入りremote/端末制御文字の除去、stderr分離、
+  空本文をfixtureに含める。引数なしで末尾まで原文が保持され、240文字や8 KiBで
+  切られないこと、chars/hash/source identityと取得上限の失敗表示を検証する。
+- stdoutのmetadata件数上限と本文全文の保持、秘密入りremote/端末制御文字の除去、stderr分離、
   text/JSONの観測一致、終了コード、既存CLI互換性を検証。
 - fake transport/Git fixtureで、help/offline時の外部APIゼロ、全実行のmutationゼロ、
   全体のrequest/byte/time上限、重複取得抑制を検証する。
