@@ -710,6 +710,30 @@ python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
 - `workflow-runs --head-sha` now sends `head_sha` to the API as well, so a
   busy repository no longer pages until `bytes_limit` before finding the head.
 
+## Run artifacts: listing and one bounded member
+
+```bash
+python gh_identity.py artifacts OWNER/REPO RUN_ID
+python gh_identity.py artifact-file OWNER/REPO ARTIFACT_ID MEMBER [--file-bytes 10000000]
+```
+
+- `artifacts` lists a run's artifacts (`artifact_id`, `name`, `size_in_bytes`,
+  `expired`, `digest`, `head_sha`) and fails with `artifact_identity_mismatch`
+  if a row belongs to another run.
+- `artifact-file` downloads the artifact zip through the same bounded worker as
+  `job-log` (allow-listed storage redirects, no credentials sent to storage,
+  byte cap), then returns one exact member with `sha256`, `size`, the artifact's
+  `run_id`/`head_sha`, and `text` when it is UTF-8. A member whose declared or
+  actual size exceeds the cap is reported `truncated` and never expanded.
+- Exit `0` only when the listing or member read is complete.
+
+Example (verify a route receipt from a Refactor smoke run):
+
+```bash
+A=$(python gh_identity.py artifacts OWNER/REPO RUN_ID | python -c "import json,sys;print([a['artifact_id'] for a in json.load(sys.stdin)['artifacts'] if a['name']=='junit-flutter-refactor'][0])")
+python gh_identity.py artifact-file OWNER/REPO "$A" route-verification.json | python -c "import json,sys;d=json.load(sys.stdin);print(d['head_sha'],d['sha256']);print(d['text'])"
+```
+
 ## Optional public repository inventory (Issue #29)
 
 ```bash

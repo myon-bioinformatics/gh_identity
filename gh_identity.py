@@ -2,6 +2,7 @@
 """gh_identity: stdlib-only GitHub operations with gh-first/urllib fallback."""
 from __future__ import annotations
 from collections import Counter
+import base64,io,zipfile
 import argparse,fnmatch,json,os,re,shutil,subprocess,sys,urllib.error,urllib.parse,urllib.request
 from datetime import datetime,timezone
 from html.parser import HTMLParser
@@ -1347,7 +1348,7 @@ def _read_job_log(spec, opener=None):
                 seen.add(target)
                 url = target
                 # A signed storage URL needs no GitHub credentials or API headers.
-                headers = {"Accept": "text/plain", "User-Agent": "gh_identity/0.1"}
+                headers = {"Accept": "*/*" if spec.get("binary") else "text/plain", "User-Agent": "gh_identity/0.1"}
                 continue
             if status == 429 or (status == 403 and (
                     _log_header(rh, "X-RateLimit-Remaining") == "0" or _log_header(rh, "Retry-After") is not None)):
@@ -1364,7 +1365,9 @@ def _read_job_log(spec, opener=None):
             if encoding is not None and encoding.lower().strip() not in ("", "identity"):
                 raise Error("unsupported_log_encoding")
             content_type = _log_header(rh, "Content-Type")
-            if content_type is not None and content_type.split(";", 1)[0].strip().lower() not in ("text/plain", "application/octet-stream"):
+            allowed_types = ("application/zip", "application/octet-stream", "application/x-zip-compressed") \
+                if spec.get("binary") else ("text/plain", "application/octet-stream")
+            if content_type is not None and content_type.split(";", 1)[0].strip().lower() not in allowed_types:
                 raise Error("invalid_log_response")
             length = _log_header(rh, "Content-Length")
             transfer = _log_header(rh, "Transfer-Encoding")
@@ -1399,6 +1402,13 @@ def _read_job_log(spec, opener=None):
                 return truncated(len(raw))
             if length is not None and len(raw) != length:
                 raise Error("incomplete_log_response")
+            if spec.get("binary"):
+                # Artifacts are opaque bytes: no text normalization or redaction.
+                remaining()
+                return {"complete": True, "truncated": False,
+                        "data_b64": base64.b64encode(bytes(raw)).decode("ascii"),
+                        "sha256": hashlib.sha256(bytes(raw)).hexdigest(),
+                        "bytes_read": len(raw), "limit_bytes": spec["max_bytes"], "redirects": redirects}
             text, normalization = _normalize_job_log(bytes(raw))
             text, redaction = _redact_job_log(text, spec["redact"])
             remaining()
@@ -1457,7 +1467,7 @@ def _job_log_credential(transport, timeout):
     return value, "environment" if value else "anonymous"
 
 
-def _download_job_log(path, *, max_bytes, redact, transport, timeout):
+def _download_job_log(path, *, max_bytes, redact, transport, timeout, binary=False):
     budget = _BUDGET.get()
     deadline = min(budget.deadline, time.monotonic() + timeout)
     credential, source = _job_log_credential(transport, min(timeout, budget.remaining()))
@@ -1474,7 +1484,7 @@ def _download_job_log(path, *, max_bytes, redact, transport, timeout):
     if available <= 0:
         budget.fail("bytes_limit")
     spec = {"url": API + "/" + path, "headers": headers, "timeout": left,
-            "cap": min(max_bytes, available), "max_bytes": max_bytes, "redact": values}
+            "cap": min(max_bytes, available), "max_bytes": max_bytes, "redact": values, "binary": binary}
     code, raw, err = _process([sys.executable, os.path.abspath(__file__), "--_job-log-worker"],
                               json.dumps(spec).encode(), left)
     if code:
@@ -1546,6 +1556,86 @@ def job_log(r, run_id, job_id, *, attempt, max_bytes=1_000_000, redact=(), trans
     return {"schema": "gh-identity-job-log/1", "repository": r, "run_id": run_id,
             "job_id": job_id, "attempt": attempt, "head_sha": sha.lower(), "step_urls": step_urls,
             **result, "observed_at": now()}
+
+
+def artifacts(r, run_id, *, max_items=100, max_pages=10, transport="auto", timeout=30):
+    """List one run's artifacts; every row must belong to that run."""
+    r = repo(r)
+    run_id = _positive_identifier(run_id, "run")
+    rows = []; page = 1; exhausted = False; total = None
+    while page <= max_pages and len(rows) < max_items:
+        data, _headers = _page(f"repos/{r}/actions/runs/{run_id}/artifacts?per_page=100&page={page}",
+                               transport=transport, timeout=timeout)
+        if not isinstance(data, dict) or not isinstance(data.get("artifacts"), list):
+            raise Error("invalid_json")
+        total = data.get("total_count") if total is None else total
+        batch = data["artifacts"]
+        _BUDGET.get().charge("items", len(batch))
+        for item in batch:
+            owner = (item.get("workflow_run") or {}) if isinstance(item, dict) else {}
+            if type(item.get("id")) is not int or owner.get("id") != run_id:
+                raise Error("artifact_identity_mismatch")
+            rows.append({"artifact_id": item["id"], "name": item.get("name"),
+                         "size_in_bytes": item.get("size_in_bytes"), "expired": item.get("expired"),
+                         "digest": item.get("digest"), "created_at": item.get("created_at"),
+                         "head_sha": owner.get("head_sha")})
+        if len(batch) < 100:
+            exhausted = True
+            break
+        page += 1
+    complete = exhausted and (type(total) is not int or total == len(rows))
+    return {"schema": "gh-identity-artifacts/1", "repository": r, "run_id": run_id, "artifacts": rows,
+            "count": len(rows), "complete": complete, "truncated": not complete, "observed_at": now()}
+
+
+def artifact_file(r, artifact_id, member, *, max_bytes=10_000_000, transport="auto", timeout=30):
+    """Read one member of an artifact zip under a byte cap, with its SHA-256.
+
+    The zip is fetched through the bounded download worker (allow-listed
+    redirects, no credentials sent to storage); the member's declared and
+    actual sizes must both fit the cap, so a zip bomb cannot expand past it.
+    """
+    r = repo(r)
+    artifact_id = _positive_identifier(artifact_id, "artifact")
+    if not isinstance(member, str) or not member or member.startswith("/") or ".." in member.split("/"):
+        raise ValueError("invalid member")
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError("max_bytes must be a positive integer")
+    meta = request("GET", f"repos/{r}/actions/artifacts/{artifact_id}", transport=transport, timeout=timeout)
+    if not isinstance(meta, dict) or meta.get("id") != artifact_id:
+        raise Error("artifact_identity_mismatch")
+    if meta.get("expired"):
+        raise Error("artifact_expired")
+    owner = meta.get("workflow_run") or {}
+    base = {"schema": "gh-identity-artifact-file/1", "repository": r, "artifact_id": artifact_id,
+            "name": meta.get("name"), "run_id": owner.get("id"), "head_sha": owner.get("head_sha"),
+            "member": member}
+    got = _download_job_log(f"repos/{r}/actions/artifacts/{artifact_id}/zip", max_bytes=max_bytes,
+                            redact=(), transport=transport, timeout=timeout, binary=True)
+    if not got.get("complete"):
+        return {**base, "complete": False, "truncated": True, "text": None, "sha256": None,
+                "bytes_read": got.get("bytes_read"), "observed_at": now()}
+    try:
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(got["data_b64"]))) as archive:
+            infos = [info for info in archive.infolist() if info.filename == member]
+            if len(infos) != 1:
+                raise Error("artifact_member_not_found")
+            if infos[0].file_size > max_bytes:
+                return {**base, "complete": False, "truncated": True, "text": None, "sha256": None,
+                        "zip_sha256": got["sha256"], "observed_at": now()}
+            with archive.open(infos[0]) as stream:
+                data = stream.read(max_bytes + 1)
+    except (zipfile.BadZipFile, ValueError, OSError):
+        raise Error("invalid_artifact_archive") from None
+    if len(data) > max_bytes:
+        raise Error("invalid_artifact_archive")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError:
+        text = None
+    return {**base, "complete": True, "truncated": False, "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(), "zip_sha256": got["sha256"],
+            "text": text, "observed_at": now()}
 
 
 def _log_redact_env(names):
@@ -2051,6 +2141,8 @@ def _main(argv=None):
  x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0)
  x=s.add_parser("runs");x.add_argument("repo")
  x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("artifacts");x.add_argument("repo");x.add_argument("run_id",type=int)
+ x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1)
  x=s.add_parser("observe-pr");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--min-checks",type=int,default=1)
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
@@ -2097,6 +2189,8 @@ def _main(argv=None):
   elif ns.cmd=="head-runs":
    if not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
    o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,event=ns.event,transport=transport)
+  elif ns.cmd=="artifacts":o=artifacts(ns.repo,ns.run_id,transport=transport)
+  elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="checks":o=checks_for_sha(ns.repo,ns.sha,ns.min_checks,transport)
   elif ns.cmd=="observe-pr":o=observe_pr(ns.repo,ns.number,ns.min_checks,transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
@@ -2114,6 +2208,7 @@ def _main(argv=None):
  if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.
  if ns.cmd in ("checks","head-runs"):return 0 if o["state"]=="green" else 1
+ if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
  if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
@@ -2135,7 +2230,7 @@ def main(argv=None):
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews","inline_comments","review_threads","review_observations",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
-              "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs","job_log"):
+              "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file"):
  globals()[_name]=_bounded(globals()[_name])
 if __name__=="__main__":
  raise SystemExit(_http_worker() if sys.argv[1:]==["--_http-worker"] else
