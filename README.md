@@ -269,6 +269,21 @@ verification is an explicit separate operation. This addition implements only
 Issue #20's job-log slice; its other API and contract-validation work remains
 unfinished.
 
+## Issue / PR labels (`labels`)
+
+```bash
+python gh_identity.py labels OWNER/REPO 144 --add priority:high --remove status:in-progress          # plan
+python gh_identity.py labels OWNER/REPO 144 --add priority:high --remove status:in-progress --write  # apply
+```
+
+Intentional changes to one Issue or PR only. Without `--write` it prints the
+plan (`before`, `target`, the labels it would add/remove). Only labels that
+already exist in the repository can be added; an unknown name is
+`rejected_missing_labels` and nothing is created. With `--write` it adds, then
+removes, then reads the issue back: `verified` when the labels equal `target`,
+otherwise `verification_mismatch`. Nothing to change is `already_satisfied`.
+Exit `0` for `planned`, `already_satisfied` or `verified`; `1` otherwise.
+
 ## Write receipts and CLI exit codes
 
 Comment writes require an operation marker. A successful POST alone does not
