@@ -2169,6 +2169,190 @@ def git_check_ignore(root=".", paths=(), *, max_paths=1000, max_bytes=1_000_000)
         })
     return {"records": ordered, "truncated": truncated}
 
+# Repository metadata: one checkout identity shared by every repository.
+# Git identity lives here; app-specific build data (sizes, screens) does not.
+REPOSITORY_METADATA_SCHEMA = "2.0"
+REPOSITORY_METADATA_V1_SCHEMA = "1.0"
+_RM_OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+_RM_NAME = re.compile(r"[A-Za-z0-9_.-]+")
+_RM_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_RM_TOOL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
+_RM_TOOL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+ -]{0,31}")
+_RM_MEASUREMENTS = ("github_reported_size_bytes", "working_tree_bytes", "release_artifact_bytes")
+_RM_TOOL_ARGS = {"git": "--version", "gh": "--version", "node": "--version", "npm": "--version", "npx": "--version"}
+_RM_VERSION = r"[0-9]+(?:\.[0-9]+)+(?:[-+._][0-9A-Za-z][0-9A-Za-z.-]*)?"
+_RM_TOOL_PATTERNS = {
+    "git": re.compile(r"git version (?P<v>" + _RM_VERSION + r")(?:\s.*)?"),
+    "gh": re.compile(r"gh version (?P<v>" + _RM_VERSION + r")(?:\s.*)?"),
+    "node": re.compile(r"v(?P<v>" + _RM_VERSION + r")"),
+    "npm": re.compile(r"(?P<v>" + _RM_VERSION + r")"),
+    "npx": re.compile(r"(?P<v>" + _RM_VERSION + r")"),
+    "python": re.compile(r"(?P<v>[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\+[0-9A-Za-z.-]*)?)"),
+}
+
+
+def _rm_full_name(full_name):
+    if not isinstance(full_name, str) or full_name.count("/") != 1:
+        raise ValueError("repository must be owner/name")
+    owner, name = full_name.split("/")
+    if not _RM_OWNER.fullmatch(owner) or not _RM_NAME.fullmatch(name) or name in (".", ".."):
+        raise ValueError("repository must be owner/name")
+    return full_name
+
+
+def _rm_sha(value, name="sha"):
+    if not isinstance(value, str) or not _RM_SHA.fullmatch(value.lower()):
+        raise ValueError(name + " must be a full 40- or 64-hex commit SHA")
+    return value.lower()
+
+
+def _rm_time(value, name):
+    if not isinstance(value, str):
+        raise ValueError(name + " must be an ISO 8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(name + " must be an ISO 8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise ValueError(name + " must include a timezone")
+    return value
+
+
+def _rm_git(root, *args):
+    raw, truncated, _ = _git_run(root, ["-c", "i18n.logOutputEncoding=UTF-8", *args], max_bytes=64 * 1024)
+    if truncated:
+        raise GitInspectionError("git output exceeded the metadata bound")
+    return _git_decode(raw).strip()
+
+
+def checkout_head(root="."):
+    """The commit actually checked out at root (never GITHUB_SHA or other env)."""
+    sha = _rm_sha(_rm_git(root, "rev-parse", "--verify", "HEAD^{commit}"), "HEAD")
+    fields = _rm_git(root, "show", "-s", "--format=%cI%x1f%s", "HEAD").split("\x1f", 1)
+    if len(fields) != 2 or not fields[1]:
+        raise GitInspectionError("HEAD has no committer date or subject")
+    branch = _rm_git(root, "branch", "--show-current") or None
+    return {"sha": sha, "branch": branch, "detached": branch is None,
+            "timestamp": _rm_time(fields[0], "timestamp"), "subject": fields[1].splitlines()[0]}
+
+
+def repository_metadata(root=".", *, repository, source_sha=None, expected_sha=None, generated_at=None):
+    """Minimal public record: repository, checkout HEAD, optional source commit.
+
+    source_sha is the caller-stated origin of the change (for example a PR head)
+    and is reported separately; it never replaces the checkout HEAD.
+    """
+    head = checkout_head(root)
+    if expected_sha is not None and head["sha"] != _rm_sha(expected_sha, "expected_sha"):
+        raise ValueError("checkout HEAD does not match expected_sha")
+    record = {"schema_version": REPOSITORY_METADATA_SCHEMA,
+              "repository": {"full_name": _rm_full_name(repository)},
+              "head": head,
+              "source": {"sha": _rm_sha(source_sha, "source_sha") if source_sha else None},
+              "generated_at": _rm_time(generated_at or now().replace("+00:00", "Z"), "generated_at")}
+    return record
+
+
+def tool_versions(commands=(), *, include_python=False, timeout=5.0):
+    """Explicitly requested, allowlisted tool versions; missing tools are omitted."""
+    if isinstance(commands, (str, bytes)):
+        raise TypeError("commands must be a sequence of command names")
+    unknown = [command for command in commands if command not in _RM_TOOL_ARGS]
+    if unknown:
+        raise ValueError("unsupported tooling command: " + ", ".join(map(str, unknown)))
+    observed = {}
+    if include_python:
+        import platform
+        match = _RM_TOOL_PATTERNS["python"].fullmatch(platform.python_version())
+        if match:
+            observed["python"] = match.group("v")
+    for command in commands:
+        executable = shutil.which(command)
+        if not executable:
+            continue
+        try:
+            result = subprocess.run([executable, _RM_TOOL_ARGS[command]], capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=timeout, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        text = (result.stdout.strip() or result.stderr.strip()) if result.returncode == 0 else ""
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        match = _RM_TOOL_PATTERNS[command].fullmatch(first)
+        if match and len(match.group("v")) <= 32:
+            observed[command] = match.group("v")
+    return observed
+
+
+def validate_repository_metadata_v1(record):
+    """The Ironmate repository-metadata v1 contract, field for field."""
+    if not isinstance(record, dict) or set(record) != {"schema_version", "repository", "head", "measurements", "tooling", "generated_at"}:
+        raise ValueError("unexpected or missing top-level fields")
+    if record["schema_version"] != REPOSITORY_METADATA_V1_SCHEMA:
+        raise ValueError("unsupported schema_version")
+    head = record["head"]
+    if not isinstance(head, dict) or set(head) != {"sha", "short_sha", "branch", "timestamp", "subject"}:
+        raise ValueError("invalid head")
+    if not isinstance(head["sha"], str) or not _RM_SHA.fullmatch(head["sha"]):
+        raise ValueError("sha must be lowercase full hex")
+    if head["short_sha"] != head["sha"][:8]:
+        raise ValueError("short_sha must be the first 8 characters of sha")
+    if not head["branch"] or not head["subject"]:
+        raise ValueError("branch and subject are required")
+    _rm_time(head["timestamp"], "timestamp")
+    _rm_time(record["generated_at"], "generated_at")
+    if not isinstance(record["repository"], dict) or set(record["repository"]) != {"full_name"}:
+        raise ValueError("invalid repository")
+    _rm_full_name(record["repository"]["full_name"])
+    sizes = record["measurements"]
+    if not isinstance(sizes, dict) or set(sizes) != set(_RM_MEASUREMENTS) or any(
+            value is not None and (type(value) is not int or value < 0) for value in sizes.values()):
+        raise ValueError("measurements must be non-negative integers or null")
+    tooling = record["tooling"]
+    if not isinstance(tooling, dict) or any(
+            not isinstance(k, str) or not _RM_TOOL_NAME.fullmatch(k) or
+            not isinstance(v, str) or not _RM_TOOL_VALUE.fullmatch(v) for k, v in tooling.items()):
+        raise ValueError("tooling values must be short version labels")
+    return record
+
+
+def repository_metadata_v1(root=".", *, repository, env=None, expected_sha=None, generated_at=None,
+                           tooling=None, measurements=None):
+    """Compatibility adapter producing the existing schema v1 record.
+
+    Branch keeps v1's label rule: GITHUB_HEAD_REF, then GITHUB_REF_NAME, then
+    the checkout branch, else "detached". The SHA is always the checkout HEAD.
+    """
+    env = os.environ if env is None else env
+    record = repository_metadata(root, repository=repository, expected_sha=expected_sha, generated_at=generated_at)
+    head = record["head"]
+    branch = ((env.get("GITHUB_HEAD_REF") or "").strip() or (env.get("GITHUB_REF_NAME") or "").strip()
+              or head["branch"] or "detached")
+    sizes = dict.fromkeys(_RM_MEASUREMENTS)
+    extra = set(measurements or {}) - set(_RM_MEASUREMENTS)
+    if extra:
+        raise ValueError("unknown measurements: " + ", ".join(sorted(extra)))
+    sizes.update(measurements or {})
+    return validate_repository_metadata_v1({
+        "schema_version": REPOSITORY_METADATA_V1_SCHEMA,
+        "repository": record["repository"],
+        "head": {"sha": head["sha"], "short_sha": head["sha"][:8], "branch": branch,
+                 "timestamp": head["timestamp"], "subject": head["subject"]},
+        "measurements": sizes, "tooling": dict(tooling or {}),
+        "generated_at": record["generated_at"]})
+
+
+def write_repository_metadata(record, output_dir):
+    """repository-metadata.json (pretty) and .jsonl (one line), sorted keys."""
+    if record.get("schema_version") == REPOSITORY_METADATA_V1_SCHEMA:
+        validate_repository_metadata_v1(record)
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    pretty = json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    (output / "repository-metadata.json").write_text(pretty, encoding="utf-8")
+    (output / "repository-metadata.jsonl").write_text(line, encoding="utf-8")
+    return {"json": "repository-metadata.json", "jsonl": "repository-metadata.jsonl"}
+
 
 def _main(argv=None):
  argv=list(sys.argv[1:] if argv is None else argv)
@@ -2191,6 +2375,7 @@ def _main(argv=None):
   if command=="git-grep":x.add_argument("pattern")
   if command=="git-ignore":x.add_argument("paths",nargs="+")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
+ x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
  depth_args=x.add_mutually_exclusive_group();depth_args.add_argument("--depth",type=int,default=1);depth_args.add_argument("--recursive",action="store_true")
@@ -2241,6 +2426,15 @@ def _main(argv=None):
    elif ns.branch=="-":o=git_switch(ns.root,previous=True,write=ns.write)
    elif ns.branch:o=git_switch(ns.root,ns.branch,write=ns.write)
    else:raise ValueError("branch required")
+  elif ns.cmd=="repo-metadata":
+   if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")
+   if ns.format=="v1":
+    o=repository_metadata_v1(ns.root,repository=ns.repository,expected_sha=ns.expected_sha,generated_at=ns.generated_at,
+                             tooling=tool_versions([t for t in ns.tool if t!="python"],include_python="python" in ns.tool))
+   else:
+    if ns.tool:raise ValueError("--tool applies to --format v1 only")
+    o=repository_metadata(ns.root,repository=ns.repository,source_sha=ns.source_sha,expected_sha=ns.expected_sha,generated_at=ns.generated_at)
+   if ns.output_dir:write_repository_metadata(o,ns.output_dir)
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="tree":o=tree(ns.repo,ns.ref,depth=None if ns.recursive else ns.depth,exclude_dirs=ns.exclude_dir,exclude_files=ns.exclude_file,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)

@@ -695,6 +695,23 @@ name, or a previous detached position fails before any change. Local changes
 that `git switch` refuses are reported as `mutation_failed`, never forced.
 Exit `0` for `planned` or `verified`, otherwise `1` (`2` for invalid input).
 
+## Repository metadata (`repo-metadata`)
+
+```bash
+python gh_identity.py repo-metadata --repository OWNER/NAME [--root PATH] [--source-sha SHA] \
+  [--expected-sha SHA] [--output-dir DIR]                       # minimal v2
+python gh_identity.py repo-metadata --repository OWNER/NAME --format v1 \
+  [--tool python --tool git ...] [--expected-sha SHA] [--output-dir DIR]   # Ironmate v1 compatible
+```
+
+`head` is always the commit actually checked out at `--root`
+(`git rev-parse HEAD`), never `GITHUB_SHA`. `--source-sha` (for example a PR
+head) is recorded separately under `source`. `--expected-sha` fails with exit
+`2` before anything is written. `--output-dir` writes `repository-metadata.json`
+(pretty) and `.jsonl` (one line). Sizes, tool versions and app build data are
+not part of v2. Details, field rules and the Flutter migration path:
+[docs/repository-metadata.md](docs/repository-metadata.md).
+
 ## Workflow-scoped run discovery (PR #28)
 
 ```bash
