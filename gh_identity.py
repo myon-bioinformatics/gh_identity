@@ -781,11 +781,12 @@ def search(query,kind="pr",sort="updated",order="desc",max_items=100,max_pages=1
          "scope":"accessible_search_results","observed_at":now()}
 
 
-def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=None,transport="auto",timeout=30):
+def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=None,transport="auto",timeout=30,exclude_events=()):
  r=repo(r)
  if not isinstance(max_items,int) or max_items<1:raise ValueError("max_items must be positive")
  if not isinstance(max_pages,int) or max_pages<1:raise ValueError("max_pages must be positive")
- rows=[];page=1;exhausted=False;pages_fetched=0
+ rows=[];page=1;exhausted=False;pages_fetched=0;excluded=0
+ exclude_events=tuple(exclude_events)
  while page<=max_pages and len(rows)<max_items:
   query={"per_page":"100","page":str(page)}
   # Server-side filters keep pages small; the client-side checks below still verify them.
@@ -805,6 +806,7 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
    if head_sha is not None and row["head_sha"]!=head_sha:continue
    if branch is not None and row["head_branch"]!=branch:continue
    if event is not None and row["event"]!=event:continue
+   if row["event"] in exclude_events:excluded+=1;continue
    rows.append(row)
    if len(rows)>=max_items:break
   if len(raw)<100:exhausted=consumed==len(raw);break
@@ -818,7 +820,8 @@ def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=Non
   "pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted,
   "state":state if exhausted else "incomplete",
   "by_conclusion":dict(sorted(Counter(x["conclusion"] or x["status"] or "unknown" for x in rows).items())),
-  "filters":{"head_sha":head_sha,"branch":branch,"event":event}}
+  "filters":{"head_sha":head_sha,"branch":branch,"event":event,"exclude_events":list(exclude_events)},
+  "excluded_count":excluded}
 
 def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=None,
                            max_items=100, max_pages=10, page_size=100, start_page=1, start_offset=0,
@@ -2206,7 +2209,7 @@ def _main(argv=None):
   x=s.add_parser(command);x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0)
  x=s.add_parser("runs");x.add_argument("repo")
- x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[],help="e.g. dynamic (Copilot code review runs)");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("artifacts");x.add_argument("repo");x.add_argument("run_id",type=int)
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1)
@@ -2260,7 +2263,7 @@ def _main(argv=None):
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
   elif ns.cmd=="head-runs":
    if not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
-   o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,event=ns.event,transport=transport)
+   o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,event=ns.event,transport=transport,exclude_events=ns.exclude_event)
   elif ns.cmd=="artifacts":o=artifacts(ns.repo,ns.run_id,transport=transport)
   elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="checks":o=checks_for_sha(ns.repo,ns.sha,ns.min_checks,transport)

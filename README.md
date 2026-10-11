@@ -722,6 +722,9 @@ python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
   filtered by the API (`head_sha`, `event`) and re-verified client-side; it
   reports `state` (`green` / `pending` / `failed` / `missing` / `incomplete`)
   and `by_conclusion`.
+- `head-runs --exclude-event dynamic` leaves out non-CI runs such as Copilot
+  code review (event `dynamic`); the default is unchanged and the output reports
+  `excluded_count` and `filters.exclude_events`.
 - `checks` is the CLI for `checks_for_sha`; its summary now includes
   `by_conclusion`.
 - `observe-pr` reads the PR head, its checks, conversation and reviews, then
