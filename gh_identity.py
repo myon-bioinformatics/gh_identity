@@ -319,7 +319,7 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
 
 def pr(r,n,**k):
  r=repo(r);d=request("GET",f"repos/{r}/pulls/{n}",**k)
- return {"schema":"gh-identity-pr/1","repository":r,"number":n,"state":d.get("state"),"draft":d.get("draft"),"merged":d.get("merged"),"mergeable":d.get("mergeable"),"head_sha":(d.get("head")or{}).get("sha"),"head_ref":(d.get("head")or{}).get("ref"),"base_sha":(d.get("base")or{}).get("sha"),"base_ref":(d.get("base")or{}).get("ref"),"url":d.get("html_url"),"observed_at":now()}
+ return {"schema":"gh-identity-pr/1","repository":r,"number":n,"state":d.get("state"),"draft":d.get("draft"),"merged":d.get("merged"),"mergeable":d.get("mergeable"),"mergeable_state":d.get("mergeable_state"),"head_sha":(d.get("head")or{}).get("sha"),"head_ref":(d.get("head")or{}).get("ref"),"base_sha":(d.get("base")or{}).get("sha"),"base_ref":(d.get("base")or{}).get("ref"),"url":d.get("html_url"),"observed_at":now()}
 def _review_limits(n,max_items,max_pages):
  n=_positive_identifier(n,"PR number")
  for value in (max_items,max_pages):
@@ -1081,6 +1081,38 @@ def checks_for_sha(r,sha,min_checks=1,transport="auto",timeout=30,*,requester=No
   path=_next_page(path,headers,len(batch))
  summary=summarize_checks(rows,expected,min_checks)
  return {"schema":"gh-identity-checks/1","repository":r,"sha":sha,**summary,"observed_at":now()}
+
+def pr_status(r,n,*,last=3,exclude_events=("dynamic",),transport="auto",timeout=30):
+ """One compact look at a PR head: runs, unfinished/failed checks, latest talk.
+
+ An observation, not a gate (use checks / wait-checks to gate). Runs from the
+ excluded events (default: Copilot's "dynamic") are counted, not listed.
+ """
+ if type(last) is not int or not 0<=last<=20:raise ValueError("last must be 0-20")
+ head=pr(r,n,transport=transport,timeout=timeout);sha=head["head_sha"]
+ runs=run_history(r,head_sha=sha,exclude_events=exclude_events,transport=transport,timeout=timeout)
+ ch=checks_for_sha(r,sha,1,transport,timeout)
+ cs=comments(r,n,transport=transport,timeout=timeout)["comments"]
+ rs=reviews(r,n,transport=transport,timeout=timeout)["reviews"]
+ talk=lambda rows,when:[{k:x.get(k) for k in ("author","state",when,"preview","url") if k in x} for x in rows[-last:]] if last else []
+ return {"schema":"gh-identity-pr-status/1","repository":repo(r),"number":n,
+  "pr":{k:head[k] for k in ("state","draft","merged","mergeable_state","head_sha","head_ref","base_ref","url")},
+  "runs":{"state":runs["state"],"by_conclusion":runs["by_conclusion"],"excluded_count":runs["excluded_count"],
+          "runs":[{"name":x["name"],"event":x["event"],"run_id":x["run_id"],"result":x["conclusion"] or x["status"]} for x in runs["runs"]]},
+  "checks":{"state":ch["state"],"count":ch["count"],"by_conclusion":ch["by_conclusion"],
+            "attention":[{"name":c["name"],"result":c["conclusion"] or c["status"],"url":c["url"]} for c in ch["checks"]
+                         if (c["conclusion"] or c["status"]) not in ("success","skipped","neutral")]},
+  "comments":talk(cs,"created_at"),"reviews":talk(rs,"submitted_at"),"observed_at":now()}
+
+def render_pr_status(o):
+ p=o["pr"];lines=[f"#{o['number']} {p['state']}{' draft' if p['draft'] else ''} merged={p['merged']} {p['mergeable_state']} head={p['head_sha'][:8]} {p['head_ref']} -> {p['base_ref']}"]
+ r=o["runs"];lines.append(f"runs: {r['state']} {r['by_conclusion']}"+(f" (excluded {r['excluded_count']})" if r["excluded_count"] else ""))
+ lines+=[f"  {x['name']} {x['event']} {x['run_id']} {x['result']}" for x in r["runs"]]
+ c=o["checks"];lines.append(f"checks: {c['state']} {c['count']} {c['by_conclusion']}")
+ lines+=[f"  ! {x['name']} {x['result']}" for x in c["attention"]]
+ for label,rows,when in (("comment",o["comments"],"created_at"),("review",o["reviews"],"submitted_at")):
+  lines+=[f"{label} {x.get('author')} {x.get(when)}{' '+x['state'] if x.get('state') else ''}: {(x.get('preview') or '')[:200]}" for x in rows]
+ return "\n".join(lines)
 
 def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
  before=pr(r,n,transport=transport,timeout=timeout)
@@ -2401,6 +2433,7 @@ def _main(argv=None):
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1)
  x=s.add_parser("observe-pr");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--min-checks",type=int,default=1)
+ x=s.add_parser("pr-status",help="compact PR head status: runs, unfinished checks, latest comments/reviews");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--last",type=int,default=3);x.add_argument("--exclude-event",action="append",default=None,metavar="EVENT");x.add_argument("--text",action="store_true",help="human-readable lines instead of JSON")
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
  x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
@@ -2464,6 +2497,7 @@ def _main(argv=None):
   elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="checks":o=checks_for_sha(ns.repo,ns.sha,ns.min_checks,transport)
   elif ns.cmd=="observe-pr":o=observe_pr(ns.repo,ns.number,ns.min_checks,transport)
+  elif ns.cmd=="pr-status":o=pr_status(ns.repo,ns.number,last=ns.last,exclude_events=tuple(ns.exclude_event) if ns.exclude_event is not None else ("dynamic",),transport=transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
@@ -2475,7 +2509,8 @@ def _main(argv=None):
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
- print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd=="pr-status" and ns.text:print(render_pr_status(o))
+ else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.
  if ns.cmd in ("checks","head-runs"):return 0 if o["state"]=="green" else 1
