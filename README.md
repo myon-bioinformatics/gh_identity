@@ -676,6 +676,25 @@ Parent execution location does not imply parent ownership of this implementation
 A parent compatibility adapter can expose the old function names over these APIs
 once its consumer lock explicitly selects this revision.
 
+## Local branch switching (`git-switch`)
+
+```bash
+python gh_identity.py git-switch [--root PATH] BRANCH [--write]      # existing local branch
+python gh_identity.py git-switch [--root PATH] -c NEW_BRANCH [--write]  # create and switch
+python gh_identity.py git-switch [--root PATH] - [--write]           # previous branch
+```
+
+The only local Git operation that changes the worktree. Like `comment` and
+`variable-set`, it is **planned** (nothing changes) unless `--write` is given.
+The receipt reports `before`, `target`, the exact `command`, and with `--write`
+`after`, `mutation_status` and `verification_status` (the current branch must
+equal the target; a created branch must start at the previous HEAD). Existing
+branch switches use `--no-guess`, so a remote-tracking branch is never created
+implicitly; a missing branch, an existing `-c` name, an invalid or option-like
+name, or a previous detached position fails before any change. Local changes
+that `git switch` refuses are reported as `mutation_failed`, never forced.
+Exit `0` for `planned` or `verified`, otherwise `1` (`2` for invalid input).
+
 ## Workflow-scoped run discovery (PR #28)
 
 ```bash
@@ -703,6 +722,9 @@ python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
   filtered by the API (`head_sha`, `event`) and re-verified client-side; it
   reports `state` (`green` / `pending` / `failed` / `missing` / `incomplete`)
   and `by_conclusion`.
+- `head-runs --exclude-event dynamic` leaves out non-CI runs such as Copilot
+  code review (event `dynamic`); the default is unchanged and the output reports
+  `excluded_count` and `filters.exclude_events`.
 - `checks` is the CLI for `checks_for_sha`; its summary now includes
   `by_conclusion`.
 - `observe-pr` reads the PR head, its checks, conversation and reviews, then

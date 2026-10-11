@@ -73,3 +73,11 @@ def test_head_runs_cli_rejects_a_non_sha(capsys):
 def test_observe_pr_cli_fails_on_stale_head_or_non_green_checks(monkeypatch, capsys, state, stale, code):
     monkeypatch.setattr(ghi, "observe_pr", lambda *a, **k: {"checks": {"state": state}, "stale": stale})
     assert ghi.main(["observe-pr", "o/r", "1"]) == code
+
+
+def test_head_runs_can_exclude_dynamic_review_runs_and_says_so(monkeypatch):
+    rows = [_run(1), {**_run(2, conclusion="failure"), "event": "dynamic", "name": "Running Copilot Code Review"}]
+    monkeypatch.setattr(ghi, "_page", lambda path, **k: ({"workflow_runs": rows}, {}))
+    assert ghi.run_history("o/r", head_sha=SHA)["state"] == "failed"   # default unchanged
+    out = ghi.run_history("o/r", head_sha=SHA, exclude_events=("dynamic",))
+    assert (out["state"], out["excluded_count"], out["filters"]["exclude_events"]) == ("green", 1, ["dynamic"])
