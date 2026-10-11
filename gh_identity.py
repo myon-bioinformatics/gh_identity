@@ -1115,7 +1115,10 @@ def wait_checks(r,sha,*,min_checks=1,interval=60,wait_timeout=900,ignore=(),tran
   kept=[c for c in raw["checks"] if c["name"] not in ignore]
   ignored=[c for c in raw["checks"] if c["name"] in ignore]
   expected=raw["expected_count"]-len(ignored) if isinstance(raw["expected_count"],int) else None
-  summary=summarize_checks(kept,expected,min_checks) if raw["complete"] else {**summarize_checks(kept,None,min_checks),"state":"incomplete"}
+  # min_checks counts every check, ignored ones included (as in the README);
+  # judge the kept checks against the same total minus what was ignored.
+  floor=max(1,min_checks-len(ignored))
+  summary=summarize_checks(kept,expected,floor) if raw["complete"] else {**summarize_checks(kept,None,floor),"state":"incomplete"}
   elapsed=clock()-start
   changed=[]
   for c in kept:

@@ -776,8 +776,9 @@ from `absent`), `ignored`, `failed_checks`, `polls` and `timed_out`.
 
 - A completed failure ends the wait at once (`failed`): the SHA cannot turn green.
 - `--ignore-check NAME` drops a check before judging (it is still listed in `ignored`).
-- Use `--min-checks` with the expected number of checks: right after a push only
-  a few checks may exist, and those alone can already be all green.
+- Use `--min-checks` with the expected number of checks, counting ignored ones:
+  right after a push only a few checks may exist, and those alone can already be
+  all green. Ignored checks that are present are subtracted before judging.
 - Exit `0` only for `green`; `1` for `failed`, `pending` at timeout or incomplete; `2` for invalid input.
 
 ## Run artifacts: listing and one bounded member

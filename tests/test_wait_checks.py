@@ -103,3 +103,20 @@ def test_cli_progress_on_stderr_json_on_stdout_and_exit(monkeypatch, capsys):
     assert g.main(["wait-checks", "o/r", SHA, "--interval", "5"]) == 1
     capsys.readouterr()
     assert g.main(["wait-checks", "o/r", SHA, "--max-pages", "3"]) == 2
+
+
+def test_min_checks_counts_ignored_checks_too(monkeypatch):
+    # 2 checks, 1 ignored, min_checks=2: the remaining success must be green.
+    monkeypatch.setattr(g, "checks_for_sha", _fake([[_run("ok", "completed", "success"),
+                                                     _run("bot", "completed", "failure")]]))
+    clock = Clock()
+    out = g.wait_checks("o/r", SHA, min_checks=2, interval=10, ignore=["bot"], sleep=clock.sleep, clock=clock)
+    assert (out["state"], out["polls"], out["timed_out"]) == ("green", 1, False)
+
+
+def test_min_checks_still_waits_for_checks_not_yet_registered(monkeypatch):
+    monkeypatch.setattr(g, "checks_for_sha", _fake([[_run("ok", "completed", "success"), _run("bot", "completed", "failure")]] * 3))
+    clock = Clock()
+    out = g.wait_checks("o/r", SHA, min_checks=3, interval=10, wait_timeout=25, ignore=["bot"],
+                        sleep=clock.sleep, clock=clock)
+    assert out["state"] == "pending" and out["timed_out"]
