@@ -140,3 +140,16 @@ def test_v1_adapter_matches_ironmate_on_the_same_checkout(repo):
             new = g.repository_metadata_v1(repo, repository=REPO, env=env, tooling={"python": "3.12.3"},
                                            generated_at=old["generated_at"])
             assert new == old, (detach, env)
+
+
+@pytest.mark.parametrize("version", ["3.12.3", "3.14.0rc1", "3.12.1.post1", "3.13.0.dev2",
+                                     "3.12.1+local.1", "3.13.0a1.post2.dev3"])
+def test_python_version_labels_match_ironmate_acceptance(monkeypatch, version):
+    monkeypatch.setattr("platform.python_version", lambda: version)
+    assert g.tool_versions(include_python=True) == {"python": version}
+
+
+@pytest.mark.parametrize("version", ["not-a-version", "3.12\n", "3.12.1 extra", "x" * 40])
+def test_malformed_python_version_is_omitted(monkeypatch, version):
+    monkeypatch.setattr("platform.python_version", lambda: version)
+    assert g.tool_versions(include_python=True) == {}

@@ -2187,7 +2187,9 @@ _RM_TOOL_PATTERNS = {
     "node": re.compile(r"v(?P<v>" + _RM_VERSION + r")"),
     "npm": re.compile(r"(?P<v>" + _RM_VERSION + r")"),
     "npx": re.compile(r"(?P<v>" + _RM_VERSION + r")"),
-    "python": re.compile(r"(?P<v>[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\+[0-9A-Za-z.-]*)?)"),
+    # Same acceptance as Ironmate's _PACKAGE_VERSION (epoch, pre, post, dev, local).
+    "python": re.compile(r"(?P<v>(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?"
+                         r"(?:\.dev[0-9]+)?(?:\+(?:[0-9A-Za-z][0-9A-Za-z.-]*)?)?)"),
 }
 
 
