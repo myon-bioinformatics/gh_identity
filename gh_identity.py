@@ -318,17 +318,188 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
 def pr(r,n,**k):
  r=repo(r);d=request("GET",f"repos/{r}/pulls/{n}",**k)
  return {"schema":"gh-identity-pr/1","repository":r,"number":n,"state":d.get("state"),"draft":d.get("draft"),"merged":d.get("merged"),"mergeable":d.get("mergeable"),"head_sha":(d.get("head")or{}).get("sha"),"head_ref":(d.get("head")or{}).get("ref"),"base_sha":(d.get("base")or{}).get("sha"),"base_ref":(d.get("base")or{}).get("ref"),"url":d.get("html_url"),"observed_at":now()}
-def comments(r,n,last=None,transport="auto",timeout=30):
+def _review_limits(n,max_items,max_pages):
+ n=_positive_identifier(n,"PR number")
+ for value in (max_items,max_pages):
+  if type(value) is not int or value<1:raise ValueError("limits must be positive integers")
+ return n
+
+def _review_rest(path,transport,timeout,max_items,max_pages):
+ if max_items is None and max_pages is None:
+  return pages(path,transport,timeout),True,None
+ max_items=100 if max_items is None else max_items
+ max_pages=10 if max_pages is None else max_pages
+ _review_limits(1,max_items,max_pages)
+ rows=[];seen=set();path+="?per_page=100&page=1"
+ for _ in range(max_pages):
+  batch,headers=_page(path,transport,timeout)
+  if not isinstance(batch,list) or any(not isinstance(x,dict) for x in batch):raise Error("invalid_json")
+  _BUDGET.get().charge("items",len(batch))
+  for x in batch:
+   if x.get("body") is not None and not isinstance(x["body"],str):raise Error("invalid_json")
+   if x.get("user") is not None and not isinstance(x["user"],dict):raise Error("invalid_json")
+   identity=x.get("id")
+   if type(identity) is not int or identity<1 or identity in seen:raise Error("ambiguous_comment_identity")
+   seen.add(identity)
+  remaining=max_items-len(rows);rows.extend(batch[:remaining])
+  next_path=_next_page(path,headers,len(batch))
+  if len(batch)>remaining:return rows,False,"max_items"
+  if next_path is None:return rows,True,None
+  if len(rows)>=max_items:return rows,False,"max_items"
+  path=next_path
+ return rows,False,"max_pages"
+
+def _explicit_severity(body):
+ # Only standalone labels or labels introducing a finding; never prose keywords.
+ labels=[]
+ pattern=r"^\s*(?:[-*]\s+|#{1,6}\s+)?(?:\*\*)?(Blocking|Should|Non-blocking|Nit)(?:\*\*)?(?=\s*(?::|$))"
+ fenced=False
+ for line in body.splitlines():
+  if re.match(r"^\s*(```|~~~)",line):fenced=not fenced;continue
+  if fenced:continue
+  match=re.match(pattern,line,re.I)
+  if match:
+   label={"blocking":"Blocking","should":"Should","non-blocking":"Non-blocking","nit":"Nit"}[match[1].lower()]
+   labels.append({"label":label,"source":"explicit_body_label","text":line})
+ return labels
+
+def _review_body(x):
+ body=x.get("body") or ""
+ if not isinstance(body,str):raise Error("invalid_json")
+ return {"preview":re.sub(r"\s+"," ",body)[:240],"body_sha256":hashlib.sha256(body.encode()).hexdigest(),
+         "severity_labels":_explicit_severity(body)}
+
+def comments(r,n,last=None,transport="auto",timeout=30,*,max_items=None,max_pages=None):
  r=repo(r)
  if last is not None and (type(last) is not int or last<0):raise ValueError("last must be a nonnegative integer")
- xs=pages(f"repos/{r}/issues/{n}/comments",transport,timeout)
- ds=[{"id":x.get("id"),"author":(x.get("user")or{}).get("login"),"created_at":x.get("created_at"),"chars":len(x.get("body")or""),"preview":re.sub(r"\s+"," ",x.get("body")or"")[:240],"url":x.get("html_url")} for x in xs]
+ xs,complete,reason=_review_rest(f"repos/{r}/issues/{n}/comments",transport,timeout,max_items,max_pages)
+ ds=[dict({"id":x.get("id"),"kind":"conversation","author":(x.get("user")or{}).get("login"),"created_at":x.get("created_at"),"chars":len(x.get("body")or""),"preview":re.sub(r"\s+"," ",x.get("body")or"")[:240],"url":x.get("html_url")},**_review_body(x)) for x in xs]
  if last is not None:ds=ds[-last:] if last else []
- return {"schema":"gh-identity-comments/1","repository":r,"number":n,"total":len(xs),"shown":len(ds),"complete":True,"comments":ds}
-def reviews(r,n,transport="auto",timeout=30):
- r=repo(r);xs=pages(f"repos/{r}/pulls/{n}/reviews",transport,timeout)
- ds=[{"id":x.get("id"),"author":(x.get("user")or{}).get("login"),"state":x.get("state"),"commit_id":x.get("commit_id"),"submitted_at":x.get("submitted_at"),"chars":len(x.get("body")or"")} for x in xs]
- return {"schema":"gh-identity-reviews/1","repository":r,"number":n,"count":len(ds),"complete":True,"reviews":ds}
+ return {"schema":"gh-identity-comments/1","repository":r,"number":n,"total":len(xs),"shown":len(ds),"complete":complete,"truncated":not complete,"limit_reason":reason,"comments":ds}
+def reviews(r,n,transport="auto",timeout=30,*,max_items=None,max_pages=None):
+ r=repo(r);xs,complete,reason=_review_rest(f"repos/{r}/pulls/{n}/reviews",transport,timeout,max_items,max_pages)
+ ds=[dict({"id":x.get("id"),"kind":"review_submission","author":(x.get("user")or{}).get("login"),"state":x.get("state"),"commit_id":x.get("commit_id"),"submitted_at":x.get("submitted_at"),"chars":len(x.get("body")or""),"url":x.get("html_url")},**_review_body(x)) for x in xs]
+ return {"schema":"gh-identity-reviews/1","repository":r,"number":n,"count":len(ds),"complete":complete,"truncated":not complete,"limit_reason":reason,"reviews":ds}
+
+def inline_comments(r,n,*,max_items=100,max_pages=10,transport="auto",timeout=30):
+ r=repo(r);n=_review_limits(n,max_items,max_pages)
+ xs,complete,reason=_review_rest(f"repos/{r}/pulls/{n}/comments",transport,timeout,max_items,max_pages)
+ fields=("id","node_id","pull_request_review_id","in_reply_to_id","path","diff_hunk","line","original_line","start_line","original_start_line","side","start_side","position","original_position","commit_id","original_commit_id","created_at","updated_at","author_association")
+ rows=[dict({key:x.get(key) for key in fields},kind="inline_comment",url=x.get("html_url"),author=(x.get("user")or{}).get("login"),**_review_body(x)) for x in xs]
+ return {"schema":"gh-identity-inline-comments/1","repository":r,"number":n,"comments":rows,"complete":complete,"truncated":not complete,"limit_reason":reason}
+
+_THREAD_FIELDS="""id isResolved isOutdated path line originalLine startLine originalStartLine diffSide startDiffSide resolvedBy { login }
+ comments(first:100) { nodes { databaseId url } totalCount pageInfo { hasNextPage endCursor } }"""
+
+def _review_graphql(query,variables,transport,timeout):
+ budget=_BUDGET.get();budget.charge("pages",1)
+ # POST is GraphQL query transport, not a mutation. Both gh and urllib supported.
+ data=request("POST","graphql",{"query":query,"variables":variables},transport=transport,timeout=min(timeout,budget.remaining()))
+ if not isinstance(data,dict):raise Error("invalid_json")
+ if data.get("errors"):
+  errors=data["errors"]
+  if not isinstance(errors,list):raise Error("invalid_json")
+  types={x.get("type") for x in errors if isinstance(x,dict)}
+  raise Error("permission_or_rate_limit" if types & {"FORBIDDEN","RATE_LIMITED"} else "graphql_error")
+ if not isinstance(data.get("data"),dict):raise Error("invalid_json")
+ return data["data"]
+
+def _review_connection(connection):
+ if not isinstance(connection,dict) or not isinstance(connection.get("nodes"),list):raise Error("invalid_json")
+ info=connection.get("pageInfo")
+ if not isinstance(info,dict) or type(info.get("hasNextPage")) is not bool:raise Error("pagination_incomplete")
+ cursor=info.get("endCursor")
+ if info["hasNextPage"] and (not isinstance(cursor,str) or not cursor):raise Error("pagination_incomplete")
+ if any(not isinstance(x,dict) for x in connection["nodes"]):raise Error("invalid_json")
+ _BUDGET.get().charge("items",len(connection["nodes"]))
+ return connection["nodes"],cursor if info["hasNextPage"] else None
+
+def review_threads(r,n,*,max_items=100,max_pages=10,transport="auto",timeout=30):
+ r=repo(r);n=_review_limits(n,max_items,max_pages);owner,name=r.split("/")
+ query="query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{"+_THREAD_FIELDS+"} pageInfo{hasNextPage endCursor}}}}}"
+ rows=[];cursor=None;seen=set();cursors=set();reason=None
+ for _ in range(max_pages):
+  data=_review_graphql(query,dict(owner=owner,name=name,number=n,cursor=cursor),transport,timeout)
+  repository=data.get("repository")
+  pull=repository.get("pullRequest") if isinstance(repository,dict) else None
+  if not isinstance(pull,dict):raise Error("not_found_or_inaccessible")
+  nodes,next_cursor=_review_connection(pull.get("reviewThreads"))
+  for x in nodes:
+   if len(rows)>=max_items:reason="max_items";break
+   identity=x.get("id")
+   if not isinstance(identity,str) or not identity or identity in seen:raise Error("ambiguous_thread_identity")
+   seen.add(identity)
+   if type(x.get("isResolved")) is not bool or type(x.get("isOutdated")) is not bool:raise Error("invalid_json")
+   members,member_cursor=_review_connection(x.get("comments"));members=list(members)
+   member_reason=None;member_seen=set();member_pages=1
+   while member_cursor and len(members)<max_items and member_pages<max_pages:
+    if member_cursor in member_seen:raise Error("pagination_incomplete")
+    member_seen.add(member_cursor)
+    q="query($id:ID!,$cursor:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$cursor){nodes{databaseId url} totalCount pageInfo{hasNextPage endCursor}}}}}"
+    d=_review_graphql(q,{"id":identity,"cursor":member_cursor},transport,timeout)
+    node=d.get("node")
+    if not isinstance(node,dict):raise Error("not_found_or_inaccessible")
+    more,member_cursor=_review_connection(node.get("comments"));members.extend(more);member_pages+=1
+   if len(members)>max_items or member_cursor:member_reason="max_items" if len(members)>=max_items else "max_pages"
+   members=members[:max_items]
+   ids=[c.get("databaseId") for c in members]
+   if any(type(i) is not int or i<1 for i in ids) or len(set(ids))!=len(ids):raise Error("ambiguous_comment_identity")
+   total=x["comments"].get("totalCount")
+   if type(total) is not int or total<0 or (not member_reason and total!=len(members)):raise Error("pagination_incomplete")
+   if x.get("resolvedBy") is not None and not isinstance(x["resolvedBy"],dict):raise Error("invalid_json")
+   row={"kind":"review_thread","id":identity,"is_resolved":x["isResolved"],"is_outdated":x["isOutdated"],"resolved_by":(x.get("resolvedBy") or {}).get("login"),"comment_ids":ids,"url":members[0].get("url") if members else None,"comments_complete":member_reason is None,"comments_limit_reason":member_reason}
+   for key,source in (("path","path"),("line","line"),("original_line","originalLine"),("start_line","startLine"),("original_start_line","originalStartLine"),("side","diffSide"),("start_side","startDiffSide")):row[key]=x.get(source)
+   rows.append(row)
+  if reason:break
+  if next_cursor is None:break
+  if len(rows)>=max_items:reason="max_items";break
+  if next_cursor in cursors:raise Error("pagination_incomplete")
+  cursors.add(next_cursor);cursor=next_cursor
+ else:reason="max_pages"
+ complete=reason is None and all(x["comments_complete"] for x in rows)
+ return {"schema":"gh-identity-review-threads/1","repository":r,"number":n,"threads":rows,"complete":complete,"truncated":not complete,"limit_reason":reason or ("thread_comments" if not complete else None)}
+
+def review_observations(r,n,*,max_items=100,max_pages=10,transport="auto",timeout=30):
+ r=repo(r);n=_review_limits(n,max_items,max_pages)
+ result={"schema":"gh-identity-review-observations/1","repository":r,"number":n,"observed_at":now(),"components":{}}
+ for key,fn,field in (("conversation",comments,"comments"),("review_submission",reviews,"reviews"),("inline_comment",inline_comments,"comments"),("review_thread",review_threads,"threads")):
+  try:
+   value=fn(r,n,max_items=max_items,max_pages=max_pages,transport=transport,timeout=timeout)
+   result[key]=value[field]
+   result["components"][key]={k:value.get(k) for k in ("complete","truncated","limit_reason")}
+  except Error as e:
+   if e.code in {"pages_limit","items_limit","bytes_limit","operation_timeout"}:raise
+   result[key]=[];result["components"][key]={"complete":False,"truncated":False,"error":e.code}
+ result["complete"]=all(x["complete"] for x in result["components"].values())
+ result["truncated"]=any(x["truncated"] for x in result["components"].values())
+ # Link only observed identities; a missing mapping is unknown, never resolved.
+ mapping={}
+ for thread in result["review_thread"]:
+  for identity in thread["comment_ids"]:
+   if identity in mapping:raise Error("ambiguous_comment_identity")
+   mapping[identity]=thread["id"]
+ for x in result["inline_comment"]:x["thread_id"]=mapping.get(x["id"])
+ return result
+
+def diff_pr_observations(before,after):
+ """Pure identity-based comparison; partial input cannot establish removal."""
+ for value in (before,after):
+  if not isinstance(value,dict) or value.get("schema")!="gh-identity-review-observations/1":raise ValueError("review observation required")
+ if (before["repository"],before["number"])!=(after["repository"],after["number"]):raise ValueError("PR identity mismatch")
+ changes={}
+ for kind in ("conversation","review_submission","inline_comment","review_thread"):
+  def index(value):
+   rows=value[kind];out={x["id"]:x for x in rows}
+   if len(out)!=len(rows):raise ValueError("duplicate observation identity")
+   return out
+  old,new=index(before),index(after)
+  complete_before=before["components"][kind]["complete"]
+  complete_after=after["components"][kind]["complete"]
+  changes[kind]={"added":sorted(new.keys()-old.keys(),key=str) if complete_before else [],
+                 "removed":sorted(old.keys()-new.keys(),key=str) if complete_after else [],
+                 "changed":[key for key in sorted(old.keys() & new.keys(),key=str) if old[key]!=new[key]],
+                 "complete":complete_before and complete_after}
+ return {"schema":"gh-identity-review-diff/1","repository":after["repository"],"number":after["number"],"changes":changes,"complete":before["complete"] and after["complete"]}
 
 def pull_requests(r,state="open",max_items=100,max_pages=10,transport="auto",timeout=30):
  r=repo(r)
@@ -1859,6 +2030,8 @@ def _main(argv=None):
  x=s.add_parser("pr");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("comments");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
+ for command in ("inline-comments","review-threads","review-observations"):
+  x=s.add_parser(command);x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0)
  x=s.add_parser("runs");x.add_argument("repo")
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
@@ -1898,6 +2071,8 @@ def _main(argv=None):
   elif ns.cmd=="pr":o=pr(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="comments":o=comments(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
+  elif ns.cmd in ("inline-comments","review-threads","review-observations"):
+   o={"inline-comments":inline_comments,"review-threads":review_threads,"review-observations":review_observations}[ns.cmd](ns.repo,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="workflow-runs":o=workflow_run_discovery(ns.repo,ns.workflow_id,branch=ns.branch,head_sha=ns.head_sha,event=ns.event,max_items=ns.limit,max_pages=ns.page_limit,page_size=ns.page_size,start_page=ns.start_page,start_offset=ns.start_offset,transport=transport)
   elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
   elif ns.cmd=="workflow":o=workflow(ns.repo,ns.workflow_id,transport=transport)
@@ -1912,7 +2087,7 @@ def _main(argv=None):
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
  print(json.dumps(o,ensure_ascii=False))
- if ns.cmd=="job-log":return 0 if o["complete"] else 1
+ if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
  if ns.cmd in ("comment","variable-set"):
   return 0 if o.get("status") in ("planned","already_exists","verified") else 1
  return 0
@@ -1931,7 +2106,7 @@ def main(argv=None):
   return 2
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
-for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews",
+for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews","inline_comments","review_threads","review_observations",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","checks_for_sha","observe_pr","workflow","run","jobs","job_log"):
  globals()[_name]=_bounded(globals()[_name])

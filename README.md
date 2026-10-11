@@ -697,3 +697,68 @@ python gh_identity.py repo-inventory myon-bioinformatics --fields name,run-count
 `repository_inventory(owner, fields=("name",), sort="name", order="asc", max_repos=30, max_pages=5)` selects public, non-archived repositories. Size is GitHub's approximate repository metadata size in KiB, **not** source LOC. Run count is repository-wide Actions `total_count`, not workflow-specific. Run-count fan-out is opt-in; inaccessible values remain null with a reason, not zero. Limits are cumulative, and a partial inventory is not a complete ranking. Ascending and descending sorts place unavailable (null) metric values last; zero is a valid value, not missing. For `updated-at`, timezone-aware ISO timestamps are compared as UTC instants; missing or malformed timestamps sort last. Equal metric values use repository name ascending as a deterministic tie-breaker.
 
 Reaching `max_repos` conservatively reports `truncated=true` and `sort_scope="partial"`, even when the available repository count happens to equal the limit; no extra request is made to prove exhaustion.
+
+### PR review observations (Issue #20 slice)
+
+```python
+observation = ghi.review_observations("OWNER/REPO", 7, max_items=100, max_pages=10)
+# Separate APIs use the same limits and transport/timeout parameters:
+inline = ghi.inline_comments("OWNER/REPO", 7)
+threads = ghi.review_threads("OWNER/REPO", 7)
+changes = ghi.diff_pr_observations(previous_observation, observation)
+```
+
+```bash
+python gh_identity.py review-observations OWNER/REPO 7 --limit 100 --page-limit 10
+python gh_identity.py inline-comments OWNER/REPO 7
+python gh_identity.py review-threads OWNER/REPO 7 --transport urllib
+```
+
+`review_observations` reuses `comments` and `reviews`, returning four separate
+collections: `conversation`, `review_submission`, `inline_comment`, and
+`review_thread`. Every component reports completeness independently. Inline
+records preserve GitHub web URL, review/reply identity, diff hunk, path, current
+and original line/commit positions. Threads preserve GraphQL node ID,
+`is_resolved`, `is_outdated`, resolver, comment IDs, and the first observed
+comment's GitHub URL. There is no fabricated standalone thread URL. Inline
+`thread_id=null` means no mapping was observed, not that a finding is resolved.
+
+REST comments/reviews support optional `max_items` and `max_pages`; legacy calls
+without these options retain their operation-bounded pagination. New APIs use
+100 items/10 pages **per collection**, and the same limits per thread's member
+listing. The shared `operation()` deadline/page/item/byte budget bounds all
+components and nested pages cumulatively. Reaching an explicit listing limit
+returns `complete=false`, `truncated=true`, and `limit_reason`. A last full REST
+page without Link headers needs a subsequent empty page to establish exhaustion.
+
+Threads use authenticated GitHub GraphQL **queries** over HTTP POST, through the
+existing gh-first/urllib transport. They perform no GraphQL mutation. Public REST
+reads continue to work without gh; thread resolution generally requires a token.
+GraphQL errors (even with partial data), 401/403/404, and malformed pagination
+never mean an empty complete thread listing. Aggregate errors are recorded per
+component and set `complete=false`; byte/time/global-budget failures raise.
+Raw GraphQL messages are not echoed. CLI exit is 0 for complete, 1 for a returned
+incomplete observation, and 2 for invalid input or a raised API/transport error.
+
+`severity_labels` preserves explicit `Blocking`, `Should`, `Non-blocking`, and
+`Nit` labels at the start of a line, optionally in a bullet, Markdown heading,
+or bold form, followed by a colon or end of line. The exact labelled line and
+`source=explicit_body_label` are retained. Fenced examples, ordinary prose,
+summary counts such as `Blocking 0`, and review submission state do not assign
+severity. Multiple labels are preserved without selecting a merge gate.
+Records include a body SHA-256 and compact preview; full-body selection,
+comment digest filtering and file persistence remain separate Issue #20 work.
+
+`diff_pr_observations` is a pure comparison of saved review observations for the
+same repository/PR. It reports added/removed/changed IDs separately by kind,
+including thread resolution changes. Partial input cannot establish additions
+when the old collection is incomplete, or removals when the new one is incomplete.
+This is an observation diff, not a new patch-fetch API. Calls do not promise a
+transactional snapshot of a concurrently changing PR; inline commit identities
+remain separate from thread node IDs. None of the other Issue #20 checkboxes is
+completed by this feature. Guarded workflow dispatch/other writes remain outside
+this read-only slice (the unfinished contract is preserved in Issue #2).
+
+Fixtures in `tests/fixtures/review_observations` are synthetic offline contracts,
+not live captures or validation of particular gh versions. The existing CI tests
+these cases with pytest/JUnit on Python 3.10–3.14 and latest stable (`3.x`).

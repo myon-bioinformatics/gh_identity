@@ -261,3 +261,41 @@ Resume note: the CLI accepts `--start-offset N` together with `--start-page N`. 
 `repository_inventory` and `repo-inventory` return `gh-identity-repository-inventory/1` for an explicit owner. Only public, non-archived repository records are included. Fields: `name,size-kb,run-count,updated-at`; sorting is optional. `size_kb` is the GitHub repository metadata size (KiB), not lines of code. `run_count` is repository-wide Actions `total_count` fetched on demand. `run_count_status` distinguishes unavailable from zero. `complete/truncated`, `limit_reason`, and `sort_scope` prevent partial results from being mistaken for a global ranking. `--max-repos`, `--page-limit`, and global operation budgets limit work. Repository history and run counts can change during measurement; no snapshot guarantee is implied. Ascending and descending sorts place unavailable (null) metric values last; zero is a valid value, not missing. For `updated-at`, timezone-aware ISO timestamps are compared as UTC instants; missing or malformed timestamps sort last. Equal metric values use repository name ascending as a deterministic tie-breaker.
 
 Reaching `max_repos` conservatively reports `truncated=true` and `sort_scope="partial"`, even when the available repository count happens to equal the limit; no extra request is made to prove exhaustion.
+
+### Review observation API contract (Issue #20)
+
+- `inline_comments(r,n,*,max_items=100,max_pages=10,transport="auto",timeout=30)`:
+  bounded REST `/pulls/{n}/comments`, schema `gh-identity-inline-comments/1`.
+- `review_threads(...)`: identical options, GraphQL query-only transport,
+  schema `gh-identity-review-threads/1`. Cursor pagination includes each thread's
+  comments, independently bounded. Preserve Boolean resolution/outdated state,
+  resolver, source comment URL and REST comment IDs; null is unknown, not false.
+- `review_observations(...)`: reuse bounded `comments()`/`reviews()`, retain four
+  distinct collections and per-component completeness/error metadata;
+  schema `gh-identity-review-observations/1`. Explicit limits are per listing;
+  enclosing operation limits are cumulative including nested member queries.
+- `diff_pr_observations(before,after)`: pure identity-based comparison of matching
+  repository/PR observations, schema `gh-identity-review-diff/1`; incomplete
+  baseline suppresses additions and incomplete new collection suppresses
+  removals. Changes to shared IDs remain observed changes, not merge decisions.
+- A GraphQL POST containing a query is a read. No dispatch, resolution mutation,
+  retry of a mutation, merge, or arbitrary POST CLI is introduced. REST/GraphQL
+  use the existing gh and urllib transports. Auth/permission errors, GraphQL
+  partial-error responses, missing cursors, wrong member counts, duplicate IDs
+  and malformed responses cannot produce `complete=true`. Aggregate failures
+  retain successful components but mark failed components unknown. Global
+  byte/time/page/item failures remain fail-closed exceptions.
+- New CLIs `inline-comments`, `review-threads`, `review-observations` take
+  `--limit`/`--page-limit` and existing global limits. Exit 0=complete, 1=returned
+  incomplete, 2=raised input/transport failure. No atomic live snapshot is promised.
+- Explicit severity syntax: line-start label (`Blocking`, `Should`,
+  `Non-blocking`, `Nit`, case-insensitive), optionally bullet/heading/bold,
+  followed by colon or end of line. Preserve canonical label, exact source line
+  and provenance `explicit_body_label`. Skip fenced examples. Arbitrary prose,
+  summary counts and review state never manufacture severity or merge-gate.
+  Compact preview and body hash are retained; digest/filter/full-body persistence
+  and other unimplemented Issue #20 items stay unfinished.
+
+API references: [REST review comments](https://docs.github.com/en/rest/pulls/comments)
+and [GraphQL pull request types](https://docs.github.com/en/graphql/reference/pulls).
+Offline fixtures are synthetic; no gh-version/live-access claims are implied.
