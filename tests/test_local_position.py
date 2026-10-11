@@ -71,3 +71,27 @@ def test_cli(repo, capsys):
 def test_unborn_head_is_no_commit(tmp_path):
     _git(tmp_path, "init", "-q")
     assert g.local_position(tmp_path)["reason"] == "no_commit"
+
+
+def test_missing_git_is_an_error_not_an_absence(repo, monkeypatch):
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(g, "_git_spawn", no_git)
+    out = g.local_position(repo)
+    assert (out["git"], out["reason"]) == (None, "git_error") and "not found" in out["detail"]
+
+
+def test_permission_failure_is_an_error_not_an_absence(repo, monkeypatch):
+    real = g._git_run
+    def denied(root, args, **kwargs):
+        if args[:2] == ["rev-parse", "--verify"]:
+            raise g.GitInspectionError("PermissionError")
+        return real(root, args, **kwargs)
+    monkeypatch.setattr(g, "_git_run", denied)
+    assert g.local_position(repo)["reason"] == "git_error"
+
+
+def test_broken_dot_git_is_an_error_not_an_absence(tmp_path):
+    (tmp_path / ".git").write_text("gitdir: /nonexistent\n")
+    out = g.local_position(tmp_path)
+    assert out["reason"] == "git_error" and out["git"] is None

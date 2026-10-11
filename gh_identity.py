@@ -2267,18 +2267,30 @@ def remote_repository(root=".", remote="origin"):
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
 
-    Local only (no network). Outside a Git checkout, git is null with a reason.
+    Local only (no network). Only an explicit Git answer becomes an absence:
+    not_a_checkout (exit 128 and no .git above cwd) or no_commit (HEAD does not
+    verify). Anything else (no git executable, permissions, a broken .git,
+    output bounds) is git_error with a short detail, never an absence.
     """
     cwd = os.path.abspath(os.fspath(root))
+    base = {"schema": "gh-identity-local-position/1", "cwd": cwd}
+    def failed(error):
+        return {**base, "git": None, "reason": "git_error", "detail": str(error)}
     try:
-        top = _rm_git(root, "rev-parse", "--show-toplevel")
-    except GitInspectionError:
-        return {"schema": "gh-identity-local-position/1", "cwd": cwd, "git": None, "reason": "not_a_checkout"}
-    try:
+        raw, _, code = _git_run(root, ["rev-parse", "--show-toplevel"], max_bytes=64 * 1024, ok=(0, 128))
+        if code == 128:
+            here = Path(cwd)
+            if any((folder / ".git").exists() for folder in (here, *here.parents)):
+                return failed("rev-parse failed inside a .git tree")
+            return {**base, "git": None, "reason": "not_a_checkout"}
+        top = _git_decode(raw).strip()
+        if _git_run(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], max_bytes=4096, ok=(0, 1))[2] == 1:
+            return {**base, "git": None, "reason": "no_commit"}
         head = checkout_head(root)
-    except (GitInspectionError, ValueError):
-        return {"schema": "gh-identity-local-position/1", "cwd": cwd, "git": None, "reason": "no_commit"}
-    status = git_status(root)
+        status = git_status(root)
+        remote = remote_repository(root)
+    except (GitInspectionError, ValueError) as error:
+        return failed(error)
     kinds = Counter()
     for record in status["records"]:
         if record["kind"] == "?":
@@ -2287,10 +2299,10 @@ def local_position(root="."):
             xy = record["record"].split(" ", 2)[1]
             kinds["staged"] += xy[0] != "."
             kinds["unstaged"] += xy[1] != "."
-    return {"schema": "gh-identity-local-position/1", "cwd": cwd,
+    return {**base,
             "git": {"top_level": top, "relative": os.path.relpath(cwd, top), "head": head,
                     "changes": {k: kinds.get(k, 0) for k in ("staged", "unstaged", "untracked")},
-                    "changes_truncated": status["truncated"], "remote": remote_repository(root)}}
+                    "changes_truncated": status["truncated"], "remote": remote}}
 
 
 def repository_metadata(root=".", *, repository, source_sha=None, expected_sha=None, generated_at=None):

@@ -707,6 +707,8 @@ staged / unstaged / untracked counts, and the GitHub `owner/name` of `origin`.
 The remote URL itself is never printed, so credentials or proxy addresses in it
 cannot leak; a non-GitHub remote reports `not_github`. Outside a checkout,
 `git` is `null` with `not_a_checkout` (or `no_commit` before the first commit).
+Those two come only from an explicit Git answer; a missing `git`, a permission
+error or a broken `.git` is `git_error` with a short `detail`, never an absence.
 
 ## Repository metadata (`repo-metadata`)
 
