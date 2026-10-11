@@ -764,6 +764,28 @@ python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
 - `workflow-runs --head-sha` now sends `head_sha` to the API as well, so a
   busy repository no longer pages until `bytes_limit` before finding the head.
 
+## Compact PR status (`pr-status`)
+
+```bash
+python gh_identity.py pr-status OWNER/REPO NUMBER [--text] [--last 3] [--exclude-event EVENT ...]
+python gh_identity.py pr-status OWNER/REPO 145 169 OTHER/REPO 12 --text   # several, across repositories
+python gh_identity.py pr-status OWNER/REPO#169 OTHER/REPO#12 --text        # explicit form
+```
+
+Up to 20 targets. A bare number belongs to the last `OWNER/REPO` given. Each
+number may be a PR (full status below) or an Issue (state, title, `updated_at`
+and the latest comments). One target prints that item; several print
+`gh-identity-status-list/1` with `items`, where a failing target becomes
+`{"error": ...}` instead of hiding the others.
+
+One look at a PR's current head: PR state (`draft`, `merged`,
+`mergeable_state`, head/base), the head's workflow runs (Copilot's `dynamic`
+runs are counted in `excluded_count`, not listed; pass `--exclude-event` to
+change), the check-run summary with only the checks that need attention
+(not `success` / `skipped` / `neutral`), and the latest `--last` (0-20)
+conversation comments and reviews as 240-character previews with URLs.
+`--text` prints the same as short lines. This is an observation (exit `0`),
+not a gate: use `checks` or `wait-checks` to gate.
 ## Waiting for checks with progress (`wait-checks`)
 
 ```bash
