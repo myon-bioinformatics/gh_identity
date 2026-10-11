@@ -920,6 +920,54 @@ def set_variable(r,name,value,write=False,transport="auto",timeout=30):
  out["status"]="verified" if out["verified"] else "verification_mismatch"
  return out
 
+def _label_names(values,name):
+ out=[]
+ for v in values or ():
+  if not isinstance(v,str) or not v.strip() or len(v)>100 or any(c in v for c in "\r\n\x00"):raise ValueError(f"invalid {name} label")
+  if v not in out:out.append(v)
+ return out
+
+def set_labels(r,n,add=(),remove=(),write=False,transport="auto",timeout=30):
+ """Intentionally add/remove named labels on one Issue/PR; planned unless write.
+
+ Only labels that already exist in the repository can be added (never created).
+ The receipt shows before, target and after, verified by reading the issue back.
+ """
+ r=repo(r);n=_positive_identifier(n,"number")
+ add=_label_names(add,"add");remove=_label_names(remove,"remove")
+ if not add and not remove:raise ValueError("give --add and/or --remove")
+ if set(add)&set(remove):raise ValueError("a label cannot be both added and removed")
+ issue_path=f"repos/{r}/issues/{n}"
+ before=_issue_row(request("GET",issue_path,transport=transport,timeout=timeout),r,n)["labels"]
+ missing=[]
+ for name in add:
+  if name in before:continue
+  try:request("GET",f"repos/{r}/labels/{urllib.parse.quote(name,safe='')}",transport=transport,timeout=timeout)
+  except Error as e:
+   if e.code!="not_found_or_inaccessible":raise
+   missing.append(name)
+ to_add=[x for x in add if x not in before];to_remove=[x for x in remove if x in before]
+ target=sorted((set(before)|set(add))-set(remove))
+ out={"schema":"gh-identity-label-write/1","repository":r,"number":n,"before":before,"target":target,
+      "add":to_add,"remove":to_remove,"missing_labels":missing,
+      "mutation_status":"not_attempted","verification_status":"not_attempted"}
+ if missing:return {**out,"status":"rejected_missing_labels"}
+ if not to_add and not to_remove:return {**out,"status":"already_satisfied","after":before}
+ if not write:return {**out,"status":"planned"}
+ try:
+  if to_add:request("POST",issue_path+"/labels",{"labels":to_add},transport,timeout,True)
+  for name in to_remove:request("DELETE",issue_path+"/labels/"+urllib.parse.quote(name,safe=''),None,transport,timeout,True)
+ except Error as e:
+  out.update(status="mutation_uncertain" if e.uncertain else "mutation_failed",mutation_status="uncertain" if e.uncertain else "failed",error=e.code)
+  return out
+ out["mutation_status"]="succeeded"
+ try:after=_issue_row(request("GET",issue_path,transport=transport,timeout=timeout),r,n)["labels"]
+ except Error as e:
+  out.update(status="verification_failed",verification_status="failed",verification_error=e.code);return out
+ ok=after==target
+ out.update(after=after,verified=ok,verification_status="verified" if ok else "mismatch",status="verified" if ok else "verification_mismatch")
+ return out
+
 def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30,sanitize_mentions=False):
  r=repo(r)
  if not body.strip():raise ValueError("empty body")
@@ -2627,6 +2675,7 @@ def _main(argv=None):
  x=s.add_parser("step-url");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("step_number",type=int);x.add_argument("--line",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
+ x=s.add_parser("labels",help="add/remove existing labels on one Issue/PR (planned unless --write)");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--add",action="append",default=[],metavar="LABEL");x.add_argument("--remove",action="append",default=[],metavar="LABEL");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
  try:ns=a.parse_args(argv)
  except SystemExit as e:return int(e.code)
@@ -2693,6 +2742,7 @@ def _main(argv=None):
   elif ns.cmd=="step-url":o={"schema":"gh-identity-step-url/1","url":step_url(ns.repo,ns.run_id,ns.job_id,ns.step_number,ns.line)}
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
+  elif ns.cmd=="labels":o=set_labels(ns.repo,ns.number,ns.add,ns.remove,ns.write,transport)
   else:
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
@@ -2704,8 +2754,8 @@ def _main(argv=None):
  if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
  if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
- if ns.cmd in ("comment","variable-set","git-switch"):
-  return 0 if o.get("status") in ("planned","already_exists","verified") else 1
+ if ns.cmd in ("comment","variable-set","git-switch","labels"):
+  return 0 if o.get("status") in ("planned","already_exists","already_satisfied","verified") else 1
  return 0
 def main(argv=None):
  args=list(sys.argv[1:] if argv is None else argv);limits={}
