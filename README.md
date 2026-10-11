@@ -695,6 +695,19 @@ name, or a previous detached position fails before any change. Local changes
 that `git switch` refuses are reported as `mutation_failed`, never forced.
 Exit `0` for `planned` or `verified`, otherwise `1` (`2` for invalid input).
 
+## Where am I (`local-position`)
+
+```bash
+python gh_identity.py local-position [--root PATH]
+```
+
+Local only (no network): absolute `cwd`, the Git top level and `cwd` relative
+to it, the checkout HEAD (`sha`, branch or detached, commit time, subject),
+staged / unstaged / untracked counts, and the GitHub `owner/name` of `origin`.
+The remote URL itself is never printed, so credentials or proxy addresses in it
+cannot leak; a non-GitHub remote reports `not_github`. Outside a checkout,
+`git` is `null` with `not_a_checkout` (or `no_commit` before the first commit).
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash

@@ -2238,6 +2238,61 @@ def checkout_head(root="."):
             "timestamp": _rm_time(fields[0], "timestamp"), "subject": fields[1].splitlines()[0]}
 
 
+_RM_REMOTE = (re.compile(r"(?:https?|ssh|git)://(?:[^@/]+@)?github\.com(?::\d+)?/([^/]+)/([^/]+?)(?:\.git)?/?"),
+              re.compile(r"[^@\s/]+@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?"))
+
+
+def remote_repository(root=".", remote="origin"):
+    """owner/name of a GitHub remote, or None; the URL itself is never returned.
+
+    Credentials, proxies and non-GitHub hosts are not echoed: an unrecognised
+    remote yields {"full_name": None, "reason": "not_github"}.
+    """
+    if not isinstance(remote, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", remote):
+        raise ValueError("remote must be a plain remote name")
+    raw, _, code = _git_run(root, ["remote", "get-url", remote], max_bytes=4096, ok=(0, 2, 128))
+    if code:
+        return {"remote": remote, "full_name": None, "reason": "no_remote"}
+    url = _git_decode(raw).strip()
+    for pattern in _RM_REMOTE:
+        match = pattern.fullmatch(url)
+        if match:
+            try:
+                return {"remote": remote, "full_name": _rm_full_name(match.group(1) + "/" + match.group(2)), "reason": None}
+            except ValueError:
+                break
+    return {"remote": remote, "full_name": None, "reason": "not_github"}
+
+
+def local_position(root="."):
+    """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
+
+    Local only (no network). Outside a Git checkout, git is null with a reason.
+    """
+    cwd = os.path.abspath(os.fspath(root))
+    try:
+        top = _rm_git(root, "rev-parse", "--show-toplevel")
+    except GitInspectionError:
+        return {"schema": "gh-identity-local-position/1", "cwd": cwd, "git": None, "reason": "not_a_checkout"}
+    try:
+        head = checkout_head(root)
+    except (GitInspectionError, ValueError):
+        return {"schema": "gh-identity-local-position/1", "cwd": cwd, "git": None, "reason": "no_commit"}
+    status = git_status(root)
+    kinds = Counter()
+    for record in status["records"]:
+        if record["kind"] == "?":
+            kinds["untracked"] += 1
+        elif record["kind"] in ("1", "2", "u"):
+            xy = record["record"].split(" ", 2)[1]
+            kinds["staged"] += xy[0] != "."
+            kinds["unstaged"] += xy[1] != "."
+    return {"schema": "gh-identity-local-position/1", "cwd": cwd,
+            "git": {"top_level": top, "relative": os.path.relpath(cwd, top), "head": head,
+                    "changes": {k: kinds.get(k, 0) for k in ("staged", "unstaged", "untracked")},
+                    "changes_truncated": status["truncated"], "remote": remote_repository(root)}}
+
+
 def repository_metadata(root=".", *, repository, source_sha=None, expected_sha=None, generated_at=None):
     """Minimal public record: repository, checkout HEAD, optional source commit.
 
@@ -2377,6 +2432,7 @@ def _main(argv=None):
   if command=="git-grep":x.add_argument("pattern")
   if command=="git-ignore":x.add_argument("paths",nargs="+")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
+ x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -2428,6 +2484,7 @@ def _main(argv=None):
    elif ns.branch=="-":o=git_switch(ns.root,previous=True,write=ns.write)
    elif ns.branch:o=git_switch(ns.root,ns.branch,write=ns.write)
    else:raise ValueError("branch required")
+  elif ns.cmd=="local-position":o=local_position(ns.root)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")
    if ns.format=="v1":
