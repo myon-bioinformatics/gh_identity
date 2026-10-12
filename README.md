@@ -734,7 +734,12 @@ origin/X` fails ("not a branch") and, even with the config written by hand, `git
 status -sb` shows no upstream after a push because the single-branch refspec maps
 no tracking ref for X. Verification reads back the current branch, HEAD == the
 fetched commit, and both config values. A failing fetch (e.g. a missing PR) is
-`mutation_failed` with `completed_steps`. Exit `0` for `planned` / `verified`,
+`mutation_failed` with `completed_steps`. The fetch is the first network Git
+command here, so it never prompts (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`,
+SSH `BatchMode=yes` unless `GIT_SSH_COMMAND` is set) and is killed with its
+transport helpers after `--fetch-timeout` seconds (default 120): a missing
+credential or a stalled transfer ends as `mutation_failed`, never a hang.
+Exit `0` for `planned` / `verified`,
 otherwise `1` (`2` for invalid input).
 
 ## Where am I (`local-position`)

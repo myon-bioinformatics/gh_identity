@@ -3,7 +3,7 @@
 from __future__ import annotations
 from collections import Counter
 import base64,io,zipfile
-import argparse,fnmatch,json,os,re,shutil,subprocess,sys,urllib.error,urllib.parse,urllib.request
+import argparse,fnmatch,json,os,re,shutil,signal,subprocess,sys,urllib.error,urllib.parse,urllib.request
 from datetime import datetime,timezone
 from html.parser import HTMLParser
 import hashlib
@@ -2016,8 +2016,10 @@ def _git_drain_bounded(stream, max_bytes, result):
     result.append((bytes(kept), truncated))
 
 
-def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None):
+def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None, timeout=None):
     _git_positive(max_bytes, "max_bytes")
+    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
+        raise ValueError("timeout must be positive")
     if input_bytes is not None and not isinstance(input_bytes, bytes):
         raise TypeError("input_bytes must be bytes")
     command = ["git", "-C", str(_git_root(root)), "--no-pager",
@@ -2038,6 +2040,11 @@ def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None):
                  "GIT_CONFIG_NOSYSTEM"):
         env.pop(name, None)
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    # Never wait for a person: a network command without cached credentials must
+    # fail fast instead of blocking on a username/password or SSH prompt.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -2049,6 +2056,9 @@ def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None):
             stderr=subprocess.PIPE,
             shell=False,
             env=env,
+            # Own process group, so a timeout can also stop transport helpers
+            # (git-remote-https, ssh, upload-pack) that hold the output pipes.
+            **({"start_new_session": True} if timeout is not None and os.name == "posix" else {}),
         )
     except FileNotFoundError as error:
         raise GitInspectionError("git executable not found") from error
@@ -2073,7 +2083,20 @@ def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None):
             proc.stdin.close()
         except BrokenPipeError:
             pass
-    returncode = proc.wait()
+    try:
+        returncode = proc.wait() if timeout is None else proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait()
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        raise GitInspectionError(f"git timed out after {timeout:g}s")
     stdout_thread.join()
     stderr_thread.join()
 
@@ -2208,7 +2231,8 @@ def _git_config_get(root, key):
     return _git_decode(out).strip() if code == 0 else None
 
 
-def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origin", depth=None, write=False):
+def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origin", depth=None, fetch_timeout=120,
+             write=False):
     """Plan, or with write=True perform, "start a work branch from a PR head or remote branch".
 
     The steps are the ones a shallow single-branch clone needs, where
@@ -2223,6 +2247,9 @@ def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origi
        that remote branch exists, and add a fetch refspec for UPSTREAM when the
        clone's refspec does not cover it (single-branch clones).
 
+    The fetch never prompts (GIT_TERMINAL_PROMPT=0, SSH BatchMode) and is killed after
+    fetch_timeout seconds, so a missing credential or a stalled transfer ends as
+    mutation_failed with nothing switched, instead of hanging.
     Verification reads back the current branch, HEAD == fetched commit, and both config values.
     In a shallow clone the fetch is shallow too (depth 1 unless given), so history is not
     silently deepened.
@@ -2257,6 +2284,8 @@ def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origi
         depth = 1
     if depth is not None and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 1):
         raise ValueError("depth must be a positive integer")
+    if isinstance(fetch_timeout, bool) or not isinstance(fetch_timeout, (int, float)) or fetch_timeout <= 0:
+        raise ValueError("fetch_timeout must be positive")
     fetch = ["fetch", "--no-tags", *(["--depth", str(depth)] if depth else []), remote, f"+{src}:{tracking}"]
     switch = ["switch", "-c", name, "--no-track", tracking]
     config = [["config", "--local", f"branch.{name}.remote", remote],
@@ -2280,7 +2309,7 @@ def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origi
     done = []
     try:
         for step in (fetch, switch, *config):
-            _git_run(root, step)
+            _git_run(root, step, timeout=fetch_timeout if step is fetch else None)
             done.append(step[0])
     except GitInspectionError as error:
         out.update(status="mutation_failed", mutation_status="partial" if done else "failed",
@@ -2808,7 +2837,7 @@ def _main(argv=None):
   if command=="git-show":x.add_argument("revision",nargs="?",default="HEAD");x.add_argument("--path")
   if command=="git-grep":x.add_argument("pattern")
   if command=="git-ignore":x.add_argument("paths",nargs="+")
- x=s.add_parser("git-work",help="work branch from a PR head (#N) or remote branch, with branch.<name>.remote/merge set (planned unless --write)");x.add_argument("--root",default=".");x.add_argument("source",metavar="#N|pr/N|BRANCH");x.add_argument("branch",metavar="WORK_BRANCH");x.add_argument("--upstream",metavar="REMOTE_BRANCH");x.add_argument("--remote",default="origin");x.add_argument("--depth",type=int);x.add_argument("--write",action="store_true")
+ x=s.add_parser("git-work",help="work branch from a PR head (#N) or remote branch, with branch.<name>.remote/merge set (planned unless --write)");x.add_argument("--root",default=".");x.add_argument("source",metavar="#N|pr/N|BRANCH");x.add_argument("branch",metavar="WORK_BRANCH");x.add_argument("--upstream",metavar="REMOTE_BRANCH");x.add_argument("--remote",default="origin");x.add_argument("--depth",type=int);x.add_argument("--fetch-timeout",type=float,default=120);x.add_argument("--write",action="store_true")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
@@ -2866,7 +2895,7 @@ def _main(argv=None):
    elif ns.branch=="-":o=git_switch(ns.root,previous=True,write=ns.write)
    elif ns.branch:o=git_switch(ns.root,ns.branch,write=ns.write)
    else:raise ValueError("branch required")
-  elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,write=ns.write)
+  elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,fetch_timeout=ns.fetch_timeout,write=ns.write)
   elif ns.cmd=="local-position":o=local_position(ns.root)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")

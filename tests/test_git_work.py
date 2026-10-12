@@ -96,3 +96,42 @@ def test_cli_plan_and_exit_codes(clones, capsys):
     assert g.main(["git-work", "--root", str(clones["work"]), "pr/7", "w"]) == 0
     assert '"status": "planned"' in capsys.readouterr().out
     assert g.main(["git-work", "--root", str(clones["work"]), "#7", "main"]) == 2
+
+
+def test_fetch_never_prompts_for_credentials(clones, monkeypatch):
+    """A remote that would ask for a password fails fast as mutation_failed, nothing switched."""
+    work = clones["work"]
+    _git(work, "remote", "set-url", "origin", "https://example.invalid/private.git")
+    seen = {}
+    real = g._git_spawn
+
+    def spy(command, **kwargs):
+        if "fetch" in command:
+            seen.update(kwargs["env"])
+        return real(command, **kwargs)
+    monkeypatch.setattr(g, "_git_spawn", spy)
+    out = g.git_work(work, "#7", "w", write=True, fetch_timeout=20)
+    assert seen["GIT_TERMINAL_PROMPT"] == "0" and "BatchMode=yes" in seen["GIT_SSH_COMMAND"]
+    assert (out["status"], out["completed_steps"]) == ("mutation_failed", [])
+    assert _git(work, "branch", "--show-current") == "main"
+
+
+def test_stalled_fetch_is_killed_at_the_timeout(clones, tmp_path, monkeypatch):
+    """A transfer that never finishes is bounded: the fetch is killed and reported, not awaited."""
+    import time
+    hang = tmp_path / "hang-upload-pack"
+    hang.write_text("#!/bin/sh\nsleep 30\n")
+    hang.chmod(0o755)
+    work = clones["work"]
+    _git(work, "config", "remote.origin.uploadpack", str(hang))
+    _git(work, "remote", "set-url", "origin", str(clones["bare"]))  # local transport honours uploadpack
+    start = time.monotonic()
+    out = g.git_work(work, "#7", "w", write=True, fetch_timeout=1)
+    assert time.monotonic() - start < 10
+    assert out["status"] == "mutation_failed" and "timed out" in out["error"]
+    assert _git(work, "branch", "--show-current") == "main"
+
+
+def test_fetch_timeout_must_be_positive(clones):
+    with pytest.raises(ValueError):
+        g.git_work(clones["work"], "#7", "w", fetch_timeout=0)
