@@ -710,6 +710,38 @@ name, or a previous detached position fails before any change. Local changes
 that `git switch` refuses are reported as `mutation_failed`, never forced.
 Exit `0` for `planned` or `verified`, otherwise `1` (`2` for invalid input).
 
+## Work branch from a PR head or remote branch (`git-work`)
+
+```bash
+python gh_identity.py git-work [--root PATH] '#177' work/header-fix [--write]          # PR head
+python gh_identity.py git-work [--root PATH] feature local-feature --upstream feature --write
+```
+
+Replaces the hand-written sequence `git fetch origin pull/N/head:...`,
+`git checkout -B WORK origin/prN`, `git config branch.WORK.remote origin`,
+`git config branch.WORK.merge refs/heads/WORK`. Planned unless `--write`; the
+receipt lists every `command`. Steps:
+
+1. fetch the source into an explicit remote-tracking ref
+   (`#N` / `pr/N` -> `refs/remotes/origin/pr/N`, `BRANCH` -> `refs/remotes/origin/BRANCH`);
+   in a shallow clone the fetch is `--depth 1` unless `--depth` is given, so history is not deepened;
+2. `git switch -c WORK --no-track` at that ref (an existing WORK is refused, never reset like `-B`);
+3. write `branch.WORK.remote` / `branch.WORK.merge` (UPSTREAM defaults to WORK), and add a
+   fetch refspec for UPSTREAM when the clone's refspec does not cover it.
+
+Step 3 is why this exists: in a `--depth 1 --single-branch` clone, `git branch -u
+origin/X` fails ("not a branch") and, even with the config written by hand, `git
+status -sb` shows no upstream after a push because the single-branch refspec maps
+no tracking ref for X. Verification reads back the current branch, HEAD == the
+fetched commit, and both config values. A failing fetch (e.g. a missing PR) is
+`mutation_failed` with `completed_steps`. The fetch is the first network Git
+command here, so it never prompts (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`,
+SSH `BatchMode=yes` unless `GIT_SSH_COMMAND` is set) and is killed with its
+transport helpers after `--fetch-timeout` seconds (default 120): a missing
+credential or a stalled transfer ends as `mutation_failed`, never a hang.
+Exit `0` for `planned` / `verified`,
+otherwise `1` (`2` for invalid input).
+
 ## Where am I (`local-position`)
 
 ```bash
@@ -778,6 +810,45 @@ python gh_identity.py observe-pr OWNER/REPO NUMBER [--min-checks 1]
   re-reads the head; `stale` is true if the head moved meanwhile.
 - `workflow-runs --head-sha` now sends `head_sha` to the API as well, so a
   busy repository no longer pages until `bytes_limit` before finding the head.
+
+## Check-run digest across heads (`checks --text`)
+
+```bash
+python gh_identity.py checks OWNER/REPO SHA [SHA ...] --text
+```
+
+```text
+e0bbec5fc298 failed 31 failure=2 success=29
+      1 completed failure e2e (webkit)
+      1 completed failure python
+782babef2fed pending 31 in_progress=3 success=28
+      3 in_progress - e2e
+```
+
+One header per SHA (state, count, `by_conclusion`), then only checks that need
+attention (not `success` / `skipped` / `neutral`), collapsed `uniq -c`-style by
+status, conclusion and name, in-progress first. Up to 20 SHAs; several SHAs
+return `gh-identity-checks-list/1` whose `state` is the first non-green one.
+The exit code stays a gate: `0` only when every SHA is green.
+
+## Lists as lines and arbitrary reads (`prs` / `issues --text`, `get`)
+
+```bash
+python gh_identity.py prs OWNER/REPO --state open --text      # #N state [draft] head_ref title
+python gh_identity.py issues OWNER/REPO --state all --text    # #N state [labels] title
+python gh_identity.py get repos/OWNER/REPO/pulls -q state=open -q per_page=5 \
+  --pick number --pick head.ref --pick title --text
+python gh_identity.py get repos/OWNER/REPO/commits/SHA/check-runs -q per_page=100 \
+  --pick status --pick conclusion --pick name --text
+```
+
+`get` is a read-only GET for endpoints without a dedicated command, the
+equivalent of `gh api 'PATH?k=v' --jq ...`. Query options go through `-q KEY=VALUE`
+(URL-encoded); a query string or `..` in the path, a leading `/`, or a path outside
+`repos/` `users/` `orgs/` is invalid input. `--pick` keeps dotted fields of each
+item (a `check_runs` / `workflow_runs` / `items` / `jobs` / `artifacts` wrapper is
+unwrapped); `--text` prints one space-separated line per item, `-` for missing.
+The global byte/time budgets apply.
 
 ## Compact PR status (`pr-status`)
 
