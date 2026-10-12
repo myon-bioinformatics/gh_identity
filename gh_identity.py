@@ -18,6 +18,7 @@ import inspect
 import math
 import threading
 import time
+import tempfile
 
 
 class _Budget:
@@ -2016,15 +2017,57 @@ def _git_drain_bounded(stream, max_bytes, result):
     result.append((bytes(kept), truncated))
 
 
-def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None, timeout=None):
+def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None, timeout=None,
+             inherit_auth=False, _auth_read=False, _auth_file=None, _auth_file_query=None):
     _git_positive(max_bytes, "max_bytes")
-    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
-        raise ValueError("timeout must be positive")
+    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("timeout must be positive and finite")
     if input_bytes is not None and not isinstance(input_bytes, bytes):
         raise TypeError("input_bytes must be bytes")
+    if inherit_auth:
+        # Read configuration only; Git parses includes/conditional includes but
+        # does not execute helpers here. Never expose this private snapshot.
+        deadline = time.monotonic() + (timeout if timeout is not None else 120)
+        raw, truncated, _ = _git_run(
+            root, ["config", "--includes", "--null", "--show-scope", "--list"],
+            max_bytes=max_bytes, timeout=max(0.001, deadline-time.monotonic()), _auth_read=True)
+        if truncated:
+            raise GitInspectionError("Git authentication configuration exceeds output limit")
+        fields = raw.split(b"\0")
+        entries = []
+        for scope, record in zip(fields[0::2], fields[1::2]):
+            if scope not in (b"system", b"global"):
+                continue
+            key, sep, value = record.partition(b"\n")
+            name = key.decode("utf-8", "surrogateescape")
+            lower = name.lower()
+            if lower == "core.sshcommand" or (lower.startswith("credential.") and
+                    lower.rsplit(".", 1)[-1] in ("helper", "username", "usehttppath")):
+                entries.append((name, value.decode("utf-8", "surrogateescape") if sep else "true"))
+        def quoted(value):
+            return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t').replace('\b', '\\b') + '"'
+        with tempfile.TemporaryDirectory(prefix="ghi-auth-") as directory:
+            filename = os.path.join(directory, "config")
+            with open(filename, "w", encoding="utf-8", errors="surrogateescape") as stream:
+                for name, value in entries:
+                    section, rest = name.split(".", 1)
+                    if "." in rest:
+                        subsection, variable = rest.rsplit(".", 1)
+                        stream.write("[" + section + " " + quoted(subsection) + "]\n")
+                    else:
+                        variable = rest
+                        stream.write("[" + section + "]\n")
+                    stream.write(variable + " = " + quoted(value) + "\n")
+            os.chmod(filename, 0o600)
+            return _git_run(root, args, max_bytes=max_bytes, ok=ok, input_bytes=input_bytes,
+                            timeout=max(0.001, deadline-time.monotonic()), _auth_file=filename)
     command = ["git", "-C", str(_git_root(root)), "--no-pager",
-               "--no-optional-locks", "-c", "core.fsmonitor=false", *args]
+               "--no-optional-locks", "-c", "core.fsmonitor=false",
+               "-c", "core.askPass=", "-c", "credential.interactive=false", *args]
     env = os.environ.copy()
+    for name in list(env):
+        if name.startswith("GIT_TRACE") or name == "GIT_CURL_VERBOSE":
+            env.pop(name)
     # Do not let inherited Git process-routing/config overrides redirect a
     # supposedly local inspection to another worktree/index/object database or
     # inject an external diff helper. Ordinary locale/identity variables are
@@ -2044,10 +2087,29 @@ def _git_run(root, args, *, max_bytes=1_000_000, ok=(0,), input_bytes=None, time
     # fail fast instead of blocking on a username/password or SSH prompt.
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
-    env["GIT_CONFIG_GLOBAL"] = os.devnull
-    env["GIT_CONFIG_SYSTEM"] = os.devnull
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    env["SSH_ASKPASS_REQUIRE"] = "never"
+    if _auth_read:
+        # Only the fixed config query above uses ambient config paths.
+        for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
+            if name in os.environ:
+                env[name] = os.environ[name]
+    elif _auth_file is not None:
+        deadline = time.monotonic() + timeout
+        ssh, truncated, _ = _git_run(root, ["config", "--get", "core.sshCommand"],
+                                    max_bytes=max_bytes, ok=(0, 1), timeout=timeout, _auth_file_query=_auth_file)
+        if truncated:
+            raise GitInspectionError("SSH configuration exceeds output limit")
+        if "GIT_SSH_COMMAND" not in env and not ssh and "GIT_SSH" not in env:
+            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        timeout = max(0.001, deadline-time.monotonic())
+    elif _auth_file_query is None:
+        env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    if not _auth_read:
+        env["GIT_CONFIG_GLOBAL"] = _auth_file or _auth_file_query or os.devnull
+        env["GIT_CONFIG_SYSTEM"] = os.devnull
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
     try:
         proc = _git_spawn(
             command,
@@ -2247,7 +2309,8 @@ def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origi
        that remote branch exists, and add a fetch refspec for UPSTREAM when the
        clone's refspec does not cover it (single-branch clones).
 
-    The fetch never prompts (GIT_TERMINAL_PROMPT=0, SSH BatchMode) and is killed after
+    The fetch disables Git/GCM/askpass prompts (default SSH uses BatchMode;
+    configured SSH wrappers must implement their own noninteractive behavior) and is killed after
     fetch_timeout seconds, so a missing credential or a stalled transfer ends as
     mutation_failed with nothing switched, instead of hanging.
     Verification reads back the current branch, HEAD == fetched commit, and both config values.
@@ -2284,8 +2347,8 @@ def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origi
         depth = 1
     if depth is not None and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 1):
         raise ValueError("depth must be a positive integer")
-    if isinstance(fetch_timeout, bool) or not isinstance(fetch_timeout, (int, float)) or fetch_timeout <= 0:
-        raise ValueError("fetch_timeout must be positive")
+    if isinstance(fetch_timeout, bool) or not isinstance(fetch_timeout, (int, float)) or not math.isfinite(fetch_timeout) or fetch_timeout <= 0:
+        raise ValueError("fetch_timeout must be positive and finite")
     fetch = ["fetch", "--no-tags", *(["--depth", str(depth)] if depth else []), remote, f"+{src}:{tracking}"]
     switch = ["switch", "-c", name, "--no-track", tracking]
     config = [["config", "--local", f"branch.{name}.remote", remote],
@@ -2309,7 +2372,8 @@ def git_work(root=".", source=None, branch=None, *, upstream=None, remote="origi
     done = []
     try:
         for step in (fetch, switch, *config):
-            _git_run(root, step, timeout=fetch_timeout if step is fetch else None)
+            _git_run(root, step, timeout=fetch_timeout if step is fetch else None,
+                     inherit_auth=step is fetch)
             done.append(step[0])
     except GitInspectionError as error:
         out.update(status="mutation_failed", mutation_status="partial" if done else "failed",
