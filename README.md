@@ -736,11 +736,59 @@ no tracking ref for X. Verification reads back the current branch, HEAD == the
 fetched commit, and both config values. A failing fetch (e.g. a missing PR) is
 `mutation_failed` with `completed_steps`. The fetch is the first network Git
 command here, so it never prompts (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`,
-SSH `BatchMode=yes` unless `GIT_SSH_COMMAND` is set) and is killed with its
+askpass disabled; default SSH uses `BatchMode=yes`) and is killed with its
 transport helpers after `--fetch-timeout` seconds (default 120): a missing
 credential or a stalled transfer ends as `mutation_failed`, never a hang.
 Exit `0` for `planned` / `verified`,
 otherwise `1` (`2` for invalid input).
+
+### Authentication when reusing `git-work`
+
+Only the fetch inherits authentication configuration. Local inspections and
+branch/config mutations still isolate system/global Git settings and discard
+process-routing and injected command-level config environment variables.
+A bounded `git config --includes --null --show-scope --list` query reads the
+caller's system/global configuration (including Git's normal XDG paths,
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, and conditional
+includes). Only `core.sshCommand` and `credential[.<URL>].helper`, `.username`,
+and `.useHttpPath` are copied to a private temporary global config. System
+entries precede global entries; repository config then retains Git's normal
+higher precedence. Helper order, duplicate entries, URL matching, and empty
+helper values that reset the list are preserved. Includes are resolved during
+reading; no include directives or other global settings reach the fetch.
+The snapshot is removed on success or failure, and is never returned/logged.
+
+| SSH selection, highest priority first | Behavior |
+| --- | --- |
+| `GIT_SSH_COMMAND` | Preserve caller's command verbatim. |
+| `core.sshCommand` | Repository overrides global, which overrides system. |
+| `GIT_SSH` | Preserve caller's executable; no synthetic command overrides it. |
+| Default `ssh` | Use `ssh -o BatchMode=yes`. |
+
+SSH agent/config/key selection remains available through the selected SSH
+program. Configure custom commands/wrappers for noninteractive operation
+(e.g. OpenSSH `-o BatchMode=yes`); arbitrary wrappers are not rewritten with
+OpenSSH-only flags. `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`,
+`credential.interactive=false`, empty Git/core/SSH askpass settings, and
+`SSH_ASKPASS_REQUIRE=never` disable the standard prompt paths. A custom helper
+or wrapper may implement its own UI or block, but the cumulative fetch deadline
+covers config discovery and transport execution. Existing process-group
+termination on POSIX and bounded stdout/stderr retention remain in effect.
+Git trace/curl verbosity environment variables are stripped to avoid leaking
+helper commands or credentials; failures expose only generic status/timeout
+messages, not remote URLs, helper values, or stderr.
+
+Helpers and SSH commands are executable code: reuse this API only with a trusted
+checkout, trusted caller environment, and trusted Git configuration. HTTPS
+works with a noninteractive credential helper; `GH_TOKEN` alone does not become
+a Git credential unless the selected helper uses it. Global proxy, URL rewrites,
+HTTP extra headers, TLS overrides, and other non-allowlisted settings remain
+isolated. If required, configure transport settings deliberately in the trusted
+repository (never disable TLS verification to work around authentication).
+Interactive OAuth/login, password, or key-passphrase flows must be completed
+before running `git-work`; missing credentials yield `mutation_failed`.
+The tests use ephemeral loopback TLS, fake credentials, and controlled helpers/
+SSH wrappers, and require neither a GitHub account nor actual SSH keys/tokens.
 
 ## Where am I (`local-position`)
 
