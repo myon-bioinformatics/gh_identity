@@ -235,7 +235,10 @@ def pages(path,transport="auto",timeout=30,*,requester=None):
   path=_next_page(path,headers,len(data))
  return out
 def capabilities():
- return {"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],"gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token())}
+ versions=tool_versions(("git","gh"))
+ return {"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],
+         "gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token()),
+         "git_version":versions.get("git"),"gh_version":versions.get("gh")}
 def repository(r,**k):
  r=repo(r);d=request("GET",f"repos/{r}",**k)
  return {"schema":"gh-identity-repository/1","repository":r,"id":d.get("id"),"default_branch":d.get("default_branch"),"visibility":d.get("visibility"),"archived":d.get("archived"),"url":d.get("html_url"),"observed_at":now()}
@@ -2938,7 +2941,21 @@ def overview():
   versions=tool_versions(("git","gh"))
   out["environment"].update({"git_version":versions.get("git"),"gh_version":versions.get("gh")})
  except (OSError,ValueError,Error,subprocess.SubprocessError):pass
- try:out["local"]=local_position()
+ try:
+  position=local_position()
+  # Allowlist public fields; local-position remains the explicit path-bearing API.
+  out["local"]={"git":None}
+  if "reason" in position:out["local"]["reason"]=position["reason"]
+  git=position.get("git")
+  if isinstance(git,dict):
+   public={}
+   for field,keys in (("head",("sha","branch","detached","timestamp")),
+                      ("changes",("staged","unstaged","untracked")),
+                      ("remote",("remote","full_name","reason"))):
+    value=git.get(field)
+    if isinstance(value,dict):public[field]={key:value[key] for key in keys if key in value}
+   if "changes_truncated" in git:public["changes_truncated"]=git["changes_truncated"]
+   out["local"]["git"]=public
  except (OSError,ValueError,Error,GitInspectionError):pass
  local=out["local"] or {}
  git=local.get("git") if isinstance(local,dict) else None
