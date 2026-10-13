@@ -10,6 +10,10 @@ Single-file, stdlib-only Python interface for portable GitHub identity and opera
 - Guarded writes with dry-run/verification and mutation-uncertainty handling
 - Designed to absorb the proven GitHub-operation patterns currently spread across browser-test-kit, Ironmate, Flutter, mcp-toolcall-lab and Aoi
 
+## No-argument workspace overview
+
+Run `python gh_identity.py` (or `python gh_identity.py overview`) to print a best-effort, read-only JSON summary. It includes Python/Git/gh versions, local checkout details (branch, working-tree change counts, remote), and bounded samples of recent PRs, open issues and workflow runs when a GitHub origin can be identified. Missing or inaccessible sections are `null`, not zero. Suggested commands are static examples, not automated actions. No operating-system metadata or secrets are emitted. No repository or authentication is required to obtain the local portion.
+
 ## Python compatibility
 
 Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. CI checks 3.10–3.14 and `3.x` (the latest stable Python 3 available to setup-python), with `check-latest` enabled. The moving job follows new stable releases without adding a hard-coded upper bound. Passing CI verifies the tested versions; it does not guarantee untested future releases.
