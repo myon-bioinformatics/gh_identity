@@ -2931,8 +2931,49 @@ def write_repository_metadata(record, output_dir):
     return {"json": "repository-metadata.json", "jsonl": "repository-metadata.jsonl"}
 
 
+def overview():
+ """Best-effort read-only snapshot; unknown is never confused with zero."""
+ out={"schema":"gh-identity-overview/1","environment":{"python":sys.version.split()[0],
+      "git_version":None,"gh_version":None},"local":None,"remote":None,
+      "pull_requests":None,"issues":None,"ci":None,
+      "next_actions":["git-status","local-position","prs OWNER/REPO","issues OWNER/REPO","pr-status OWNER/REPO NUMBER","checks OWNER/REPO SHA"]}
+ try:
+  versions=tool_versions(("git","gh"))
+  out["environment"].update({"git_version":versions.get("git"),"gh_version":versions.get("gh")})
+ except (OSError,ValueError,Error,subprocess.SubprocessError):pass
+ try:
+  position=local_position()
+  # Allowlist public fields; local-position remains the explicit path-bearing API.
+  out["local"]={"git":None}
+  if "reason" in position:out["local"]["reason"]=position["reason"]
+  git=position.get("git")
+  if isinstance(git,dict):
+   public={}
+   for field,keys in (("head",("sha","branch","detached","timestamp")),
+                      ("changes",("staged","unstaged","untracked")),
+                      ("remote",("remote","full_name","reason"))):
+    value=git.get(field)
+    if isinstance(value,dict):public[field]={key:value[key] for key in keys if key in value}
+   if "changes_truncated" in git:public["changes_truncated"]=git["changes_truncated"]
+   out["local"]["git"]=public
+ except (OSError,ValueError,Error,GitInspectionError):pass
+ local=out["local"] or {}
+ git=local.get("git") if isinstance(local,dict) else None
+ remote=git.get("remote") if isinstance(git,dict) else None
+ # Remote discovery is intentionally optional: never guess the repository from cwd.
+ name=remote.get("full_name") if isinstance(remote,dict) else None
+ if not isinstance(name,str) or not REPO.fullmatch(name):return out
+ out["remote"]={"repository":name}
+ for key,fn in (("pull_requests",lambda:pull_requests(name,max_items=5,max_pages=1)),
+                ("issues",lambda:issues(name,max_items=5,max_pages=1)),
+                ("ci",lambda:run_history(name,max_items=5,max_pages=1))):
+  try:out[key]=fn()
+  except (OSError,ValueError,Error,GitInspectionError):pass
+ return out
+
 def _main(argv=None):
  argv=list(sys.argv[1:] if argv is None else argv)
+ if not argv:argv=["overview"]
  transport="auto"
  if "--transport" in argv:
   i=argv.index("--transport")
@@ -2943,6 +2984,7 @@ def _main(argv=None):
  a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
  x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
  s.add_parser("capabilities")
+ s.add_parser("overview",help="best-effort local and GitHub workspace summary (default)")
  for command in ("git-status", "git-files", "git-diff", "git-log", "git-numstat", "git-show", "git-blame", "git-grep", "git-ignore"):
   x=s.add_parser(command);x.add_argument("--root",default=".");x.add_argument("--output-bytes",type=int,default=1000000)
   if command=="git-status":x.add_argument("--json",action="store_true",help="structured output instead of default short status")
@@ -3023,6 +3065,7 @@ def _main(argv=None):
     if ns.tool:raise ValueError("--tool applies to --format v1 only")
     o=repository_metadata(ns.root,repository=ns.repository,source_sha=ns.source_sha,expected_sha=ns.expected_sha,generated_at=ns.generated_at)
    if ns.output_dir:write_repository_metadata(o,ns.output_dir)
+  elif ns.cmd=="overview":o=overview()
   elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
   elif ns.cmd=="tree":o=tree(ns.repo,ns.ref,depth=None if ns.recursive else ns.depth,exclude_dirs=ns.exclude_dir,exclude_files=ns.exclude_file,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)

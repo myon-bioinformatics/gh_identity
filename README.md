@@ -10,6 +10,10 @@ Single-file, stdlib-only Python interface for portable GitHub identity and opera
 - Guarded writes with dry-run/verification and mutation-uncertainty handling
 - Designed to absorb the proven GitHub-operation patterns currently spread across browser-test-kit, Ironmate, Flutter, mcp-toolcall-lab and Aoi
 
+## No-argument workspace overview
+
+Run `python gh_identity.py` (or `python gh_identity.py overview`) to print a best-effort, read-only JSON summary. It includes Python/Git/gh versions, local checkout summary (HEAD/branch, working-tree change counts, GitHub repository identity), and bounded samples of recent PRs, open issues and workflow runs when a GitHub origin can be identified. Missing or inaccessible sections are `null`, not zero. Suggested commands are static examples, not automated actions. Local paths (`cwd`, Git top level, relative directory), raw remote URLs, commit subjects and local error details are omitted. Use the explicit `local-position` command when local placement details are needed. No operating-system metadata is collected. No repository or authentication is required to obtain the local portion.
+
 ## Default environment versions
 
 The `capabilities` command includes `git_version` and `gh_version` by default, in addition to existing `git` and `gh` availability booleans. Values are parsed from local `git --version` and `gh --version` (5-second timeout per probe); missing, malformed, or failing probes produce JSON `null` without aborting the command. This does not alter the `repo-metadata` v1/v2 contract.
