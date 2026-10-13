@@ -495,7 +495,7 @@ def test_run_drains_stderr_before_reporting_failure(monkeypatch, repo):
 
 def test_git_cli_observation_and_failure(repo, capsys):
     import json
-    assert gi.main(["git-status", "--root", str(repo)]) == 0
+    assert gi.main(["git-status", "--root", str(repo), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["clean"] is True
     assert gi.main(["git-diff", "--root", str(repo), "--output-bytes", "0"]) == 2
     assert json.loads(capsys.readouterr().err)["error"] == "invalid_argument"
@@ -503,3 +503,25 @@ def test_git_cli_observation_and_failure(repo, capsys):
     assert json.loads(capsys.readouterr().err)["error"] == "invalid_argument"
     assert gi.main(["git-status", "--root", str(repo.parent)]) == 2
     assert json.loads(capsys.readouterr().err)["error"] == "git_inspection_failed"
+
+
+def test_cli_status_defaults_to_short(repo, monkeypatch, capsys):
+    monkeypatch.chdir(repo)
+    assert gi.main(['git-status']) == 0
+    assert capsys.readouterr().out == ''
+    (repo / 'a.txt').write_text('changed\n', encoding='utf-8')
+    git(repo, 'mv', 'space 日本語.txt', 'new name.txt')
+    (repo / 'untracked.txt').write_text('new', encoding='utf-8')
+    assert gi.main(['git-status']) == 0
+    text = capsys.readouterr().out
+    assert ' M a.txt\n' in text
+    assert 'R  "space 日本語.txt" -> "new name.txt"\n' in text
+    assert '?? untracked.txt\n' in text
+    assert gi.main(['git-status', '--json']) == 0
+    import json
+    assert json.loads(capsys.readouterr().out)['clean'] is False
+
+
+def test_short_status_quotes_control_characters_and_marks_truncation():
+    result = {'records':[{'kind':'?', 'path':'a\nb', 'record':'? a\nb'}], 'truncated':True}
+    assert gi.render_git_status(result) == '?? "a\\nb"\n(truncated)'
