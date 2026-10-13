@@ -1175,6 +1175,33 @@ def get(path,query=(),pick=(),transport="auto",timeout=30):
  else:data=one(d)
  return {"schema":"gh-identity-get/1","path":path,"query":dict(pairs),"data":data,"observed_at":now()}
 
+def read_comment(targets,kind=None,transport="auto",timeout=30):
+ """Read one review/inline/conversation body from a GitHub URL or short IDs."""
+ if not isinstance(targets,(list,tuple)) or not targets:raise ValueError("comment target required")
+ def positive(value):
+  if not re.fullmatch(r"[1-9][0-9]*",str(value)):raise ValueError("positive ID required")
+  return int(value)
+ if len(targets)==1:
+  url=urllib.parse.urlsplit(targets[0])
+  match=re.fullmatch(r"/([\w.-]+/[\w.-]+)/(pull|issues)/([1-9][0-9]*)",url.path)
+  anchor=re.fullmatch(r"(pullrequestreview-|discussion_r|issuecomment-)([1-9][0-9]*)",url.fragment)
+  if url.scheme!="https" or url.netloc!="github.com" or url.query or not match or not anchor:raise ValueError("GitHub comment URL required")
+  r=repo(match[1]);number=positive(match[3]);ident=positive(anchor[2])
+  actual={"pullrequestreview-":"review","discussion_r":"inline","issuecomment-":"conversation"}[anchor[1]]
+  if actual!="conversation" and match[2]!="pull":raise ValueError("PR URL required")
+  if kind is not None and kind!=actual:raise ValueError("comment kind mismatch")
+  kind=actual
+ elif kind=="review" and len(targets)==3:
+  r=repo(targets[0]);number=positive(targets[1]);ident=positive(targets[2])
+ elif kind=="inline" and len(targets)==2:
+  r=repo(targets[0]);ident=positive(targets[1])
+ else:raise ValueError("use URL, or review REPO PR ID / inline-comment REPO ID")
+ path=(f"repos/{r}/pulls/{number}/reviews/{ident}" if kind=="review" else
+       f"repos/{r}/pulls/comments/{ident}" if kind=="inline" else f"repos/{r}/issues/comments/{ident}")
+ data=get(path,transport=transport,timeout=timeout)["data"]
+ if not isinstance(data,dict) or type(data.get("id")) is not int or data["id"]!=ident or not isinstance(data.get("body"),str):raise Error("invalid_comment_response")
+ return {"schema":"gh-identity-comment-body/1","kind":kind,"repository":r,"id":ident,"body":data["body"],"url":data.get("html_url"),"observed_at":now()}
+
 def render_get(o):
  data=o["data"]
  rows=data if isinstance(data,list) else [data]
@@ -2223,6 +2250,26 @@ def git_status(root=".", *, max_bytes=1_000_000):
         index += 1
     return {"clean": not records and not truncated, "records": records, "truncated": truncated}
 
+def render_git_status(o):
+    """Short XY/path display from the existing bounded porcelain-v2 records."""
+    def path(value):
+        value = value or ""
+        return json.dumps(value, ensure_ascii=False) if any(c.isspace() or c in '\\"' or ord(c)<32 or ord(c)==127 for c in value) else value
+    lines = []
+    for row in o["records"]:
+        kind = row["kind"]
+        xy = {"?": "??", "!": "!!"}.get(kind)
+        if xy is None:
+            parts = row["record"].split(" ", 2)
+            xy = parts[1].replace(".", " ") if len(parts)>1 else "??"
+        name = path(row["path"])
+        if kind == "2":
+            name = path(row["orig_path"]) + " -> " + name
+        lines.append(xy + " " + name)
+    if o["truncated"]:
+        lines.append("(truncated)")
+    return "\n".join(lines)
+
 def _git_head(root):
     """Current branch name ("" when detached) and HEAD commit."""
     branch = _git_decode(_git_run(root, ["branch", "--show-current"])[0]).strip()
@@ -2895,6 +2942,7 @@ def _main(argv=None):
  s.add_parser("capabilities")
  for command in ("git-status", "git-files", "git-diff", "git-log", "git-numstat", "git-show", "git-blame", "git-grep", "git-ignore"):
   x=s.add_parser(command);x.add_argument("--root",default=".");x.add_argument("--output-bytes",type=int,default=1000000)
+  if command=="git-status":x.add_argument("--json",action="store_true",help="structured output instead of default short status")
   if command in ("git-diff", "git-blame"):x.add_argument("--path",required=command=="git-blame")
   if command=="git-diff":x.add_argument("--staged",action="store_true");x.add_argument("--base");x.add_argument("--head")
   if command in ("git-log", "git-numstat"):x.add_argument("--count",type=int,default=50)
@@ -2917,6 +2965,8 @@ def _main(argv=None):
  x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
  x=s.add_parser("prs");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("get",help="read-only GET of one REST path with query options; e.g. get repos/O/R/pulls -q state=open --pick number --pick head.ref --text");x.add_argument("path");x.add_argument("-q","--query",action="append",default=[],metavar="KEY=VALUE");x.add_argument("--pick",action="append",default=[],metavar="FIELD");x.add_argument("--text",action="store_true")
+ for command in ("read-comment","review","inline-comment"):
+  x=s.add_parser(command,help="one comment body: URL, review REPO PR ID, or inline-comment REPO ID; text by default");x.add_argument("targets",nargs="+");x.add_argument("--json",action="store_true")
  x=s.add_parser("pr");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("comments");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
@@ -2996,6 +3046,7 @@ def _main(argv=None):
   elif ns.cmd=="artifacts":o=artifacts(ns.repo,ns.run_id,transport=transport)
   elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="get":o=get(ns.path,ns.query,ns.pick,transport)
+  elif ns.cmd in ("read-comment","review","inline-comment"):o=read_comment(ns.targets,{"review":"review","inline-comment":"inline"}.get(ns.cmd),transport)
   elif ns.cmd=="checks":o=checks_for_shas(ns.repo,ns.sha,ns.min_checks,transport)
   elif ns.cmd=="wait-checks":o=wait_checks(ns.repo,ns.sha,min_checks=ns.min_checks,interval=ns.interval,wait_timeout=ns.wait_timeout,ignore=ns.ignore_check,transport=transport,timeout=ns.poll_timeout,progress=lambda line:print(line,file=sys.stderr,flush=True))
   elif ns.cmd=="observe-pr":o=observe_pr(ns.repo,ns.number,ns.min_checks,transport)
@@ -3012,7 +3063,11 @@ def _main(argv=None):
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
- if ns.cmd=="pr-status" and ns.text:print(render_status(o))
+ if ns.cmd=="git-status" and not ns.json:
+  text=render_git_status(o)
+  if text:print(text)
+ elif ns.cmd in ("read-comment","review","inline-comment") and not ns.json:print(o["body"])
+ elif ns.cmd=="pr-status" and ns.text:print(render_status(o))
  elif ns.cmd=="checks" and ns.text:print(render_checks(o))
  elif ns.cmd in ("prs","issues") and ns.text:print(render_list(o))
  elif ns.cmd=="get" and ns.text:print(render_get(o))

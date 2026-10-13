@@ -1053,3 +1053,41 @@ this read-only slice (the unfinished contract is preserved in Issue #2).
 Fixtures in `tests/fixtures/review_observations` are synthetic offline contracts,
 not live captures or validation of particular gh versions. The existing CI tests
 these cases with pytest/JUnit on Python 3.10–3.14 and latest stable (`3.x`).
+
+
+## Read one comment body with short arguments
+
+```bash
+python gh_identity.py --transport urllib read-comment "https://github.com/myon-bioinformatics/mcp-toolcall-lab/pull/119#pullrequestreview-5495899602"
+python gh_identity.py --transport urllib review myon-bioinformatics/mcp-toolcall-lab 119 5495899602
+python gh_identity.py --transport urllib inline-comment myon-bioinformatics/mcp-toolcall-lab 4252282158
+```
+
+`read-comment URL` detects `pullrequestreview-`, `discussion_r`, and
+`issuecomment-` anchors. `review` and `inline-comment` also accept their
+corresponding URL. The default output is the full body, including line breaks;
+no `--pick body --text` is needed. Add `--json` for identity metadata plus body.
+Only HTTPS URLs on `github.com` with a recognized PR/Issue path and numeric
+comment anchor are accepted; the URL is translated to a fixed GitHub REST
+endpoint, never fetched as an arbitrary URL. Invalid targets fail before any
+request. Missing/malformed bodies or mismatched response IDs fail closed.
+Existing transport/authentication, byte and timeout budgets apply. These are
+read-only commands; existing `comments`, `reviews`, `inline-comments`, and `get`
+outputs are unchanged. Empty comment bodies print an empty line.
+
+## Short Git status by default
+
+```bash
+python gh_identity.py git-status
+python gh_identity.py git-status --root PATH
+python gh_identity.py git-status --json
+```
+
+The CLI now defaults to short `XY path` lines (e.g. ` M file.py`,
+`?? new.py`, or `R  old.py -> new.py`). A clean checkout prints nothing.
+Whitespace/control characters in paths are quoted; bounded/truncated output
+ends with `(truncated)`. This is rendered from the existing porcelain-v2 parser,
+so the local inspection/config-isolation behavior is unchanged.
+**CLI migration:** scripts that previously parsed `git-status` JSON must add
+`--json`. The Python `git_status()` API and its structured return value are
+unchanged.
