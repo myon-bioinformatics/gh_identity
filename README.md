@@ -10,6 +10,10 @@ Single-file, stdlib-only Python interface for portable GitHub identity and opera
 - Guarded writes with dry-run/verification and mutation-uncertainty handling
 - Designed to absorb the proven GitHub-operation patterns currently spread across browser-test-kit, Ironmate, Flutter, mcp-toolcall-lab and Aoi
 
+## Default environment versions
+
+The `capabilities` command includes `git_version` and `gh_version` by default, in addition to existing `git` and `gh` availability booleans. Values are parsed from local `git --version` and `gh --version` (5-second timeout per probe); missing, malformed, or failing probes produce JSON `null` without aborting the command. This does not alter the `repo-metadata` v1/v2 contract.
+
 ## Python compatibility
 
 Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. CI checks 3.10–3.14 and `3.x` (the latest stable Python 3 available to setup-python), with `check-latest` enabled. The moving job follows new stable releases without adding a hard-coded upper bound. Passing CI verifies the tested versions; it does not guarantee untested future releases.
