@@ -235,7 +235,10 @@ def pages(path,transport="auto",timeout=30,*,requester=None):
   path=_next_page(path,headers,len(data))
  return out
 def capabilities():
- return {"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],"gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token())}
+ versions=tool_versions(("git","gh"))
+ return {"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],
+         "gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token()),
+         "git_version":versions.get("git"),"gh_version":versions.get("gh")}
 def repository(r,**k):
  r=repo(r);d=request("GET",f"repos/{r}",**k)
  return {"schema":"gh-identity-repository/1","repository":r,"id":d.get("id"),"default_branch":d.get("default_branch"),"visibility":d.get("visibility"),"archived":d.get("archived"),"url":d.get("html_url"),"observed_at":now()}
