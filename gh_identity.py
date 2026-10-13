@@ -2944,7 +2944,7 @@ def overview():
  git=local.get("git") if isinstance(local,dict) else None
  remote=git.get("remote") if isinstance(git,dict) else None
  # Remote discovery is intentionally optional: never guess the repository from cwd.
- name=remote.get("repository") if isinstance(remote,dict) else None
+ name=remote.get("full_name") if isinstance(remote,dict) else None
  if not isinstance(name,str) or not REPO.fullmatch(name):return out
  out["remote"]={"repository":name}
  for key,fn in (("pull_requests",lambda:pull_requests(name,max_items=5,max_pages=1)),
