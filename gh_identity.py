@@ -3952,6 +3952,10 @@ def _json_pins(path, document):
     return pins
 
 
+class PinInputError(ValueError):
+    """An audit input could not be read or decoded; message uses checkout-relative paths."""
+
+
 def collect_pins(root=".", json_globs=PIN_JSON_GLOBS):
     """Commit pins in a checkout: workflow `uses: OWNER/REPO@sha`, checkout `repository:`+`ref: sha`,
     and JSON objects with `repository`+`commit` (vendor.lock.json, parent-pr.ref.json, ...)."""
@@ -3971,8 +3975,9 @@ def collect_pins(root=".", json_globs=PIN_JSON_GLOBS):
                 elif name.endswith(".json") and any(fnmatch.fnmatch(rel, g) for g in json_globs):
                     with open(full, encoding="utf-8") as stream:
                         pins += _json_pins(rel, json.loads(stream.read(8 * 1024 * 1024)))
-            except (ValueError, UnicodeDecodeError):
-                continue
+            except (OSError, ValueError) as error:
+                reason = "read_error" if isinstance(error, OSError) else "invalid_json_or_encoding"
+                raise PinInputError(f"{rel}: {reason}") from error
     return pins
 
 
@@ -4636,7 +4641,9 @@ def _main(argv=None):
   else:
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
- except (ValueError,Error,OSError,GitInspectionError) as e:print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr);return 2
+ except (ValueError,Error,OSError,GitInspectionError) as e:
+  detail={"detail":str(e)} if isinstance(e,PinInputError) else {}
+  print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument"),**detail}),file=sys.stderr);return 2
  if ns.cmd=="git-status" and not ns.json:
   text=render_git_status(o)
   if text:print(text)
