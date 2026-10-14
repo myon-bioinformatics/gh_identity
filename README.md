@@ -1006,6 +1006,14 @@ temporary bare fetch with `--filter=blob:none` and disabled credential helpers
 return `null` when history is longer than the page budget. Tests can replace the
 HTTP layer with `with gh_identity.request_stub(handler): ...`.
 
+Library use: paginated functions (`pages`, `pages_bounded`, `list_owner_repositories`,
+`commit_pulls`, ...) open a default `operation()` budget when called outside one,
+and reuse the caller's budget when inside one. `first_parent_check(..., exact=True)`
+accepts `remote=` (full URL or absolute path; URLs with credentials are rejected)
+and `git_runner(args, cwd) -> (returncode, stdout)` so callers can run git with their
+own sanitized subprocess or an offline double. Arguments always start with
+`-c credential.helper= -c core.askPass= -c http.extraHeader=`; no token is ever passed to git.
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash
