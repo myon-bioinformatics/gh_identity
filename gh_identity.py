@@ -2818,8 +2818,22 @@ def git_subtree_split(root=".", prefix=None, revision="HEAD", *, timeout=600):
     if not _git_subtree_available(root):
         return {**base, "source": source, "sha": None, "reason": "subtree_unavailable",
                 "detail": "git subtree (contrib) is not installed"}
-    raw, _, _ = _git_run(root, ["subtree", "split", "-q", "--prefix=" + prefix, source],
-                         max_bytes=64 * 1024, timeout=timeout)
+    # git-subtree leaves $GIT_DIR/subtree-cache/<pid> behind; remove only what
+    # this call created so the checkout's .git is left as it was.
+    git_dir = Path(_git_decode(_git_run(root, ["rev-parse", "--absolute-git-dir"], max_bytes=64 * 1024)[0]).strip())
+    cache = git_dir / "subtree-cache"
+    cache_existed = cache.is_dir()
+    before = set(os.listdir(cache)) if cache_existed else set()
+    try:
+        raw, _, _ = _git_run(root, ["subtree", "split", "-q", "--prefix=" + prefix, source],
+                             max_bytes=64 * 1024, timeout=timeout)
+    finally:
+        if cache.is_dir() and not cache.is_symlink():
+            for name in set(os.listdir(cache)) - before:
+                shutil.rmtree(cache / name, ignore_errors=True)
+            if not cache_existed:
+                with contextlib.suppress(OSError):
+                    cache.rmdir()
     sha = _git_decode(raw).strip().splitlines()[-1:] or [""]
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha[0]):
         raise GitInspectionError("unexpected git subtree output")

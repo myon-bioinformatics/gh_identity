@@ -824,7 +824,8 @@ Runs `git subtree split -q --prefix=DIR <sha>` and returns
 `sha` is the commit whose history contains only `DIR` (e.g. as the start of a new
 repository). No `--write` is needed: `--branch`, `--rejoin`, `--onto` and
 `--annotate` are never passed, so no ref is created or moved and the current
-branch gets no commit (only new objects are added to the object database).
+branch gets no commit (only new objects are added to the object database; the
+`.git/subtree-cache/<pid>` scratch directory git-subtree leaves behind is removed).
 `add` / `pull` / `merge` / `push` are not implemented.
 `DIR` must be a relative path inside the repository (no absolute path, `..`,
 `.git` or leading `-`); `REV` is resolved to a SHA first. A missing directory is

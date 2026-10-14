@@ -40,6 +40,16 @@ def test_split_returns_sha_and_changes_no_refs(repo):
     assert out["source"] == head
     assert _git(repo, "rev-parse", out["sha"] + "^{tree}") == _git(repo, "rev-parse", "HEAD:sub")
     assert _refs(repo) == before and _git(repo, "rev-parse", "HEAD") == head
+    assert not (repo / ".git" / "subtree-cache").exists()
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+@needs_subtree
+def test_existing_subtree_cache_is_preserved(repo):
+    keep = repo / ".git" / "subtree-cache" / "1"
+    keep.mkdir(parents=True)
+    g.git_subtree_split(repo, "sub")
+    assert sorted(p.name for p in keep.parent.iterdir()) == ["1"]
 
 
 @needs_subtree
