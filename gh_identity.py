@@ -2772,6 +2772,60 @@ def remote_repository(root=".", remote="origin"):
     return {"remote": remote, "full_name": None, "reason": "not_github"}
 
 
+def _git_subtree_available(root):
+    """True when the contrib `git subtree` command is installed (exec-path or PATH)."""
+    raw, _, _ = _git_run(root, ["--exec-path"], max_bytes=64 * 1024)
+    exec_path = _git_decode(raw).strip()
+    if exec_path and os.path.isfile(os.path.join(exec_path, "git-subtree")):
+        return True
+    return shutil.which("git-subtree") is not None
+
+
+def _subtree_prefix(prefix):
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise ValueError("prefix required")
+    if any(c in prefix for c in ("\0", "\n", "\r")) or prefix.startswith("-"):
+        raise ValueError("invalid prefix")
+    if os.path.isabs(prefix) or prefix.startswith(("/", "\\")) or re.match(r"[A-Za-z]:", prefix):
+        raise ValueError("prefix must be relative to the repository top level")
+    parts = [part for part in prefix.replace("\\", "/").split("/") if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts) or parts[0] == ".git":
+        raise ValueError("prefix must stay inside the repository")
+    if any(part.startswith("-") for part in parts):
+        raise ValueError("invalid prefix")
+    return "/".join(parts)
+
+
+def git_subtree_split(root=".", prefix=None, revision="HEAD", *, timeout=600):
+    """Read-only `git subtree split --prefix=<dir> <sha>`: return the split commit SHA.
+
+    Never passes --branch/--rejoin/--onto/--annotate, so no ref is created or
+    moved and no commit is added to the current branch. Requires the contrib
+    `git subtree` command; when it is missing, reason is subtree_unavailable.
+    """
+    prefix = _subtree_prefix(prefix)
+    if not isinstance(revision, str) or not revision or revision.startswith("-") or any(c in revision for c in ("\0", "\n", "\r")):
+        raise ValueError("invalid revision")
+    base = {"schema": "gh-identity-subtree-split/1", "prefix": prefix, "write": False}
+    raw, _, code = _git_run(root, ["rev-parse", "--verify", "-q", "--end-of-options", revision + "^{commit}"],
+                            max_bytes=4096, ok=(0, 1, 128))
+    if code != 0:
+        raise ValueError("revision not found")
+    source = _git_decode(raw).strip()
+    raw, _, code = _git_run(root, ["cat-file", "-t", source + ":" + prefix], max_bytes=4096, ok=(0, 1, 128))
+    if code != 0 or _git_decode(raw).strip() != "tree":
+        return {**base, "source": source, "sha": None, "reason": "prefix_not_found"}
+    if not _git_subtree_available(root):
+        return {**base, "source": source, "sha": None, "reason": "subtree_unavailable",
+                "detail": "git subtree (contrib) is not installed"}
+    raw, _, _ = _git_run(root, ["subtree", "split", "-q", "--prefix=" + prefix, source],
+                         max_bytes=64 * 1024, timeout=timeout)
+    sha = _git_decode(raw).strip().splitlines()[-1:] or [""]
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha[0]):
+        raise GitInspectionError("unexpected git subtree output")
+    return {**base, "source": source, "sha": sha[0], "reason": None}
+
+
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
 
@@ -2997,6 +3051,7 @@ def _main(argv=None):
  x=s.add_parser("git-work",help="work branch from a PR head (#N) or remote branch, with branch.<name>.remote/merge set (planned unless --write)");x.add_argument("--root",default=".");x.add_argument("source",metavar="#N|pr/N|BRANCH");x.add_argument("branch",metavar="WORK_BRANCH");x.add_argument("--upstream",metavar="REMOTE_BRANCH");x.add_argument("--remote",default="origin");x.add_argument("--depth",type=int);x.add_argument("--fetch-timeout",type=float,default=120);x.add_argument("--write",action="store_true")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
+ x=s.add_parser("subtree-split",help="read-only git subtree split --prefix: print the split commit SHA (no refs changed)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -3056,6 +3111,7 @@ def _main(argv=None):
    else:raise ValueError("branch required")
   elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,fetch_timeout=ns.fetch_timeout,write=ns.write)
   elif ns.cmd=="local-position":o=local_position(ns.root)
+  elif ns.cmd=="subtree-split":o=git_subtree_split(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")
    if ns.format=="v1":
