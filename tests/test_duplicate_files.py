@@ -1,0 +1,142 @@
+"""duplicate-files: same basename across one owner's repositories, read-only, fake transport."""
+import base64
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+import gh_identity as g
+
+UP_OLD, UP_NEW, OTHER = b"v1\n", b"v2\n", b"other\n"
+CU, CC, CD = "a" * 40, "c" * 40, "d" * 40
+OLD = "1" * 40
+
+
+def sha(b):
+    return g.git_blob_sha(b)
+
+
+def lock(files):
+    data = json.dumps({"schema": "vendor-lock/1", "files": files}).encode()
+    return {"encoding": "base64", "content": base64.b64encode(data).decode()}
+
+
+def entry(dest, data, source="tool.py", repository="me/up", commit=OLD):
+    return {"repository": repository, "ref": commit, "commit": commit, "source": source, "destination": dest,
+            "blob_sha": sha(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def blob(path, data):
+    return {"path": path, "mode": "100644", "type": "blob", "sha": sha(data)}
+
+
+REPOS = [
+    {"name": "up", "default_branch": "main", "owner": {"login": "me"}},
+    {"name": "consumer", "default_branch": "main", "owner": {"login": "me"}},
+    {"name": "drifted", "default_branch": "dev", "owner": {"login": "me"}},
+    {"name": "secret", "private": True, "visibility": "private", "owner": {"login": "me"}},
+    {"name": "internal", "visibility": "internal", "owner": {"login": "me"}},
+    {"name": "old", "archived": True, "owner": {"login": "me"}},
+    {"name": "forked", "fork": True, "default_branch": "main", "owner": {"login": "me"}},
+]
+
+
+def test_include_forks_is_configurable():
+    with patch.object(g, "pages", return_value=REPOS):
+        assert [r["name"] for r in g.owner_repositories("me")] == ["up", "consumer", "drifted"]
+        assert [r["name"] for r in g.owner_repositories("me", include_forks=True)][-1] == "forked"
+TREES = {
+    CU: [blob("tool.py", UP_NEW), blob("README.md", b"r"), blob("LICENSE", b"l")],
+    CC: [blob("vendor/tool.py", UP_OLD), blob("README.md", b"r"), blob("vendor.lock.json", b"x"), blob("only.py", b"o")],
+    CD: [blob("scripts/tool.py", OTHER), blob("README.md", b"r2")],
+}
+
+
+def fake(method, path, **kw):
+    assert method == "GET"
+    table = {
+        "repos/me/up/commits/main": {"sha": CU},
+        "repos/me/consumer/commits/main": {"sha": CC},
+        "repos/me/drifted/commits/dev": {"sha": CD},
+        f"repos/me/consumer/contents/vendor.lock.json?ref={CC}": lock([entry("vendor/tool.py", UP_OLD)]),
+        "repos/me/up": {"default_branch": "main", "visibility": "public"},
+        "repos/me/drifted": {"default_branch": "dev", "visibility": "public"},
+    }
+    for c, rows in TREES.items():
+        table[f"repos/{ {CU: 'me/up', CC: 'me/consumer', CD: 'me/drifted'}[c] }/git/trees/{c}?recursive=1"] = {"sha": "f" * 40, "tree": rows, "truncated": False}
+    if path in table:
+        return table[path]
+    raise g.Error("not_found_or_inaccessible")
+
+
+def run(**kw):
+    with patch.object(g, "pages", return_value=REPOS) as pages, patch.object(g, "request", side_effect=fake):
+        out = g.duplicate_files("me", **kw)
+    return out, pages
+
+
+def test_owner_filter_and_groups():
+    out, pages = run()
+    assert pages.call_args.args[0] == "users/me/repos?type=owner&sort=full_name"
+    assert set(out["scanned"]) == {"me/up", "me/consumer", "me/drifted"} and out["write"] is False
+    assert [x["basename"] for x in out["groups"]] == ["tool.py"]           # README.md / LICENSE ignored, only.py single
+    grp = out["groups"][0]
+    assert grp["repositories"] == 3 and grp["distinct_contents"] == 3 and not grp["identical"]
+    assert set(grp["warnings"]) == {"content_differs", "unknown_provenance", "stale_pin"}
+
+
+def test_provenance_origin_stale():
+    files = {f["repository"]: f for f in run()[0]["groups"][0]["files"]}
+    up, consumer, drifted = files["me/up"], files["me/consumer"], files["me/drifted"]
+    assert consumer["provenance"] == {"repository": "me/up", "source": "tool.py", "commit": OLD, "lock_blob_sha": sha(UP_OLD)}
+    assert consumer["stale"] is True and consumer["matches_lock"] is True
+    assert up["origin"] is True and up["consumers"] == ["me/consumer"] and up["provenance"] is None
+    assert drifted["provenance"] is None and drifted["origin"] is False and drifted["stale"] is None
+    c = run()[0]["counts"]
+    assert c["null_provenance"] == 2 and c["null_provenance_non_origin"] == 1 and c["stale"] == 1
+
+
+def test_ignore_options_and_repos_override():
+    out, pages = run(ignore=(), extra_ignore=("tool.py",))
+    assert [x["basename"] for x in out["groups"]] == ["README.md"]
+    out, pages = run(repos=["up", "drifted"])
+    assert not pages.called and set(out["scanned"]) == {"me/up", "me/drifted"}
+    assert out["groups"][0]["files"][0]["provenance"] is None
+
+
+def test_identical_copies_and_errors():
+    TREES[CD] = [blob("scripts/tool.py", UP_NEW)]
+    try:
+        out, _ = run(repos=["up", "drifted", "missing"])
+    finally:
+        TREES[CD] = [blob("scripts/tool.py", OTHER), blob("README.md", b"r2")]
+    assert out["groups"][0]["identical"] is True and "content_differs" not in out["groups"][0]["warnings"]
+    assert out["errors"] == [] and out["redacted"] == 1 and "missing" not in json.dumps(out)
+
+
+def test_rejects_bad_owner():
+    with pytest.raises(ValueError):
+        g.owner_repositories("../x")
+
+
+def test_markdown_and_check_exit(tmp_path):
+    data = b"x = 1\n"
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "m.py").write_bytes(data)
+    (tmp_path / "vendor.lock.json").write_text(json.dumps({"schema": "vendor-lock/1", "files": [entry("vendor/m.py", data, source="m.py")]}))
+    cli = [sys.executable, str(Path(g.__file__)), "vendor-lock-check", "--root", str(tmp_path)]
+    p = subprocess.run(cli + ["--markdown", "--ci-check"], capture_output=True, text=True)
+    assert p.returncode == 0 and p.stdout.startswith("### gh-identity-vendor-check/1: ok") and "| vendor/m.py | ok |" in p.stdout
+    (tmp_path / "vendor" / "m.py").write_bytes(b"changed\n")
+    assert subprocess.run(cli + ["--ci-check"], capture_output=True).returncode == 1
+    assert subprocess.run(cli, capture_output=True).returncode == 0
+
+
+def test_duplicates_markdown():
+    out, _ = run()
+    md = g.render_duplicates_markdown(out, top=5)
+    assert md.startswith("### Duplicate files (me): 3 repositories")
+    assert "| tool.py | 3 | 3 | 2 | 1 | up | content_differs unknown_provenance stale_pin |" in md

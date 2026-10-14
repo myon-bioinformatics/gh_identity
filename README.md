@@ -832,6 +832,177 @@ branch gets no commit (only new objects are added to the object database; the
 `reason: "prefix_not_found"`; if the contrib `git subtree` command is not
 installed, `reason: "subtree_unavailable"` (sha `null`).
 
+## Subtree sync status (`subtree-sync-status`)
+
+```bash
+python gh_identity.py subtree-sync-status --root MONOREPO --prefix DIR --other-root SPLIT_CHECKOUT \
+  [--other-ref main] [--revision REV] [--other-only-path GLOB ...]
+```
+
+Local and read-only (no fetch, no ref changes). `git subtree split` is
+deterministic, so the split commits of `DIR` carry the same SHAs as the history
+of a repository split out of it; both histories are compared as SHA sets in
+their own object databases. `state` is `in_sync`, `monorepo_ahead`,
+`other_ahead`, `diverged` or `unrelated`, with counts and (bounded) commit
+lists. Commits of the other side that only touch `--other-only-path` files
+(e.g. `pyproject.toml`, `uv.lock`) are reported as `other_only_ignored`.
+
+## Sync provenance (`sync-provenance`)
+
+```bash
+python gh_identity.py sync-provenance --root MONOREPO --prefix DIR --other-root SPLIT_CHECKOUT \
+  [--direction push|pull] [--squash] [--output-dir DIR]
+python gh_identity.py sync-provenance --root SPLIT_CHECKOUT --verify COMMIT [--monorepo-root MONOREPO]
+```
+
+Records which monorepo SHA and split SHA a sync came from
+(`gh-identity-sync-provenance/1`) and suggests the commit trailer
+`Subtree-Split: <monorepo_sha> <split_sha> <prefix>`. `--output-dir` writes
+`sync-provenance.json`. `--verify` reads the trailers of `COMMIT`; with
+`--monorepo-root` the split is recomputed from the recorded SHA and must match
+(`no_trailer` / `mismatch` otherwise). Nothing is committed.
+
+## Split preflight (`split-preflight`)
+
+```bash
+python gh_identity.py split-preflight --root MONOREPO --prefix DIR [--revision REV]
+```
+
+Read-only checklist before splitting `DIR` into its own repository, all read
+from `REV` (not the working tree): split SHA and history size, imports and
+path / `sys.path` / config references into `DIR` from the rest of the
+repository (`inbound_refs`, with file and line), references from `DIR` to the
+rest (`outbound_refs`), third-party imports inside `DIR`, and `checks` with an
+overall `ok`. Imports are parsed with `ast`, never executed.
+
+## Vendored files (`vendor-lock-check`, `vendor-lock-verify-remote`, `vendor-plan`, `vendor-matrix`)
+
+All read-only; nothing is placed, updated or committed.
+
+```bash
+python gh_identity.py vendor-lock-check [--root .] [--lock vendor.lock.json] [--rules vendor-rules.json]
+python gh_identity.py vendor-lock-verify-remote [--root .] [--lock vendor.lock.json] [--upstream]
+python gh_identity.py vendor-plan [--root .] [--rules vendor-rules.json] --candidate OWNER/REPO:PATH@SHA [...]
+python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lock.json ...]
+```
+
+- The lock is `vendor-lock/1`, validated exactly like Ironmate `vendor/vendor_sync.py`
+  (`repository, ref, commit, source, destination, blob_sha, sha256`).
+- `vendor-lock-check` also reports a `parent_ref` section for
+  `templates/parent-pr.ref.json` (or the root copy): schema, 40-hex non-zero
+  commit, repository_id and pull_number. Missing is allowed unless
+  `--parent-ref` is given; invalid fails the check.
+- `vendor-lock-check` hashes each destination: `ok`, `missing`,
+  `digest_mismatch`, `header_modified` (only leading `#` lines were added, which
+  breaks byte identity), `symlink`, and `unlocked` files under the vendor roots.
+  With rules, destinations must match the layout and `ref` must be the commit.
+- `vendor-lock-verify-remote` reads `repository@commit:source` through the
+  contents / git blobs API and compares both digests; `--upstream` adds the
+  latest upstream commit touching the source (information only);
+  `--first-parent` requires the pin to be on the source default-branch
+  first-parent history (PR-intermediate commits fail);
+  `--check-parent-ref` checks that `parent-pr.ref.json`'s commit equals the
+  PR's `merge_commit_sha` (merged into the default branch) or `head.sha`
+  (open) and that `repository_id` matches.
+- `vendor-plan` decides `place` or `skip` in a fixed order: pinned 40-hex
+  commit, deny list, upstream exists, standard library only, no relative
+  imports (single file), imported by this project, LICENSE sidecar, then the
+  destination from the layout or an override with a reason.
+- `vendor-matrix` reads every repository's lock (default branch) and reports
+  edges, placement roots per consumer, and `pin_mismatch` (one upstream source
+  pinned at different commits).
+
+`vendor-rules/1` (all fields optional except `schema`; defaults shown):
+
+```json
+{"schema": "vendor-rules/1",
+ "root": "vendor",
+ "require": {"stdlib_only": true, "single_file": true, "imported_by_project": true,
+             "pinned_commit": true, "license_sidecar": true, "unmodified_bytes": true},
+ "layout": {"module": "{root}/{basename}", "license": "{root}/{repo}-LICENSE"},
+ "deny_sources": [],
+ "overrides": [{"repository": "OWNER/REPO", "source": "PATH", "destination": "PATH", "reason": "why"}]}
+```
+
+## Duplicate files across repositories (`duplicate-files`)
+
+```bash
+python gh_identity.py duplicate-files --owner OWNER [--repos a,b] [--ignore GLOB ...] [--no-default-ignore] \
+  [--include-forks] [--min-repos 2] [--markdown [--top 30]]
+```
+
+Read-only. Repositories are always listed through the API for the user
+(`users/OWNER/repos?type=owner`, so organization repositories are excluded) and
+filtered explicitly: `visibility == public`, `archived == false`, forks
+excluded unless `--include-forks`. Non-public names, including failures to
+read them, are counted as `redacted` and never printed. `--repos` overrides
+the list. `--heads child-heads.json` scans the recorded main SHAs. Each default
+branch tree is read once (no blobs), files are grouped by basename (common
+names such as `README.md`, `LICENSE`, `__init__.py`, `conftest.py`,
+`pyproject.toml`, `.gitignore`, images and workflow names are ignored by
+default), and for each copy:
+
+- `provenance`: the `vendor-lock/1` entry whose `destination` is the file
+  (`repository`, `source`, `commit`, `lock_blob_sha`), otherwise `null`;
+- `origin` / `consumers`: some scanned lock points to this file;
+- `stale`: the pinned blob differs from the upstream file on its default
+  branch (`null` when the upstream was not scanned);
+- `matches_lock`: the copy still has the pinned blob.
+
+Groups carry `warnings` (`content_differs`, `unknown_provenance`, `stale_pin`,
+`modified_after_lock`); `counts` summarizes null provenance and stale pins. `--markdown` prints a
+summary table of the top groups for `$GITHUB_STEP_SUMMARY`.
+`enrollment-progress --owner OWNER` reports, for each public consumer, whether
+`provider:source` (default `myon-bioinformatics/gh_identity:gh_identity.py`) is
+in its vendor lock, the pin, whether it is stale, and whether the pin is on the
+provider's first-parent history.
+`subtree-sync-status --mainline main` also reports `source_on_first_parent`.
+`vendor-lock-check` and `vendor-lock-verify-remote` also accept `--ci-check`
+(exit 1 unless ok; with `--upstream`, also when upstream moved) and
+`--markdown` (a table for `$GITHUB_STEP_SUMMARY`).
+
+## Pin audit (`pin-audit`)
+
+```bash
+python gh_identity.py pin-audit [--root .] [--json GLOB ...] [--only OWNER] [--remote-base https://github.com/] [--text]
+```
+
+Read-only. Collects commit pins from workflow `uses: OWNER/REPO@sha` and
+checkout `repository:`+`ref:`, and from JSON objects with `repository`+`commit`
+(vendor.lock.json, parent-pr.ref.json, child-heads.json, publication.json).
+Each distinct (repository, commit) is checked with plain git against the public
+remote (no API token; credential helpers disabled): a temporary bare repository
+fetches the default branch with `--filter=blob:none` (full history, no file
+contents — a shallow fetch cannot prove ancestry). States:
+
+* `ok`        on the default-branch first-parent line (`+N` since the pin);
+* `not_final` merged, but a PR head was pinned — `final` is the merge commit to pin;
+* `drift`     pinned source files differ between the pin and the default-branch tip;
+* `unmerged`  not reachable from the default branch;
+* `unavailable` the remote could not be read without credentials (name redacted).
+
+Exit 0 when every pin is `ok`, else 1. Generic: any repository. Parent-specific
+lock / catalog / materialize / auto-fix stay in the parent `vendor_sync.py`.
+
+## GitHub identity (`repo-identity`, `owner-repositories`, `pr-identity`, `commit-pulls`, `first-parent`)
+
+```bash
+python gh_identity.py repo-identity OWNER/REPO
+python gh_identity.py owner-repositories OWNER [--kind auto|user|org] [--include-forks] [--include-archived]
+python gh_identity.py pr-identity OWNER/REPO NUMBER
+python gh_identity.py commit-pulls OWNER/REPO SHA
+python gh_identity.py first-parent OWNER/REPO SHA [--exact] [--branch main]
+```
+
+Read-only, generic (no hard-coded repository names). Public archived repositories
+are returned with `archived: true`; non-public repositories are
+rejected (`not_public`) or omitted from lists. `owner-repositories` fetches at
+most `max_pages` pages and reports `complete` / `pages_fetched` / `truncated_reason`. `first-parent --exact` uses a
+temporary bare fetch with `--filter=blob:none` and disabled credential helpers
+(same method as `pin-audit`); without `--exact` the commits API is used and may
+return `null` when history is longer than the page budget. Tests can replace the
+HTTP layer with `with gh_identity.request_stub(handler): ...`.
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash
