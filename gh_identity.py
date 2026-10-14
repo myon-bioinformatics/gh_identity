@@ -4182,13 +4182,41 @@ def commit_pulls(repository, sha, *, transport="auto", timeout=30):
             "pulls": pulls}
 
 
+_GIT_NO_CREDENTIALS = ("-c", "credential.helper=", "-c", "core.askPass=", "-c", "http.extraHeader=")
+
+
+def _default_git_runner(args, cwd, timeout=300):
+    """Run `git <args>` in cwd with gh_identity's sanitized git (no shell). Returns (code, stdout)."""
+    raw, _, code = _git_run(cwd, list(args), max_bytes=64 * 1024 * 1024, ok=tuple(range(256)), timeout=timeout)
+    return code, raw
+
+
+def _validate_remote(remote):
+    if not isinstance(remote, str) or not remote or "\n" in remote or remote.startswith("-"):
+        raise ValueError("invalid remote")
+    if remote.startswith("/"):
+        return remote
+    parts = urllib.parse.urlsplit(remote)
+    if parts.scheme not in ("https", "file"):
+        raise ValueError("remote must be https://, file:// or an absolute path")
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise ValueError("remote must not carry credentials")
+    return remote
+
+
 def first_parent_check(repository, commit, *, branch=None, exact=False, transport="auto", timeout=30,
-                       max_pages=10, remote_base="https://github.com/"):
+                       max_pages=10, remote_base="https://github.com/", remote=None, git_runner=None):
     """Whether `commit` is on the default-branch (or `branch`) first-parent history.
 
     exact=False uses the commits API (may return None when history is longer than
     max_pages). exact=True uses a temporary bare fetch with --filter=blob:none and
-    no credentials (same method as pin-audit); True/False only.
+    credential helpers disabled; True/False only.
+
+    remote: full remote URL/path (default remote_base + repository). URLs carrying
+    credentials are rejected; tokens never appear in git arguments.
+    git_runner(args, cwd) -> (returncode, stdout_bytes): replaces how git is run
+    (e.g. a caller's own sanitized subprocess, or an offline test double).
+    Raises Error("git_remote_unavailable") when the remote or branch cannot be fetched.
     """
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("commit must be 40 hex")
@@ -4197,27 +4225,41 @@ def first_parent_check(repository, commit, *, branch=None, exact=False, transpor
         result = _first_parent_contains(r, commit, branch=branch, transport=transport, timeout=timeout, max_pages=max_pages)
         return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
                 "branch": branch, "exact": False, "contains": result, "reason": None if result is not None else "history_truncated"}
-    if not isinstance(remote_base, str) or not remote_base.startswith(("https://", "file://", "/")):
-        raise ValueError("remote_base must be https://, file:// or an absolute path")
-    with tempfile.TemporaryDirectory(prefix="ghi-fp-") as bare:
-        subprocess.run(["git", "init", "-q", "--bare", bare], check=True, capture_output=True, timeout=60)
-        nocred = ["-c", "credential.helper=", "-c", "http.extraHeader="]
-        def git(*args, ok=(0,)):
-            raw, _, code = _git_run(bare, [*nocred, *args], max_bytes=64 * 1024 * 1024, ok=ok, timeout=timeout)
-            return _git_decode(raw), code
+    if remote is None:
+        if not isinstance(remote_base, str) or not remote_base.startswith(("https://", "file://", "/")):
+            raise ValueError("remote_base must be https://, file:// or an absolute path")
         remote = remote_base + r
-        head, _ = git("ls-remote", "--symref", "--", remote, "HEAD")
+    remote = _validate_remote(remote)
+    if branch is not None and (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or branch.startswith("-")):
+        raise ValueError("invalid branch")
+    if git_runner is None:
+        git_runner = lambda args, cwd: _default_git_runner(args, cwd, timeout=timeout)
+    if not callable(git_runner):
+        raise TypeError("git_runner must be callable")
+    def result(contains, reason, branch):
+        return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
+                "branch": branch, "exact": True, "contains": contains, "reason": reason}
+    with tempfile.TemporaryDirectory(prefix="ghi-fp-") as bare:
+        def git(*args):
+            code, out = git_runner([*_GIT_NO_CREDENTIALS, *args], bare)
+            return code, (out or b"").decode("utf-8", "replace")
+        if git("init", "-q", "--bare")[0] != 0:
+            raise Error("git_failed")
+        code, head = git("ls-remote", "--symref", "--", remote, "HEAD")
+        if code != 0:
+            raise Error("git_remote_unavailable")
         m = re.search(r"ref: refs/heads/(\S+)\s+HEAD", head)
         branch = branch or (m.group(1) if m else "main")
-        git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, f"+refs/heads/{branch}:refs/heads/{branch}")
-        if git("cat-file", "-e", commit + "^{commit}", ok=(0, 1, 128))[1] != 0:
-            if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, commit, ok=(0, 1, 128))[1] != 0:
-                return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
-                        "branch": branch, "exact": True, "contains": False, "reason": "commit_not_found"}
-        listed = set(git("rev-list", "--first-parent", branch)[0].split())
-        return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
-                "branch": branch, "exact": True, "contains": commit in listed, "reason": None}
-
+        if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote,
+               f"+refs/heads/{branch}:refs/heads/{branch}")[0] != 0:
+            raise Error("git_remote_unavailable")
+        if git("cat-file", "-e", commit + "^{commit}")[0] != 0:
+            if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, commit)[0] != 0:
+                return result(False, "commit_not_found", branch)
+        code, listed = git("rev-list", "--first-parent", f"refs/heads/{branch}")
+        if code != 0:
+            raise Error("git_failed")
+        return result(commit in set(listed.split()), None, branch)
 
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
@@ -4640,7 +4682,9 @@ def main(argv=None):
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews","inline_comments","review_threads","review_observations",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
-              "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file"):
+              "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
+              "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
+              "enrollment_progress","repo_identity","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
  globals()[_name]=_bounded(globals()[_name])
 if __name__=="__main__":
  raise SystemExit(_http_worker() if sys.argv[1:]==["--_http-worker"] else
