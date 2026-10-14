@@ -919,7 +919,7 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
 
 ```bash
 python gh_identity.py duplicate-files --owner OWNER [--repos a,b] [--ignore GLOB ...] [--no-default-ignore] \
-  [--include-forks] [--min-repos 2]
+  [--include-forks] [--min-repos 2] [--markdown [--top 30]]
 ```
 
 Read-only. Repositories are always listed through the API for the user
@@ -939,8 +939,9 @@ default), and for each copy:
 - `matches_lock`: the copy still has the pinned blob.
 
 Groups carry `warnings` (`content_differs`, `unknown_provenance`, `stale_pin`,
-`modified_after_lock`); `counts` summarizes null provenance and stale pins.
-`vendor-lock-check` and `vendor-lock-verify-remote` also accept `--check`
+`modified_after_lock`); `counts` summarizes null provenance and stale pins. `--markdown` prints a
+summary table of the top groups for `$GITHUB_STEP_SUMMARY`.
+`vendor-lock-check` and `vendor-lock-verify-remote` also accept `--ci-check`
 (exit 1 unless ok; with `--upstream`, also when upstream moved) and
 `--markdown` (a table for `$GITHUB_STEP_SUMMARY`).
 

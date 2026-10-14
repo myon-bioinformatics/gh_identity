@@ -128,8 +128,15 @@ def test_markdown_and_check_exit(tmp_path):
     (tmp_path / "vendor" / "m.py").write_bytes(data)
     (tmp_path / "vendor.lock.json").write_text(json.dumps({"schema": "vendor-lock/1", "files": [entry("vendor/m.py", data, source="m.py")]}))
     cli = [sys.executable, str(Path(g.__file__)), "vendor-lock-check", "--root", str(tmp_path)]
-    p = subprocess.run(cli + ["--markdown", "--check"], capture_output=True, text=True)
+    p = subprocess.run(cli + ["--markdown", "--ci-check"], capture_output=True, text=True)
     assert p.returncode == 0 and p.stdout.startswith("### gh-identity-vendor-check/1: ok") and "| vendor/m.py | ok |" in p.stdout
     (tmp_path / "vendor" / "m.py").write_bytes(b"changed\n")
-    assert subprocess.run(cli + ["--check"], capture_output=True).returncode == 1
+    assert subprocess.run(cli + ["--ci-check"], capture_output=True).returncode == 1
     assert subprocess.run(cli, capture_output=True).returncode == 0
+
+
+def test_duplicates_markdown():
+    out, _ = run()
+    md = g.render_duplicates_markdown(out, top=5)
+    assert md.startswith("### Duplicate files (me): 3 repositories")
+    assert "| tool.py | 3 | 3 | 2 | 1 | up | content_differs unknown_provenance stale_pin |" in md
