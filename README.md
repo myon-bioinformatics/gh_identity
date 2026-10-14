@@ -1289,3 +1289,10 @@ so the local inspection/config-isolation behavior is unchanged.
 **CLI migration:** scripts that previously parsed `git-status` JSON must add
 `--json`. The Python `git_status()` API and its structured return value are
 unchanged.
+
+`duplicate-files` rejects truncated trees and failed tree/lock reads, excluding
+the entire affected repository from aggregation. JSON `complete` is false,
+`errors` identifies failures, and counts cover `complete_repositories_only`.
+Markdown explicitly warns that the report is incomplete. Both output formats
+exit 1 on incomplete scans (exit 0 on complete scans); excluded nonpublic
+repositories are outside the scan scope.
