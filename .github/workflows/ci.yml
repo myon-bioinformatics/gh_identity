@@ -6,6 +6,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10","3.11","3.12","3.13","3.14","3.x"]
     steps:
@@ -30,5 +31,18 @@ jobs:
         with:
           name: junit-py${{ matrix.python-version }}
           path: reports/junit.xml
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
+
+  failure-identity:
+    needs: test
+    if: always()
+    permissions:
+      contents: read
+      actions: read
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-junit-identity.yml@652608b16c73ecd1e39db848abba3d08a00a8a3a
+    with:
+      expected-reports: '["junit-py3.10/junit.xml","junit-py3.11/junit.xml","junit-py3.12/junit.xml","junit-py3.13/junit.xml","junit-py3.14/junit.xml","junit-py3.x/junit.xml"]'
+      artifact-pattern: junit-*
+      output-artifact: failure-identity
+      commit-sha: ${{ github.event.pull_request.head.sha || github.sha }}
