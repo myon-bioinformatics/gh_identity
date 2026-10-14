@@ -1065,7 +1065,7 @@ def tree(r,ref="main",*,depth=1,exclude_dirs=(),exclude_files=(),transport="auto
   if d["sha"] in ancestors:raise Error("invalid_tree_cycle")
   if root_sha is None:root_sha=d["sha"]
   entries=d.get("tree")
-  if not isinstance(entries,list):raise Error("invalid_tree_response")
+  if not isinstance(entries,list) or type(d.get("truncated")) is not bool:raise Error("invalid_tree_response")
   _BUDGET.get().charge("items",len(entries))
   truncated=truncated or d["truncated"];seen=set()
   for entry in entries:
@@ -3560,7 +3560,7 @@ def _repo_tree(full, branch, transport, timeout):
     if not isinstance(head, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(head.get("sha"))):
         raise Error("invalid_commit")
     d = request("GET", f"repos/{full}/git/trees/{head['sha']}?recursive=1", transport=transport, timeout=timeout)
-    if not isinstance(d, dict) or not isinstance(d.get("tree"), list) or type(d.get("truncated")) is not bool:
+    if not isinstance(d, dict) or not isinstance(d.get("tree"), list):
         raise Error("invalid_tree_response")
     files = {e["path"]: e["sha"] for e in d["tree"] if isinstance(e, dict) and e.get("type") == "blob"
              and e.get("mode") in ("100644", "100755") and isinstance(e.get("path"), str) and isinstance(e.get("sha"), str)}
