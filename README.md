@@ -875,6 +875,46 @@ repository (`inbound_refs`, with file and line), references from `DIR` to the
 rest (`outbound_refs`), third-party imports inside `DIR`, and `checks` with an
 overall `ok`. Imports are parsed with `ast`, never executed.
 
+## Vendored files (`vendor-lock-check`, `vendor-lock-verify-remote`, `vendor-plan`, `vendor-matrix`)
+
+All read-only; nothing is placed, updated or committed.
+
+```bash
+python gh_identity.py vendor-lock-check [--root .] [--lock vendor.lock.json] [--rules vendor-rules.json]
+python gh_identity.py vendor-lock-verify-remote [--root .] [--lock vendor.lock.json] [--upstream]
+python gh_identity.py vendor-plan [--root .] [--rules vendor-rules.json] --candidate OWNER/REPO:PATH@SHA [...]
+python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lock.json ...]
+```
+
+- The lock is `vendor-lock/1`, validated exactly like Ironmate `vendor/vendor_sync.py`
+  (`repository, ref, commit, source, destination, blob_sha, sha256`).
+- `vendor-lock-check` hashes each destination: `ok`, `missing`,
+  `digest_mismatch`, `header_modified` (only leading `#` lines were added, which
+  breaks byte identity), `symlink`, and `unlocked` files under the vendor roots.
+  With rules, destinations must match the layout and `ref` must be the commit.
+- `vendor-lock-verify-remote` reads `repository@commit:source` through the
+  contents / git blobs API and compares both digests; `--upstream` adds the
+  latest upstream commit touching the source (information only).
+- `vendor-plan` decides `place` or `skip` in a fixed order: pinned 40-hex
+  commit, deny list, upstream exists, standard library only, no relative
+  imports (single file), imported by this project, LICENSE sidecar, then the
+  destination from the layout or an override with a reason.
+- `vendor-matrix` reads every repository's lock (default branch) and reports
+  edges, placement roots per consumer, and `pin_mismatch` (one upstream source
+  pinned at different commits).
+
+`vendor-rules/1` (all fields optional except `schema`; defaults shown):
+
+```json
+{"schema": "vendor-rules/1",
+ "root": "vendor",
+ "require": {"stdlib_only": true, "single_file": true, "imported_by_project": true,
+             "pinned_commit": true, "license_sidecar": true, "unmodified_bytes": true},
+ "layout": {"module": "{root}/{basename}", "license": "{root}/{repo}-LICENSE"},
+ "deny_sources": [],
+ "overrides": [{"repository": "OWNER/REPO", "source": "PATH", "destination": "PATH", "reason": "why"}]}
+```
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash
