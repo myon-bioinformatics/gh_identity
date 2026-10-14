@@ -984,6 +984,23 @@ contents — a shallow fetch cannot prove ancestry). States:
 Exit 0 when every pin is `ok`, else 1. Generic: any repository. Parent-specific
 lock / catalog / materialize / auto-fix stay in the parent `vendor_sync.py`.
 
+## GitHub identity (`repo-identity`, `owner-repositories`, `pr-identity`, `commit-pulls`, `first-parent`)
+
+```bash
+python gh_identity.py repo-identity OWNER/REPO
+python gh_identity.py owner-repositories OWNER [--kind auto|user|org] [--include-forks] [--include-archived]
+python gh_identity.py pr-identity OWNER/REPO NUMBER
+python gh_identity.py commit-pulls OWNER/REPO SHA
+python gh_identity.py first-parent OWNER/REPO SHA [--exact] [--branch main]
+```
+
+Read-only, generic (no hard-coded repository names). Non-public repositories are
+rejected (`not_public`) or omitted from lists. `first-parent --exact` uses a
+temporary bare fetch with `--filter=blob:none` and disabled credential helpers
+(same method as `pin-audit`); without `--exact` the commits API is used and may
+return `null` when history is longer than the page budget. Tests can replace the
+HTTP layer with `with gh_identity.request_stub(handler): ...`.
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash
