@@ -1065,7 +1065,7 @@ def tree(r,ref="main",*,depth=1,exclude_dirs=(),exclude_files=(),transport="auto
   if d["sha"] in ancestors:raise Error("invalid_tree_cycle")
   if root_sha is None:root_sha=d["sha"]
   entries=d.get("tree")
-  if not isinstance(entries,list) or type(d.get("truncated")) is not bool:raise Error("invalid_tree_response")
+  if not isinstance(entries,list):raise Error("invalid_tree_response")
   _BUDGET.get().charge("items",len(entries))
   truncated=truncated or d["truncated"];seen=set()
   for entry in entries:
@@ -3564,7 +3564,7 @@ def _repo_tree(full, branch, transport, timeout):
         raise Error("invalid_tree_response")
     files = {e["path"]: e["sha"] for e in d["tree"] if isinstance(e, dict) and e.get("type") == "blob"
              and e.get("mode") in ("100644", "100755") and isinstance(e.get("path"), str) and isinstance(e.get("sha"), str)}
-    return head["sha"], files, bool(d.get("truncated"))
+    return head["sha"], files, d.get("truncated")
 
 
 def _repo_lock(full, ref, paths, lock_paths, transport, timeout):
@@ -3596,6 +3596,8 @@ def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=
         full = repo(f"{owner}/{t['name']}")
         try:
             sha, files, truncated = _repo_tree(full, (heads or {}).get(full) or t["default_branch"] or "HEAD", transport, timeout)
+            if type(truncated) is not bool:
+                raise Error("invalid_tree_response")
             if truncated:
                 raise Error("truncated_tree")
             lp, lock = _repo_lock(full, sha, files, lock_paths, transport, timeout)
@@ -3865,8 +3867,6 @@ def enrollment_progress(owner, *, provider="myon-bioinformatics/gh_identity", so
         ref = (heads or {}).get(full) or t["default_branch"] or "HEAD"
         try:
             sha, files, _ = _repo_tree(full, ref, transport, timeout)
-            if truncated:
-                raise Error("truncated_tree")
             lp, lock = _repo_lock(full, sha, files, lock_paths, transport, timeout)
         except (Error, ValueError, json.JSONDecodeError):
             errors += 1
