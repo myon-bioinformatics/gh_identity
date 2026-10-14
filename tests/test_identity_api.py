@@ -49,11 +49,11 @@ def test_list_owner_repositories_user_and_org():
             {"full_name": "me/secret", "visibility": "private", "private": True},
             {"full_name": "me/old", "visibility": "public", "archived": True},
             {"full_name": "me/fork", "visibility": "public", "fork": True, "archived": False}]
-    with patch.object(g, "pages", return_value=user) as pages:
+    with patch.object(g, "pages_bounded", return_value=(user, True, 1)) as pages:
         out = g.list_owner_repositories("me", kind="user")
     assert pages.call_args.args[0].startswith("users/me/repos")
     assert [r["full_name"] for r in out["repositories"]] == ["me/a"] and out["count"] == 1
-    with patch.object(g, "pages", return_value=user) as pages:
+    with patch.object(g, "pages_bounded", return_value=(user, True, 1)) as pages:
         out = g.list_owner_repositories("me", kind="org", include_forks=True, include_archived=True)
     assert pages.call_args.args[0].startswith("orgs/me/repos") and out["count"] == 3
 
@@ -62,8 +62,8 @@ def test_list_owner_auto_falls_back_to_org():
     def pages(path, *a, **k):
         if path.startswith("users/"):
             raise g.Error("not_found_or_inaccessible")
-        return [{"full_name": "org/x", "id": 9, "visibility": "public", "archived": False, "fork": False}]
-    with patch.object(g, "pages", side_effect=pages):
+        return [{"full_name": "org/x", "id": 9, "visibility": "public", "archived": False, "fork": False}], True, 1
+    with patch.object(g, "pages_bounded", side_effect=pages):
         out = g.list_owner_repositories("org", kind="auto")
     assert out["kind"] == "orgs" and out["repositories"][0]["full_name"] == "org/x"
 
@@ -139,3 +139,32 @@ def test_cli_repo_identity():
                             " print(g.repo_identity('me/pub')['head'])"],
                            capture_output=True, text=True)
         assert p.returncode == 0 and p.stdout.strip() == M3
+
+
+def test_list_owner_repositories_max_pages_truncates():
+    calls = []
+    def page(path, transport, timeout, requester):
+        calls.append(path)
+        return ([{"full_name": f"me/r{len(calls)}", "id": len(calls), "visibility": "public",
+                  "archived": False, "fork": False}] * 1, {"link": '<https://api.github.com/x?page=2>; rel="next"'})
+    with patch.object(g, "_page", side_effect=page), \
+         patch.object(g, "_next_page", side_effect=lambda p, h, n: p + "&more"):
+        out = g.list_owner_repositories("me", kind="user", max_pages=1)
+    assert len(calls) == 1
+    assert out["complete"] is False and out["pages_fetched"] == 1 and out["truncated_reason"] == "max_pages"
+    with patch.object(g, "_page", return_value=([], {})), patch.object(g, "_next_page", return_value=None):
+        out = g.list_owner_repositories("me", kind="user", max_pages=1)
+    assert out["complete"] is True and out["truncated_reason"] is None
+    with pytest.raises(ValueError):
+        g.list_owner_repositories("me", kind="user", max_pages=0)
+
+
+def test_repo_identity_public_archived_allowed():
+    def fake(method, path, **kw):
+        if path == "repos/me/old":
+            return {"id": 3, "visibility": "public", "private": False, "archived": True, "fork": False,
+                    "default_branch": "main", "owner": {"type": "User"}}
+        return {"sha": M3}
+    with g.request_stub(fake):
+        out = g.repo_identity("me/old")
+    assert out["archived"] is True and out["repository_id"] == 3 and out["head"] == M3

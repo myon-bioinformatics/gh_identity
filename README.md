@@ -994,8 +994,10 @@ python gh_identity.py commit-pulls OWNER/REPO SHA
 python gh_identity.py first-parent OWNER/REPO SHA [--exact] [--branch main]
 ```
 
-Read-only, generic (no hard-coded repository names). Non-public repositories are
-rejected (`not_public`) or omitted from lists. `first-parent --exact` uses a
+Read-only, generic (no hard-coded repository names). Public archived repositories
+are returned with `archived: true`; non-public repositories are
+rejected (`not_public`) or omitted from lists. `owner-repositories` fetches at
+most `max_pages` pages and reports `complete` / `pages_fetched` / `truncated_reason`. `first-parent --exact` uses a
 temporary bare fetch with `--filter=blob:none` and disabled credential helpers
 (same method as `pin-audit`); without `--exact` the commits API is used and may
 return `null` when history is longer than the page budget. Tests can replace the

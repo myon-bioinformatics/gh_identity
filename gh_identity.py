@@ -236,6 +236,18 @@ def pages(path,transport="auto",timeout=30,*,requester=None):
   _BUDGET.get().charge("items",len(data));out.extend(data)
   path=_next_page(path,headers,len(data))
  return out
+def pages_bounded(path,transport="auto",timeout=30,*,max_pages=20,requester=None):
+ """Like pages() but stops after max_pages; returns (items, complete, pages_fetched)."""
+ if type(max_pages) is not int or max_pages<1:raise ValueError("max_pages must be positive")
+ out=[];n=0;sep="&" if "?" in path else "?";path+=sep+"per_page=100&page=1"
+ while path:
+  if n>=max_pages:return out,False,n
+  data,headers=_page(path,transport,timeout,requester);n+=1
+  if not isinstance(data,list):raise Error("invalid_json")
+  b=_BUDGET.get()
+  if b is not None:b.charge("items",len(data))
+  out.extend(data);path=_next_page(path,headers,len(data))
+ return out,True,n
 def capabilities():
  versions=tool_versions(("git","gh"))
  return {"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],
@@ -4062,7 +4074,7 @@ def request_stub(handler):
 
 
 def repo_identity(repository, *, transport="auto", timeout=30):
-    """Public repository identity: id, visibility, archived, fork, default branch, head SHA.
+    """Repository identity (public, including archived): id, visibility, archived, fork, default branch, head SHA.
 
     Non-public repositories raise Error(not_public). Read-only.
     """
@@ -4071,7 +4083,7 @@ def repo_identity(repository, *, transport="auto", timeout=30):
     if not isinstance(d, dict):
         raise Error("invalid_repository")
     visibility = d.get("visibility") or ("private" if d.get("private") else "public")
-    if visibility != "public" or d.get("private") or d.get("archived") is True:
+    if visibility != "public" or d.get("private"):
         raise Error("not_public")
     branch = d.get("default_branch")
     if not isinstance(branch, str) or not branch:
@@ -4089,6 +4101,8 @@ def list_owner_repositories(owner, *, kind="auto", include_forks=False, include_
     """List repositories for a user or organization (public only by default).
 
     kind: auto (try /users then /orgs), user, or org. No hard-coded names.
+    At most max_pages pages are fetched; `complete` is False (truncated_reason
+    "max_pages") when more pages remained.
     """
     if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
         raise ValueError("invalid owner")
@@ -4098,9 +4112,10 @@ def list_owner_repositories(owner, *, kind="auto", include_forks=False, include_
              "org": [f"orgs/{owner}/repos?type=all&sort=full_name"],
              "auto": [f"users/{owner}/repos?type=owner&sort=full_name", f"orgs/{owner}/repos?type=all&sort=full_name"]}[kind]
     rows, source, seen = [], None, set()
+    complete, fetched = True, 0
     for base in bases:
         try:
-            page = pages(base, transport, timeout)
+            page, complete, fetched = pages_bounded(base, transport, timeout, max_pages=max_pages)
         except Error as e:
             if e.code in _NOT_FOUND_CODES and kind == "auto":
                 continue
@@ -4124,7 +4139,8 @@ def list_owner_repositories(owner, *, kind="auto", include_forks=False, include_
         if rows or kind != "auto":
             break
     return {"schema": "gh-identity-owner-repositories/1", "write": False, "owner": owner, "kind": source or kind,
-            "count": len(rows), "repositories": rows}
+            "count": len(rows), "complete": complete, "pages_fetched": fetched,
+            "truncated_reason": None if complete else "max_pages", "repositories": rows}
 
 
 def pr_identity(repository, number, *, transport="auto", timeout=30):
