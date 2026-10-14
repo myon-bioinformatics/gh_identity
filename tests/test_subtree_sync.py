@@ -176,3 +176,25 @@ def test_cli(mono, tmp_path):
     p = run("sync-provenance", "--root", str(mono), "--prefix", "sub", "--other-root", str(other), "--output-dir", str(tmp_path / "o"))
     assert p.returncode == 0, p.stderr
     assert (tmp_path / "o" / "sync-provenance.json").exists()
+
+
+@pytest.mark.parametrize("call", [
+    lambda m: g.subtree_sync_status(m, "--rejoin", m),
+    lambda m: g.subtree_sync_status(m, "sub", m, other_ref="--all"),
+    lambda m: g.subtree_sync_status(m, "sub", m, revision="--all"),
+    lambda m: g.subtree_sync_status(m, "sub", m, other_ref="missing-ref"),
+    lambda m: g.sync_provenance(m, "sub", m, other_ref="--all"),
+    lambda m: g.git_subtree_split(m, "--rejoin"),
+    lambda m: g.split_preflight(m, "--rejoin"),
+])
+def test_bad_input_rejected_without_git_subtree(mono, monkeypatch, call):
+    """Input validation must not depend on whether git subtree is installed."""
+    monkeypatch.setattr(g, "_git_subtree_available", lambda root: False)
+    with pytest.raises(ValueError):
+        call(mono)
+
+
+def test_unavailable_subtree_still_reports_other_head(mono, monkeypatch):
+    monkeypatch.setattr(g, "_git_subtree_available", lambda root: False)
+    out = g.subtree_sync_status(mono, "sub", mono)
+    assert out["reason"] == "subtree_unavailable" and len(out["other_head"]) == 40

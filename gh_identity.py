@@ -2897,12 +2897,16 @@ def subtree_sync_status(root=".", prefix=None, other_root=None, *, revision="HEA
     patterns = tuple(other_only_paths or ())
     if any(not isinstance(p, str) or not p for p in patterns):
         raise ValueError("invalid other_only_paths")
+    # Validate every input before the git-subtree availability check so bad
+    # arguments are rejected the same way whether or not git subtree exists.
+    _subtree_prefix(prefix)
+    _rev_commit(root, revision)
+    other_head = _rev_commit(other_root, other_ref)
     split = git_subtree_split(root, prefix, revision, timeout=timeout)
     base = {"schema": "gh-identity-subtree-sync/1", "prefix": split["prefix"], "write": False,
             "source": split["source"], "split_sha": split["sha"]}
     if split["reason"]:
-        return {**base, "state": None, "reason": split["reason"]}
-    other_head = _rev_commit(other_root, other_ref)
+        return {**base, "state": None, "reason": split["reason"], "other_head": other_head}
     mono = _rev_list(root, split["sha"])
     other = _rev_list(other_root, other_head)
     mono_set, other_set = set(mono), set(other)
@@ -2959,6 +2963,8 @@ def sync_provenance(root=".", prefix=None, other_root=None, *, revision="HEAD", 
     """
     if direction not in (None, "push", "pull"):
         raise ValueError("direction must be push or pull")
+    if generated_at is not None and not isinstance(generated_at, str):
+        raise ValueError("generated_at must be a string")
     status = subtree_sync_status(root, prefix, other_root, revision=revision, other_ref=other_ref,
                                  other_only_paths=other_only_paths, timeout=timeout)
     def ident(path, sha):
