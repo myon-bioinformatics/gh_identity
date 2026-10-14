@@ -3,7 +3,40 @@ on:
   push:
   pull_request:
 jobs:
+  vendor-locked:
+    name: Vendor locked baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Fetch pinned shared vendor tool
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: myon-bioinformatics/myon-bioinformatics
+          ref: f907560c2b9b3f7a0f78f4434f547f91cb2ef954
+          path: .vendor-sync-tools
+          persist-credentials: false
+      - name: Verify and recreate locked vendor snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -S .vendor-sync-tools/vendor_sync.py check --manifest vendor.lock.json
+          python -S - <<'PY'
+          import json
+          from pathlib import Path
+          for entry in json.loads(Path("vendor.lock.json").read_text(encoding="utf-8"))["files"]:
+              Path(entry["destination"]).unlink()
+          PY
+          python -S .vendor-sync-tools/vendor_sync.py materialize --manifest vendor.lock.json
+          python -S .vendor-sync-tools/vendor_sync.py check --manifest vendor.lock.json
+
   test:
+    needs: vendor-locked
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
