@@ -1990,7 +1990,7 @@ def compare_sha(local,remote_sha):
 
 # Local Git observations migrated from parent git_inspector.py (380d877).
 # Named read-only operations, bounded output; trusted checkout configuration.
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 class GitInspectionError(RuntimeError):
     """A bounded read-only Git observation failed."""
@@ -3117,6 +3117,375 @@ def split_preflight(root=".", prefix=None, revision="HEAD", *, timeout=600, max_
             "checks": checks, "ok": all(c["ok"] for c in checks), "reason": split["reason"]}
 
 
+VENDOR_LOCK_SCHEMA = "vendor-lock/1"
+VENDOR_RULES_SCHEMA = "vendor-rules/1"
+_NOT_FOUND_CODES = ("not_found_or_inaccessible", "gh_not_found", "not_found", "http_404")
+_VENDOR_FIELDS = {"repository", "ref", "commit", "source", "destination", "blob_sha", "sha256"}
+
+
+def git_blob_sha(data):
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+
+def _vendor_path(value):
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        raise ValueError("expected a relative POSIX path")
+    parts = value.split("/")
+    if any(p in ("", ".", "..", ".git") for p in parts) or any(ord(c) < 32 for c in value):
+        raise ValueError("unsafe path: " + value)
+    return value
+
+
+def validate_vendor_lock(lock):
+    """vendor-lock/1 validation, compatible with Ironmate vendor/vendor_sync.py."""
+    if not isinstance(lock, dict) or set(lock) != {"schema", "files"} or lock["schema"] != VENDOR_LOCK_SCHEMA:
+        raise ValueError("expected vendor-lock/1")
+    if not isinstance(lock["files"], list) or not lock["files"]:
+        raise ValueError("files must be a nonempty list")
+    seen = set()
+    for item in lock["files"]:
+        if not isinstance(item, dict) or set(item) != _VENDOR_FIELDS:
+            raise ValueError("invalid file fields")
+        if not isinstance(item["repository"], str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", item["repository"]) \
+                or any(p in (".", "..") for p in item["repository"].split("/")):
+            raise ValueError("expected owner/repository")
+        _vendor_path(item["ref"]); _vendor_path(item["source"])
+        dest = _vendor_path(item["destination"]).casefold()
+        if dest in seen:
+            raise ValueError("duplicate destination")
+        seen.add(dest)
+        for key, n in (("commit", 40), ("blob_sha", 40), ("sha256", 64)):
+            if not isinstance(item[key], str) or not re.fullmatch(f"[0-9a-f]{{{n}}}", item[key]):
+                raise ValueError("invalid " + key)
+    for d in seen:
+        if any(d.startswith(o + "/") for o in seen if o != d):
+            raise ValueError("overlapping destinations")
+    return lock
+
+
+def validate_vendor_rules(rules):
+    """vendor-rules/1: placement rules for vendored single files (see README)."""
+    if not isinstance(rules, dict) or rules.get("schema") != VENDOR_RULES_SCHEMA:
+        raise ValueError("expected vendor-rules/1")
+    allowed = {"schema", "root", "require", "layout", "deny_sources", "overrides"}
+    if set(rules) - allowed:
+        raise ValueError("unknown rules fields: " + ",".join(sorted(set(rules) - allowed)))
+    out = {"root": _vendor_path(rules.get("root", "vendor")),
+           "require": {"stdlib_only": True, "single_file": True, "imported_by_project": True,
+                       "pinned_commit": True, "license_sidecar": True, "unmodified_bytes": True},
+           "layout": {"module": "{root}/{basename}", "license": "{root}/{repo}-LICENSE"},
+           "deny_sources": [], "overrides": []}
+    require = rules.get("require", {})
+    if not isinstance(require, dict) or set(require) - set(out["require"]) or any(type(v) is not bool for v in require.values()):
+        raise ValueError("invalid require")
+    out["require"].update(require)
+    layout = rules.get("layout", {})
+    if not isinstance(layout, dict) or any(not isinstance(v, str) for v in layout.values()):
+        raise ValueError("invalid layout")
+    out["layout"].update(layout)
+    deny = rules.get("deny_sources", [])
+    if not isinstance(deny, list) or any(not isinstance(p, str) or not p for p in deny):
+        raise ValueError("invalid deny_sources")
+    out["deny_sources"] = deny
+    for o in rules.get("overrides", []):
+        if not isinstance(o, dict) or set(o) != {"repository", "source", "destination", "reason"} \
+                or not isinstance(o["reason"], str) or not o["reason"].strip():
+            raise ValueError("override needs repository, source, destination and a reason")
+        _vendor_path(o["source"]); _vendor_path(o["destination"])
+        out["overrides"].append(o)
+    return out
+
+
+def _vendor_destination(rules, repository, source, kind="module"):
+    for o in rules["overrides"]:
+        if kind == "module" and (o["repository"], o["source"]) == (repository, source):
+            return o["destination"], "override"
+    template = rules["layout"].get(kind)
+    if template is None:
+        return None, None
+    name = repository.split("/", 1)[1]
+    dest = template.format(root=rules["root"], basename=source.rsplit("/", 1)[-1], repo=name, source=source)
+    return _vendor_path(dest), "layout"
+
+
+def _load_json_file(path, what):
+    try:
+        with open(path, "rb") as stream:
+            return json.loads(stream.read(8 * 1024 * 1024 + 1))
+    except FileNotFoundError:
+        raise ValueError(what + " not found") from None
+    except json.JSONDecodeError:
+        raise ValueError(what + " is not JSON") from None
+
+
+def _safe_file(root, relative):
+    root = Path(root).resolve()
+    path = root
+    for part in PurePosixPath(_vendor_path(relative)).parts:
+        path = path / part
+        if path.is_symlink():
+            return None, "symlink"
+    if not path.resolve().is_relative_to(root):
+        return None, "outside_root"
+    return path, None
+
+
+def _strip_header(data, max_lines=5):
+    """Candidates with up to max_lines leading '#' comment lines removed (shebang kept)."""
+    lines = data.splitlines(keepends=True)
+    keep = 1 if lines and lines[0].startswith(b"#!") else 0
+    out = []
+    for n in range(1, max_lines + 1):
+        body = lines[keep:keep + n]
+        if len(body) < n or not all(l.lstrip().startswith(b"#") for l in body):
+            break
+        out.append(b"".join(lines[:keep] + lines[keep + n:]))
+    return out
+
+
+def vendor_lock_check(root=".", lock="vendor.lock.json", rules=None):
+    """Compare vendor.lock.json (vendor-lock/1) with the files on disk. Local, read-only."""
+    root_path = Path(root).resolve()
+    lock_path = root_path / lock if not os.path.isabs(lock) else Path(lock)
+    data = validate_vendor_lock(_load_json_file(lock_path, "lock"))
+    parsed = validate_vendor_rules(_load_json_file(Path(root) / rules if not os.path.isabs(rules) else rules, "rules")) \
+        if isinstance(rules, str) else (validate_vendor_rules(rules) if rules is not None else None)
+    rows, violations = [], []
+    for item in data["files"]:
+        row = {"destination": item["destination"], "repository": item["repository"], "source": item["source"],
+               "commit": item["commit"], "rule": None}
+        path, problem = _safe_file(root_path, item["destination"])
+        if problem:
+            row["status"] = problem
+        elif not path.is_file():
+            row["status"] = "missing"
+        else:
+            body = path.read_bytes()
+            if git_blob_sha(body) == item["blob_sha"] and hashlib.sha256(body).hexdigest() == item["sha256"]:
+                row["status"] = "ok"
+            elif any(git_blob_sha(c) == item["blob_sha"] for c in _strip_header(body)):
+                row["status"] = "header_modified"
+            else:
+                row["status"] = "digest_mismatch"
+        if parsed is not None:
+            kind = "license" if item["source"].rsplit("/", 1)[-1].upper().startswith(("LICENSE", "COPYING")) else "module"
+            expected, rule = _vendor_destination(parsed, item["repository"], item["source"], kind)
+            row["rule"] = rule
+            if expected is not None and expected != item["destination"]:
+                violations.append({"destination": item["destination"], "rule": "layout", "expected": expected})
+            if parsed["require"]["pinned_commit"] and item["ref"] != item["commit"]:
+                violations.append({"destination": item["destination"], "rule": "pinned_commit", "expected": item["commit"]})
+        rows.append(row)
+    locked = {r["destination"] for r in rows}
+    roots = {d.rsplit("/", 1)[0] for d in locked if "/" in d}
+    if parsed is not None:
+        roots.add(parsed["root"])
+    for r in sorted(roots):
+        base, problem = _safe_file(root_path, r)
+        if problem or not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            rel = p.relative_to(root_path).as_posix()
+            if p.is_file() and rel not in locked and "__pycache__" not in p.parts and p.suffix != ".pyc" \
+                    and p.name not in ("README.md", ".gitkeep") and not any(rel.startswith(o + "/") for o in locked):
+                rows.append({"destination": rel, "status": "unlocked", "repository": None, "source": None,
+                             "commit": None, "rule": None})
+    ok = all(r["status"] == "ok" for r in rows) and not violations
+    return {"schema": "gh-identity-vendor-check/1", "write": False, "lock": lock_path.relative_to(root_path).as_posix()
+            if lock_path.is_relative_to(root_path) else str(lock_path), "files": rows, "violations": violations,
+            "counts": dict(Counter(r["status"] for r in rows)), "ok": ok}
+
+
+def _remote_file(repository, path, commit, transport="auto", timeout=30, max_bytes=8 * 1024 * 1024):
+    """Bytes of repository@commit:path via the contents and git/blobs API (read-only)."""
+    r = repo(repository)
+    meta = request("GET", f"repos/{r}/contents/{urllib.parse.quote(_vendor_path(path))}?ref={commit}",
+                   transport=transport, timeout=timeout)
+    if not isinstance(meta, dict) or meta.get("type") != "file" or not isinstance(meta.get("sha"), str):
+        raise Error("not_a_file")
+    if not isinstance(meta.get("size"), int) or meta["size"] > max_bytes:
+        raise Error("file_too_large")
+    blob = request("GET", f"repos/{r}/git/blobs/{meta['sha']}", transport=transport, timeout=timeout)
+    if not isinstance(blob, dict) or blob.get("encoding") != "base64":
+        raise Error("invalid_blob")
+    data = base64.b64decode(blob.get("content", ""))
+    if git_blob_sha(data) != meta["sha"]:
+        raise Error("blob_identity_mismatch")
+    return data
+
+
+def _remote_exists(repository, path, commit, transport="auto", timeout=30):
+    try:
+        _remote_file(repository, path, commit, transport, timeout)
+        return True
+    except Error as e:
+        if e.code in _NOT_FOUND_CODES or e.code == "not_a_file":
+            return False
+        raise
+
+
+def vendor_lock_verify_remote(root=".", lock="vendor.lock.json", *, upstream=False, transport="auto", timeout=30):
+    """Check each lock entry against upstream repository@commit:source (read-only network)."""
+    root_path = Path(root).resolve()
+    data = validate_vendor_lock(_load_json_file(root_path / lock if not os.path.isabs(lock) else lock, "lock"))
+    rows = []
+    for item in data["files"]:
+        row = {"destination": item["destination"], "repository": item["repository"], "source": item["source"],
+               "commit": item["commit"]}
+        try:
+            body = _remote_file(item["repository"], item["source"], item["commit"], transport, timeout)
+            blob_ok = git_blob_sha(body) == item["blob_sha"]
+            sha_ok = hashlib.sha256(body).hexdigest() == item["sha256"]
+            row["status"] = "ok" if blob_ok and sha_ok else "digest_mismatch"
+        except Error as e:
+            row["status"] = "unavailable"
+            row["detail"] = e.code
+        if upstream:
+            try:
+                hist = request("GET", f"repos/{repo(item['repository'])}/commits?path={urllib.parse.quote(item['source'])}&per_page=1",
+                               transport=transport, timeout=timeout)
+                head = hist[0]["sha"] if isinstance(hist, list) and hist and isinstance(hist[0], dict) else None
+            except Error:
+                head = None
+            row["upstream_head"] = head
+            row["upstream_changed"] = None if head is None else head != item["commit"]
+        rows.append(row)
+    return {"schema": "gh-identity-vendor-verify-remote/1", "write": False, "files": rows,
+            "counts": dict(Counter(r["status"] for r in rows)), "ok": all(r["status"] == "ok" for r in rows)}
+
+
+def _parse_candidate(text):
+    m = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):([^@]+)@([^@]+)", text or "")
+    if not m:
+        raise ValueError("candidate must be OWNER/REPO:PATH@SHA")
+    return m.group(1), _vendor_path(m.group(2)), m.group(3)
+
+
+def _project_imports(root, exclude):
+    names = set()
+    root = Path(root).resolve()
+    for p in root.rglob("*.py"):
+        rel = p.relative_to(root).as_posix()
+        if any(rel == e or rel.startswith(e + "/") for e in exclude) or ".git" in p.parts or "__pycache__" in p.parts:
+            continue
+        try:
+            names.update(_python_imports(p.read_text(encoding="utf-8", errors="replace"))[0])
+        except SyntaxError:
+            continue
+    return names
+
+
+def vendor_plan(root=".", candidates=(), rules=None, *, transport="auto", timeout=30):
+    """Rule-based placement plan for vendoring single files (read-only; writes nothing).
+
+    Rules are applied in a fixed order: pinned commit, upstream existence,
+    deny list, standard library only, single file, imported by the project,
+    then destination from layout (or an override with a reason).
+    """
+    parsed = validate_vendor_rules(rules if isinstance(rules, dict) else
+                                   _load_json_file(Path(root) / rules if rules and not os.path.isabs(rules) else rules, "rules")
+                                   if rules else {"schema": VENDOR_RULES_SCHEMA})
+    req = parsed["require"]
+    stdlib = _stdlib_names()
+    used = _project_imports(root, [parsed["root"], ".test-deps", "build"]) if req["imported_by_project"] else set()
+    decisions = []
+    for text in candidates:
+        repository, source, ref = _parse_candidate(text)
+        reasons, d = [], {"candidate": text, "repository": repository, "source": source, "commit": ref}
+        def skip(reason):
+            reasons.append(reason)
+        if req["pinned_commit"] and not re.fullmatch(r"[0-9a-f]{40}", ref):
+            skip("not_pinned_to_commit")
+        basename = source.rsplit("/", 1)[-1]
+        if any(fnmatch.fnmatchcase(basename, p) or fnmatch.fnmatchcase(source, p) for p in parsed["deny_sources"]):
+            skip("denied_source")
+        body = None
+        if not reasons:
+            try:
+                body = _remote_file(repository, source, ref, transport, timeout)
+            except Error as e:
+                skip("upstream_unavailable:" + e.code)
+        if body is not None:
+            d["blob_sha"], d["sha256"] = git_blob_sha(body), hashlib.sha256(body).hexdigest()
+            if source.endswith(".py"):
+                try:
+                    imports, relative = _python_imports(body.decode("utf-8", "replace"))
+                except SyntaxError:
+                    imports, relative = {}, False
+                    skip("syntax_error")
+                third = sorted(n for n in imports if n not in stdlib and n != basename[:-3])
+                d["third_party_imports"] = third
+                if req["stdlib_only"] and third:
+                    skip("not_stdlib_only")
+                if req["single_file"] and relative:
+                    skip("relative_import")
+                if req["imported_by_project"] and basename[:-3] not in used:
+                    skip("not_imported_by_project")
+        dest, rule = _vendor_destination(parsed, repository, source)
+        d["destination"], d["rule"] = dest, rule
+        if body is not None and not reasons and req["license_sidecar"]:
+            if _remote_exists(repository, "LICENSE", ref, transport, timeout):
+                d["license_destination"] = _vendor_destination(parsed, repository, "LICENSE", "license")[0]
+            else:
+                skip("license_missing")
+        d["action"] = "skip" if reasons else "place"
+        d["reasons"] = reasons
+        decisions.append(d)
+    return {"schema": "gh-identity-vendor-plan/1", "write": False, "root": parsed["root"], "decisions": decisions,
+            "counts": dict(Counter(x["action"] for x in decisions))}
+
+
+def vendor_matrix(owner, repos=None, *, lock_paths=("vendor.lock.json", "tool/python/vendor.lock.json"),
+                  transport="auto", timeout=30, max_repos=100):
+    """Who vendors whom at which commit, across repositories (read-only network).
+
+    Reads each repository's vendor.lock.json from its default branch and flags
+    pin_mismatch (one upstream source pinned at different commits) and the
+    placement roots each consumer uses.
+    """
+    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
+        raise ValueError("invalid owner")
+    if repos is None:
+        names = [x["full_name"].split("/", 1)[1] for x in repositories(owner, transport, timeout)["repositories"]
+                 if x.get("full_name") and not x.get("archived")][:max_repos]
+    else:
+        names = list(repos)
+    edges, consumers, errors = [], {}, []
+    for name in names:
+        full = repo(f"{owner}/{name}")
+        found = None
+        for lp in lock_paths:
+            try:
+                meta = request("GET", f"repos/{full}/contents/{lp}", transport=transport, timeout=timeout)
+            except Error as e:
+                if e.code in _NOT_FOUND_CODES:
+                    continue
+                errors.append({"repository": full, "detail": e.code}); break
+            if isinstance(meta, dict) and meta.get("encoding") == "base64":
+                try:
+                    found = (lp, validate_vendor_lock(json.loads(base64.b64decode(meta.get("content", "")))))
+                except (ValueError, json.JSONDecodeError) as error:
+                    errors.append({"repository": full, "detail": "invalid_lock: " + str(error)})
+                break
+        if not found:
+            continue
+        lp, lock = found
+        roots = sorted({f["destination"].rsplit("/", 1)[0] for f in lock["files"] if "/" in f["destination"]})
+        consumers[full] = {"lock": lp, "files": len(lock["files"]), "roots": roots}
+        for f in lock["files"]:
+            edges.append({"consumer": full, "provider": f["repository"], "source": f["source"],
+                          "commit": f["commit"], "destination": f["destination"]})
+    pins = {}
+    for e in edges:
+        pins.setdefault((e["provider"], e["source"]), set()).add(e["commit"])
+    mismatches = [{"provider": p, "source": s, "commits": sorted(c),
+                   "consumers": sorted({e["consumer"] for e in edges if (e["provider"], e["source"]) == (p, s)})}
+                  for (p, s), c in sorted(pins.items()) if len(c) > 1]
+    layouts = Counter(r for c in consumers.values() for r in c["roots"])
+    return {"schema": "gh-identity-vendor-matrix/1", "write": False, "owner": owner, "consumers": consumers,
+            "edges": edges, "pin_mismatch": mismatches, "layouts": dict(layouts), "errors": errors}
+
+
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
 
@@ -3346,6 +3715,10 @@ def _main(argv=None):
  x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("sync-provenance",help="record or verify which monorepo SHA a subtree sync came from (read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix");x.add_argument("--revision",default="HEAD");x.add_argument("--other-root");x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--direction",choices=("push","pull"));x.add_argument("--squash",action="store_true");x.add_argument("--generated-at");x.add_argument("--output-dir");x.add_argument("--verify",metavar="COMMIT",help="check Subtree-Split trailers of COMMIT in --root");x.add_argument("--monorepo-root",help="with --verify: recompute the split there");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("split-preflight",help="read-only checklist before splitting a directory into its own repository");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
+ x=s.add_parser("vendor-lock-check",help="compare vendor.lock.json (vendor-lock/1) with files on disk; optional vendor-rules/1 (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--rules")
+ x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source")
+ x=s.add_parser("vendor-plan",help="rule-based vendor placement plan for OWNER/REPO:PATH@SHA candidates (read-only)");x.add_argument("--root",default=".");x.add_argument("--rules");x.add_argument("--candidate",action="append",required=True,metavar="OWNER/REPO:PATH@SHA")
+ x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH")
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -3413,6 +3786,10 @@ def _main(argv=None):
     o=sync_provenance(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,direction=ns.direction,squash=ns.squash,generated_at=ns.generated_at,other_only_paths=ns.other_only_path,timeout=ns.timeout)
     if ns.output_dir:write_sync_provenance(o,ns.output_dir)
   elif ns.cmd=="split-preflight":o=split_preflight(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
+  elif ns.cmd=="vendor-lock-check":o=vendor_lock_check(ns.root,ns.lock,ns.rules)
+  elif ns.cmd=="vendor-lock-verify-remote":o=vendor_lock_verify_remote(ns.root,ns.lock,upstream=ns.upstream,transport=transport)
+  elif ns.cmd=="vendor-plan":o=vendor_plan(ns.root,ns.candidate,ns.rules,transport=transport)
+  elif ns.cmd=="vendor-matrix":o=vendor_matrix(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,lock_paths=tuple(ns.lock_path) if ns.lock_path else ("vendor.lock.json","tool/python/vendor.lock.json"),transport=transport)
   elif ns.cmd=="subtree-split":o=git_subtree_split(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")
