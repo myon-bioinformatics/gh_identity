@@ -3486,6 +3486,163 @@ def vendor_matrix(owner, repos=None, *, lock_paths=("vendor.lock.json", "tool/py
             "edges": edges, "pin_mismatch": mismatches, "layouts": dict(layouts), "errors": errors}
 
 
+DUPLICATE_IGNORE = ("README.md", "LICENSE", "LICENSE.md", "LICENSE.txt", "__init__.py", "conftest.py",
+                    "pyproject.toml", ".gitignore", ".gitattributes", "requirements.txt", "uv.lock",
+                    "package.json", "package-lock.json", "index.html", "index.md", "CHANGELOG.md",
+                    "*.png", "*.webp", "*.jpg", "*.svg", "*.ico", "*-LICENSE", ".github/*", "ci.yml",
+                    "actionlint.yml", "claude.yml", "pages.yml", "vendor.lock.json")
+
+
+def owner_repositories(owner, *, include_forks=False, transport="auto", timeout=30):
+    """Repositories listed by the API for user `owner` (type=owner, so org repos are not
+    listed), filtered explicitly: visibility public, archived false, forks excluded
+    unless include_forks. No repository names are hard-coded."""
+    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
+        raise ValueError("invalid owner")
+    rows = pages(f"users/{owner}/repos?type=owner&sort=full_name", transport, timeout)
+    out = []
+    for x in rows:
+        if not isinstance(x, dict):
+            continue
+        visibility = x.get("visibility") or ("private" if x.get("private") else "public")
+        if visibility != "public" or x.get("private") or x.get("archived") is not False and x.get("archived") is not None \
+                or (x.get("fork") and not include_forks):
+            continue
+        if (x.get("owner") or {}).get("login", owner).lower() != owner.lower():
+            continue
+        out.append({"name": x.get("name"), "default_branch": x.get("default_branch")})
+    return out
+
+
+def _repo_tree(full, branch, transport, timeout):
+    head = request("GET", f"repos/{full}/commits/{urllib.parse.quote(branch, safe='')}", transport=transport, timeout=timeout)
+    if not isinstance(head, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(head.get("sha"))):
+        raise Error("invalid_commit")
+    d = request("GET", f"repos/{full}/git/trees/{head['sha']}?recursive=1", transport=transport, timeout=timeout)
+    if not isinstance(d, dict) or not isinstance(d.get("tree"), list):
+        raise Error("invalid_tree_response")
+    files = {e["path"]: e["sha"] for e in d["tree"] if isinstance(e, dict) and e.get("type") == "blob"
+             and e.get("mode") in ("100644", "100755") and isinstance(e.get("path"), str) and isinstance(e.get("sha"), str)}
+    return head["sha"], files, bool(d.get("truncated"))
+
+
+def _repo_lock(full, ref, paths, lock_paths, transport, timeout):
+    for lp in lock_paths:
+        if lp not in paths:
+            continue
+        meta = request("GET", f"repos/{full}/contents/{lp}?ref={ref}", transport=transport, timeout=timeout)
+        if isinstance(meta, dict) and meta.get("encoding") == "base64":
+            return lp, validate_vendor_lock(json.loads(base64.b64decode(meta.get("content", ""))))
+    return None, None
+
+
+def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=(), min_repos=2,
+                    lock_paths=("vendor.lock.json", "tool/python/vendor.lock.json"), include_forks=False,
+                    transport="auto", timeout=30):
+    """Same basename in several repositories of one owner, with vendor-lock provenance.
+
+    Read-only. Provenance comes only from each repository's vendor-lock/1 entry
+    whose destination is the file; otherwise it is null. `identical` compares
+    git blob SHAs. A copy is `origin` when some lock in the set points to it,
+    and `stale` when its pinned blob differs from the upstream file on the
+    upstream default branch (only when the upstream repository was scanned).
+    """
+    patterns = tuple(ignore) + tuple(extra_ignore)
+    errors = []
+    if repos is None:
+        targets = owner_repositories(owner, include_forks=include_forks, transport=transport, timeout=timeout)
+    else:
+        targets = []
+        for name in repos:
+            try:
+                d = request("GET", f"repos/{repo(owner + '/' + name)}", transport=transport, timeout=timeout)
+            except Error as e:
+                errors.append({"repository": f"{owner}/{name}", "detail": e.code})
+                continue
+            targets.append({"name": name, "default_branch": d.get("default_branch") if isinstance(d, dict) else None})
+    scanned, locks, copies = {}, {}, {}
+    for t in targets:
+        full = repo(f"{owner}/{t['name']}")
+        try:
+            sha, files, truncated = _repo_tree(full, t["default_branch"] or "HEAD", transport, timeout)
+            lp, lock = _repo_lock(full, sha, files, lock_paths, transport, timeout)
+        except (Error, ValueError, json.JSONDecodeError) as e:
+            errors.append({"repository": full, "detail": getattr(e, "code", str(e))})
+            continue
+        scanned[full] = {"commit": sha, "files": len(files), "truncated": truncated, "lock": lp}
+        locks[full] = {f["destination"]: f for f in (lock or {"files": []})["files"]}
+        for path, blob in files.items():
+            base = path.rsplit("/", 1)[-1]
+            if any(fnmatch.fnmatchcase(base, p) or fnmatch.fnmatchcase(path, p) for p in patterns):
+                continue
+            copies.setdefault(base, []).append({"repository": full, "path": path, "blob_sha": blob})
+    blobs = {}
+    for base, rows in copies.items():
+        for r in rows:
+            blobs[(r["repository"], r["path"])] = r["blob_sha"]
+    pointed = {}
+    for consumer, entries in locks.items():
+        for dest, f in entries.items():
+            pointed.setdefault((f["repository"], f["source"]), []).append(consumer)
+    groups = []
+    for base, rows in sorted(copies.items()):
+        repos_in = {r["repository"] for r in rows}
+        if len(repos_in) < min_repos:
+            continue
+        for r in rows:
+            f = locks.get(r["repository"], {}).get(r["path"])
+            r["provenance"] = None if f is None else {"repository": f["repository"], "source": f["source"], "commit": f["commit"],
+                                                     "lock_blob_sha": f["blob_sha"]}
+            r["origin"] = (r["repository"], r["path"]) in pointed
+            r["consumers"] = sorted(pointed.get((r["repository"], r["path"]), []))
+            stale = None
+            if f is not None:
+                current = blobs.get((f["repository"], f["source"]))
+                if current is not None:
+                    stale = current != f["blob_sha"]
+            r["stale"] = stale
+            r["matches_lock"] = None if f is None else r["blob_sha"] == f["blob_sha"]
+        distinct = len({r["blob_sha"] for r in rows})
+        warnings = []
+        if distinct > 1:
+            warnings.append("content_differs")
+        if any(r["provenance"] is None and not r["origin"] for r in rows):
+            warnings.append("unknown_provenance")
+        if any(r["stale"] for r in rows):
+            warnings.append("stale_pin")
+        if any(r["matches_lock"] is False for r in rows):
+            warnings.append("modified_after_lock")
+        groups.append({"basename": base, "repositories": len(repos_in), "copies": len(rows),
+                       "distinct_contents": distinct, "identical": distinct == 1,
+                       "warnings": warnings, "files": sorted(rows, key=lambda r: (r["repository"], r["path"]))})
+    groups.sort(key=lambda g_: (-g_["repositories"], g_["basename"]))
+    all_rows = [r for g_ in groups for r in g_["files"]]
+    return {"schema": "gh-identity-duplicate-files/1", "write": False, "owner": owner, "scanned": scanned,
+            "errors": errors, "ignore": list(patterns), "groups": groups,
+            "counts": {"groups": len(groups), "copies": len(all_rows),
+                       "null_provenance": sum(r["provenance"] is None for r in all_rows),
+                       "null_provenance_non_origin": sum(r["provenance"] is None and not r["origin"] for r in all_rows),
+                       "stale": sum(bool(r["stale"]) for r in all_rows),
+                       "groups_with_warnings": sum(bool(g_["warnings"]) for g_ in groups)}}
+
+
+def render_vendor_markdown(o):
+    """Markdown table for GITHUB_STEP_SUMMARY (vendor-lock-check / verify-remote)."""
+    cols = ["destination", "status", "repository", "source", "commit"]
+    if any("upstream_changed" in r for r in o["files"]):
+        cols.append("upstream_changed")
+    lines = [f"### {o['schema']}: {'ok' if o['ok'] else 'NOT ok'}", "", "| " + " | ".join(cols) + " |",
+             "|" + "---|" * len(cols)]
+    for r in o["files"]:
+        cells = []
+        for c in cols:
+            v = r.get(c)
+            v = "" if v is None else (v[:12] if c == "commit" and isinstance(v, str) else str(v))
+            cells.append(v.replace("|", "\\|"))
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
 
@@ -3715,10 +3872,11 @@ def _main(argv=None):
  x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("sync-provenance",help="record or verify which monorepo SHA a subtree sync came from (read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix");x.add_argument("--revision",default="HEAD");x.add_argument("--other-root");x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--direction",choices=("push","pull"));x.add_argument("--squash",action="store_true");x.add_argument("--generated-at");x.add_argument("--output-dir");x.add_argument("--verify",metavar="COMMIT",help="check Subtree-Split trailers of COMMIT in --root");x.add_argument("--monorepo-root",help="with --verify: recompute the split there");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("split-preflight",help="read-only checklist before splitting a directory into its own repository");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
- x=s.add_parser("vendor-lock-check",help="compare vendor.lock.json (vendor-lock/1) with files on disk; optional vendor-rules/1 (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--rules")
- x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source")
+ x=s.add_parser("vendor-lock-check",help="compare vendor.lock.json (vendor-lock/1) with files on disk; optional vendor-rules/1 (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--rules");x.add_argument("--check",action="store_true",help="exit 1 unless ok");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
+ x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source");x.add_argument("--check",action="store_true",help="exit 1 unless ok (with --upstream, also when upstream moved)");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
  x=s.add_parser("vendor-plan",help="rule-based vendor placement plan for OWNER/REPO:PATH@SHA candidates (read-only)");x.add_argument("--root",default=".");x.add_argument("--rules");x.add_argument("--candidate",action="append",required=True,metavar="OWNER/REPO:PATH@SHA")
  x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH")
+ x=s.add_parser("duplicate-files",help="same basename across an owner's repositories, with vendor-lock provenance (read-only)");x.add_argument("--owner",required=True);x.add_argument("--repos",help="comma-separated names (default: public, non-archived, non-fork repos owned by --owner)");x.add_argument("--ignore",action="append",default=[],metavar="GLOB",help="additional basename/path patterns to ignore");x.add_argument("--no-default-ignore",action="store_true");x.add_argument("--include-forks",action="store_true");x.add_argument("--min-repos",type=int,default=2)
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -3786,6 +3944,9 @@ def _main(argv=None):
     o=sync_provenance(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,direction=ns.direction,squash=ns.squash,generated_at=ns.generated_at,other_only_paths=ns.other_only_path,timeout=ns.timeout)
     if ns.output_dir:write_sync_provenance(o,ns.output_dir)
   elif ns.cmd=="split-preflight":o=split_preflight(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
+  elif ns.cmd=="duplicate-files":
+   if ns.min_repos<2:raise ValueError("--min-repos must be at least 2")
+   o=duplicate_files(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,ignore=() if ns.no_default_ignore else DUPLICATE_IGNORE,extra_ignore=ns.ignore,min_repos=ns.min_repos,include_forks=ns.include_forks,transport=transport)
   elif ns.cmd=="vendor-lock-check":o=vendor_lock_check(ns.root,ns.lock,ns.rules)
   elif ns.cmd=="vendor-lock-verify-remote":o=vendor_lock_verify_remote(ns.root,ns.lock,upstream=ns.upstream,transport=transport)
   elif ns.cmd=="vendor-plan":o=vendor_plan(ns.root,ns.candidate,ns.rules,transport=transport)
@@ -3852,7 +4013,11 @@ def _main(argv=None):
  elif ns.cmd=="checks" and ns.text:print(render_checks(o))
  elif ns.cmd in ("prs","issues") and ns.text:print(render_list(o))
  elif ns.cmd=="get" and ns.text:print(render_get(o))
+ elif ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.markdown:print(render_vendor_markdown(o))
  else:print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.check:
+  drift=any(r.get("upstream_changed") for r in o["files"])
+  return 0 if o["ok"] and not drift else 1
  if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.
  if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
