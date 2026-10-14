@@ -206,14 +206,17 @@ def test_matrix_layouts_and_pin_mismatch():
     a = {"schema": "vendor-lock/1", "files": [entry("vendor/mod.py", MOD, commit=C1)]}
     b = {"schema": "vendor-lock/1", "files": [entry("tool/python/vendor/mod.py", MOD, commit=C2)]}
     def fake(method, path, **kw):
-        table = {"repos/o/a/contents/vendor.lock.json": _contents(a),
+        table = {"repos/o/a": {"visibility": "public"}, "repos/o/b": {"visibility": "public"},
+                 "repos/o/c": {"visibility": "private", "private": True},
+                 "repos/o/a/contents/vendor.lock.json": _contents(a),
                  "repos/o/b/contents/tool/python/vendor.lock.json": _contents(b)}
         if path in table:
             return table[path]
         raise g.Error("not_found_or_inaccessible")
     with patch.object(g, "request", side_effect=fake):
         out = g.vendor_matrix("o", ["a", "b", "c"])
-    assert set(out["consumers"]) == {"o/a", "o/b"} and out["errors"] == []
+    assert set(out["consumers"]) == {"o/a", "o/b"} and out["errors"] == [] and out["redacted"] == 1
+    assert "o/c" not in json.dumps(out)
     assert out["layouts"] == {"vendor": 1, "tool/python/vendor": 1}
     assert out["pin_mismatch"] == [{"provider": "o/up", "source": "mod.py", "commits": [C1, C2], "consumers": ["o/a", "o/b"]}]
 
