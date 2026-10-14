@@ -88,3 +88,52 @@ def test_only_owner_and_cli_exit(world):
 def test_remote_base_validation(world):
     with pytest.raises(ValueError):
         g.pin_audit(world["root"], remote_base="ext::sh -c x")
+
+
+def run_audit(root):
+    return subprocess.run([sys.executable, "-S", str(Path(g.__file__)), "pin-audit", "--root", str(root)],
+                          capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("name", ["vendor.lock.json", "nested/publication.json"])
+@pytest.mark.parametrize("data", [b"{broken", b"\xff"])
+def test_invalid_target_json_exits_two(tmp_path, name, data):
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    result = run_audit(tmp_path)
+    assert result.returncode == 2
+    assert name in json.loads(result.stderr)["detail"]
+    assert not result.stdout
+
+
+def test_non_target_json_and_zero_pins(tmp_path):
+    (tmp_path / "unrelated.json").write_text("{broken")
+    (tmp_path / "vendor.lock.json").write_text('{"files": [], "other": {"value": 1}}')
+    assert g.collect_pins(tmp_path) == []
+    result = run_audit(tmp_path)
+    assert result.returncode == 0 and json.loads(result.stdout)["pins"] == 0
+
+
+def test_partial_corruption_fails_before_remote_audit(tmp_path):
+    (tmp_path / "vendor.lock.json").write_text(json.dumps({"repository": "me/up", "commit": "a" * 40}))
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "publication.json").write_text("{broken")
+    result = run_audit(tmp_path)
+    assert result.returncode == 2 and "nested/publication.json" in result.stderr
+    assert not result.stdout
+
+
+def test_target_read_error_identifies_file(tmp_path, monkeypatch):
+    import builtins
+    (tmp_path / "vendor.lock.json").write_text("{}")
+    real_open = builtins.open
+    def unreadable(path, *args, **kwargs):
+        if Path(path).name == "vendor.lock.json":
+            raise PermissionError("denied")
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(builtins, "open", unreadable)
+    with pytest.raises(g.PinInputError, match="vendor.lock.json: read_error"):
+        g.collect_pins(tmp_path)
+    assert g.main(["pin-audit", "--root", str(tmp_path)]) == 2

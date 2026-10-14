@@ -981,7 +981,10 @@ contents — a shallow fetch cannot prove ancestry). States:
 * `unmerged`  not reachable from the default branch;
 * `unavailable` the remote could not be read without credentials (name redacted).
 
-Exit 0 when every pin is `ok`, else 1. Generic: any repository. Parent-specific
+Exit 0 when every pin is `ok`, 1 when a pin needs attention, and 2 for input
+errors. Malformed or unreadable selected JSON fails with its checkout-relative
+filename; unrelated JSON is ignored and valid inputs with no pins succeed.
+Generic: any repository. Parent-specific
 lock / catalog / materialize / auto-fix stay in the parent `vendor_sync.py`.
 
 ## GitHub identity (`repo-identity`, `owner-repositories`, `pr-identity`, `commit-pulls`, `first-parent`)
