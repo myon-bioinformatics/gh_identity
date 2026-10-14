@@ -832,6 +832,49 @@ branch gets no commit (only new objects are added to the object database; the
 `reason: "prefix_not_found"`; if the contrib `git subtree` command is not
 installed, `reason: "subtree_unavailable"` (sha `null`).
 
+## Subtree sync status (`subtree-sync-status`)
+
+```bash
+python gh_identity.py subtree-sync-status --root MONOREPO --prefix DIR --other-root SPLIT_CHECKOUT \
+  [--other-ref main] [--revision REV] [--other-only-path GLOB ...]
+```
+
+Local and read-only (no fetch, no ref changes). `git subtree split` is
+deterministic, so the split commits of `DIR` carry the same SHAs as the history
+of a repository split out of it; both histories are compared as SHA sets in
+their own object databases. `state` is `in_sync`, `monorepo_ahead`,
+`other_ahead`, `diverged` or `unrelated`, with counts and (bounded) commit
+lists. Commits of the other side that only touch `--other-only-path` files
+(e.g. `pyproject.toml`, `uv.lock`) are reported as `other_only_ignored`.
+
+## Sync provenance (`sync-provenance`)
+
+```bash
+python gh_identity.py sync-provenance --root MONOREPO --prefix DIR --other-root SPLIT_CHECKOUT \
+  [--direction push|pull] [--squash] [--output-dir DIR]
+python gh_identity.py sync-provenance --root SPLIT_CHECKOUT --verify COMMIT [--monorepo-root MONOREPO]
+```
+
+Records which monorepo SHA and split SHA a sync came from
+(`gh-identity-sync-provenance/1`) and suggests the commit trailer
+`Subtree-Split: <monorepo_sha> <split_sha> <prefix>`. `--output-dir` writes
+`sync-provenance.json`. `--verify` reads the trailers of `COMMIT`; with
+`--monorepo-root` the split is recomputed from the recorded SHA and must match
+(`no_trailer` / `mismatch` otherwise). Nothing is committed.
+
+## Split preflight (`split-preflight`)
+
+```bash
+python gh_identity.py split-preflight --root MONOREPO --prefix DIR [--revision REV]
+```
+
+Read-only checklist before splitting `DIR` into its own repository, all read
+from `REV` (not the working tree): split SHA and history size, imports and
+path / `sys.path` / config references into `DIR` from the rest of the
+repository (`inbound_refs`, with file and line), references from `DIR` to the
+rest (`outbound_refs`), third-party imports inside `DIR`, and `checks` with an
+overall `ok`. Imports are parsed with `ast`, never executed.
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash
