@@ -813,6 +813,25 @@ cannot leak; a non-GitHub remote reports `not_github`. Outside a checkout,
 Those two come only from an explicit Git answer; a missing `git`, a permission
 error or a broken `.git` is `git_error` with a short `detail`, never an absence.
 
+## Subtree split, read-only (`subtree-split`)
+
+```bash
+python gh_identity.py subtree-split --prefix DIR [--revision REV] [--root PATH] [--timeout SECONDS]
+```
+
+Runs `git subtree split -q --prefix=DIR <sha>` and returns
+`{"schema":"gh-identity-subtree-split/1","prefix","source","sha","reason","write":false}`.
+`sha` is the commit whose history contains only `DIR` (e.g. as the start of a new
+repository). No `--write` is needed: `--branch`, `--rejoin`, `--onto` and
+`--annotate` are never passed, so no ref is created or moved and the current
+branch gets no commit (only new objects are added to the object database; the
+`.git/subtree-cache/<pid>` scratch directory git-subtree leaves behind is removed).
+`add` / `pull` / `merge` / `push` are not implemented.
+`DIR` must be a relative path inside the repository (no absolute path, `..`,
+`.git` or leading `-`); `REV` is resolved to a SHA first. A missing directory is
+`reason: "prefix_not_found"`; if the contrib `git subtree` command is not
+installed, `reason: "subtree_unavailable"` (sha `null`).
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash
