@@ -62,8 +62,8 @@ def fake(method, path, **kw):
         "repos/me/consumer/commits/main": {"sha": CC},
         "repos/me/drifted/commits/dev": {"sha": CD},
         f"repos/me/consumer/contents/vendor.lock.json?ref={CC}": lock([entry("vendor/tool.py", UP_OLD)]),
-        "repos/me/up": {"default_branch": "main"},
-        "repos/me/drifted": {"default_branch": "dev"},
+        "repos/me/up": {"default_branch": "main", "visibility": "public"},
+        "repos/me/drifted": {"default_branch": "dev", "visibility": "public"},
     }
     for c, rows in TREES.items():
         table[f"repos/{ {CU: 'me/up', CC: 'me/consumer', CD: 'me/drifted'}[c] }/git/trees/{c}?recursive=1"] = {"sha": "f" * 40, "tree": rows, "truncated": False}
@@ -114,7 +114,7 @@ def test_identical_copies_and_errors():
     finally:
         TREES[CD] = [blob("scripts/tool.py", OTHER), blob("README.md", b"r2")]
     assert out["groups"][0]["identical"] is True and "content_differs" not in out["groups"][0]["warnings"]
-    assert out["errors"] == [{"repository": "me/missing", "detail": "not_found_or_inaccessible"}]
+    assert out["errors"] == [] and out["redacted"] == 1 and "missing" not in json.dumps(out)
 
 
 def test_rejects_bad_owner():

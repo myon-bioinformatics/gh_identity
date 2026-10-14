@@ -2869,7 +2869,7 @@ def _changed_paths(root, sha):
 
 
 def subtree_sync_status(root=".", prefix=None, other_root=None, *, revision="HEAD", other_ref="HEAD",
-                        other_only_paths=(), max_listed=50, timeout=600):
+                        other_only_paths=(), max_listed=50, timeout=600, mainline=None):
     """Compare `git subtree split --prefix` of a monorepo with a split-out checkout.
 
     Local only, read-only, no fetch. git subtree split is deterministic, so the
@@ -2912,7 +2912,15 @@ def subtree_sync_status(root=".", prefix=None, other_root=None, *, revision="HEA
         state = "other_ahead"
     else:
         state = "in_sync"
+    on_mainline = None
+    if mainline is not None:
+        main_sha = _rev_commit(root, mainline)
+        raw, truncated, _ = _git_run(root, ["rev-list", "--first-parent", "--end-of-options", main_sha], max_bytes=16 * 1024 * 1024)
+        if truncated:
+            raise GitInspectionError("rev-list exceeds output limit")
+        on_mainline = split["source"] in _git_decode(raw).split()
     return {**base, "other_head": other_head, "split_in_other": split["sha"] in other_set,
+            "source_on_first_parent": on_mainline,
             "other_head_in_split": other_head in mono_set,
             "monorepo_ahead": len(mono_extra), "other_ahead": len(other_extra), "other_only_ignored": len(ignored),
             "monorepo_ahead_commits": mono_extra[:max_listed], "other_ahead_commits": other_extra[:max_listed],
@@ -3243,7 +3251,7 @@ def _strip_header(data, max_lines=5):
     return out
 
 
-def vendor_lock_check(root=".", lock="vendor.lock.json", rules=None):
+def vendor_lock_check(root=".", lock="vendor.lock.json", rules=None, parent_ref=None):
     """Compare vendor.lock.json (vendor-lock/1) with the files on disk. Local, read-only."""
     root_path = Path(root).resolve()
     lock_path = root_path / lock if not os.path.isabs(lock) else Path(lock)
@@ -3290,8 +3298,10 @@ def vendor_lock_check(root=".", lock="vendor.lock.json", rules=None):
                     and p.name not in ("README.md", ".gitkeep") and not any(rel.startswith(o + "/") for o in locked):
                 rows.append({"destination": rel, "status": "unlocked", "repository": None, "source": None,
                              "commit": None, "rule": None})
-    ok = all(r["status"] == "ok" for r in rows) and not violations
-    return {"schema": "gh-identity-vendor-check/1", "write": False, "lock": lock_path.relative_to(root_path).as_posix()
+    pref = parent_ref_status(root_path, parent_ref)
+    ok = all(r["status"] == "ok" for r in rows) and not violations and pref["status"] != "invalid" \
+        and not (parent_ref and pref["status"] == "missing")
+    return {"schema": "gh-identity-vendor-check/1", "write": False, "parent_ref": pref, "lock": lock_path.relative_to(root_path).as_posix()
             if lock_path.is_relative_to(root_path) else str(lock_path), "files": rows, "violations": violations,
             "counts": dict(Counter(r["status"] for r in rows)), "ok": ok}
 
@@ -3324,11 +3334,12 @@ def _remote_exists(repository, path, commit, transport="auto", timeout=30):
         raise
 
 
-def vendor_lock_verify_remote(root=".", lock="vendor.lock.json", *, upstream=False, transport="auto", timeout=30):
+def vendor_lock_verify_remote(root=".", lock="vendor.lock.json", *, upstream=False, first_parent=False,
+                              check_parent_ref=False, parent_ref=None, transport="auto", timeout=30, max_pages=10):
     """Check each lock entry against upstream repository@commit:source (read-only network)."""
     root_path = Path(root).resolve()
     data = validate_vendor_lock(_load_json_file(root_path / lock if not os.path.isabs(lock) else lock, "lock"))
-    rows = []
+    rows, fp_cache = [], {}
     for item in data["files"]:
         row = {"destination": item["destination"], "repository": item["repository"], "source": item["source"],
                "commit": item["commit"]}
@@ -3349,9 +3360,26 @@ def vendor_lock_verify_remote(root=".", lock="vendor.lock.json", *, upstream=Fal
                 head = None
             row["upstream_head"] = head
             row["upstream_changed"] = None if head is None else head != item["commit"]
+        if first_parent:
+            key = (item["repository"], item["commit"])
+            if key not in fp_cache:
+                try:
+                    fp_cache[key] = _first_parent_contains(item["repository"], item["commit"], transport=transport,
+                                                           timeout=timeout, max_pages=max_pages)
+                except Error:
+                    fp_cache[key] = None
+            row["first_parent"] = fp_cache[key]
         rows.append(row)
-    return {"schema": "gh-identity-vendor-verify-remote/1", "write": False, "files": rows,
-            "counts": dict(Counter(r["status"] for r in rows)), "ok": all(r["status"] == "ok" for r in rows)}
+    out = {"schema": "gh-identity-vendor-verify-remote/1", "write": False, "files": rows,
+           "counts": dict(Counter(r["status"] for r in rows)),
+           "ok": all(r["status"] == "ok" and r.get("first_parent") is not False for r in rows)}
+    if check_parent_ref:
+        pref = parent_ref_status(root_path, parent_ref)
+        if pref["status"] == "ok":
+            pref["remote"] = verify_parent_ref({"schema": PARENT_REF_SCHEMA, **pref["ref"]}, transport=transport, timeout=timeout)
+        out["parent_ref"] = pref
+        out["ok"] = out["ok"] and pref["status"] == "ok" and pref["remote"]["status"] == "ok"
+    return out
 
 
 def _parse_candidate(text):
@@ -3436,7 +3464,7 @@ def vendor_plan(root=".", candidates=(), rules=None, *, transport="auto", timeou
 
 
 def vendor_matrix(owner, repos=None, *, lock_paths=("vendor.lock.json", "tool/python/vendor.lock.json"),
-                  transport="auto", timeout=30, max_repos=100):
+                  heads=None, include_forks=False, transport="auto", timeout=30, max_repos=100):
     """Who vendors whom at which commit, across repositories (read-only network).
 
     Reads each repository's vendor.lock.json from its default branch and flags
@@ -3445,18 +3473,16 @@ def vendor_matrix(owner, repos=None, *, lock_paths=("vendor.lock.json", "tool/py
     """
     if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
         raise ValueError("invalid owner")
-    if repos is None:
-        names = [x["full_name"].split("/", 1)[1] for x in repositories(owner, transport, timeout)["repositories"]
-                 if x.get("full_name") and not x.get("archived")][:max_repos]
-    else:
-        names = list(repos)
+    targets, redacted = _public_targets(owner, repos, include_forks=include_forks, transport=transport, timeout=timeout)
+    names = [t["name"] for t in targets][:max_repos]
     edges, consumers, errors = [], {}, []
     for name in names:
         full = repo(f"{owner}/{name}")
         found = None
         for lp in lock_paths:
             try:
-                meta = request("GET", f"repos/{full}/contents/{lp}", transport=transport, timeout=timeout)
+                at = (heads or {}).get(full)
+                meta = request("GET", f"repos/{full}/contents/{lp}" + (f"?ref={at}" if at else ""), transport=transport, timeout=timeout)
             except Error as e:
                 if e.code in _NOT_FOUND_CODES:
                     continue
@@ -3483,7 +3509,8 @@ def vendor_matrix(owner, repos=None, *, lock_paths=("vendor.lock.json", "tool/py
                   for (p, s), c in sorted(pins.items()) if len(c) > 1]
     layouts = Counter(r for c in consumers.values() for r in c["roots"])
     return {"schema": "gh-identity-vendor-matrix/1", "write": False, "owner": owner, "consumers": consumers,
-            "edges": edges, "pin_mismatch": mismatches, "layouts": dict(layouts), "errors": errors}
+            "edges": edges, "pin_mismatch": mismatches, "layouts": dict(layouts), "errors": errors,
+            "redacted": redacted}
 
 
 DUPLICATE_IGNORE = ("README.md", "LICENSE", "LICENSE.md", "LICENSE.txt", "__init__.py", "conftest.py",
@@ -3538,7 +3565,7 @@ def _repo_lock(full, ref, paths, lock_paths, transport, timeout):
 
 def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=(), min_repos=2,
                     lock_paths=("vendor.lock.json", "tool/python/vendor.lock.json"), include_forks=False,
-                    transport="auto", timeout=30):
+                    heads=None, transport="auto", timeout=30):
     """Same basename in several repositories of one owner, with vendor-lock provenance.
 
     Read-only. Provenance comes only from each repository's vendor-lock/1 entry
@@ -3549,27 +3576,18 @@ def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=
     """
     patterns = tuple(ignore) + tuple(extra_ignore)
     errors = []
-    if repos is None:
-        targets = owner_repositories(owner, include_forks=include_forks, transport=transport, timeout=timeout)
-    else:
-        targets = []
-        for name in repos:
-            try:
-                d = request("GET", f"repos/{repo(owner + '/' + name)}", transport=transport, timeout=timeout)
-            except Error as e:
-                errors.append({"repository": f"{owner}/{name}", "detail": e.code})
-                continue
-            targets.append({"name": name, "default_branch": d.get("default_branch") if isinstance(d, dict) else None})
+    targets, redacted = _public_targets(owner, repos, include_forks=include_forks, transport=transport, timeout=timeout)
     scanned, locks, copies = {}, {}, {}
     for t in targets:
         full = repo(f"{owner}/{t['name']}")
         try:
-            sha, files, truncated = _repo_tree(full, t["default_branch"] or "HEAD", transport, timeout)
+            sha, files, truncated = _repo_tree(full, (heads or {}).get(full) or t["default_branch"] or "HEAD", transport, timeout)
             lp, lock = _repo_lock(full, sha, files, lock_paths, transport, timeout)
         except (Error, ValueError, json.JSONDecodeError) as e:
             errors.append({"repository": full, "detail": getattr(e, "code", str(e))})
             continue
-        scanned[full] = {"commit": sha, "files": len(files), "truncated": truncated, "lock": lp}
+        scanned[full] = {"commit": sha, "files": len(files), "truncated": truncated, "lock": lp,
+                         "from_heads": full in (heads or {})}
         locks[full] = {f["destination"]: f for f in (lock or {"files": []})["files"]}
         for path, blob in files.items():
             base = path.rsplit("/", 1)[-1]
@@ -3618,7 +3636,7 @@ def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=
     groups.sort(key=lambda g_: (-g_["repositories"], g_["basename"]))
     all_rows = [r for g_ in groups for r in g_["files"]]
     return {"schema": "gh-identity-duplicate-files/1", "write": False, "owner": owner, "scanned": scanned,
-            "errors": errors, "ignore": list(patterns), "groups": groups,
+            "errors": errors, "redacted": redacted, "ignore": list(patterns), "groups": groups,
             "counts": {"groups": len(groups), "copies": len(all_rows),
                        "null_provenance": sum(r["provenance"] is None for r in all_rows),
                        "null_provenance_non_origin": sum(r["provenance"] is None and not r["origin"] for r in all_rows),
@@ -3660,6 +3678,203 @@ def render_vendor_markdown(o):
             cells.append(v.replace("|", "\\|"))
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
+
+
+PARENT_REF_SCHEMA = "parent-pr-ref/1"
+PARENT_REF_PATHS = ("templates/parent-pr.ref.json", "parent-pr.ref.json")
+
+
+def validate_parent_ref(ref):
+    """Problems of a parent-pr-ref/1 record (empty list when valid). Local only."""
+    problems = []
+    if not isinstance(ref, dict):
+        return ["not_an_object"]
+    if ref.get("schema") != PARENT_REF_SCHEMA:
+        problems.append("schema")
+    r = ref.get("repository")
+    if not isinstance(r, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", r):
+        problems.append("repository")
+    for key in ("pull_number", "repository_id"):
+        if type(ref.get(key)) is not int or ref[key] < 1:
+            problems.append(key)
+    c = ref.get("commit")
+    if not isinstance(c, str) or not re.fullmatch(r"[0-9a-f]{40}", c) or set(c) == {"0"}:
+        problems.append("commit")
+    if "optional" in ref and not isinstance(ref["optional"], dict):
+        problems.append("optional")
+    extra = set(ref) - {"schema", "repository", "pull_number", "repository_id", "commit", "optional"}
+    if extra:
+        problems.append("unknown_fields")
+    return problems
+
+
+def parent_ref_status(root=".", path=None):
+    """Find and validate parent-pr.ref.json (templates/ first, then the root)."""
+    root_path = Path(root).resolve()
+    candidates = (path,) if path else PARENT_REF_PATHS
+    for rel in candidates:
+        p = Path(rel) if os.path.isabs(rel) else root_path / rel
+        if p.is_file():
+            try:
+                ref = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return {"path": rel, "status": "invalid", "problems": ["not_json"], "ref": None}
+            problems = validate_parent_ref(ref)
+            keep = {k: ref.get(k) for k in ("repository", "pull_number", "repository_id", "commit")} if isinstance(ref, dict) else None
+            return {"path": rel, "status": "invalid" if problems else "ok", "problems": problems, "ref": keep}
+    return {"path": None, "status": "missing", "problems": [], "ref": None}
+
+
+def _first_parent_contains(repository, target, *, branch=None, transport="auto", timeout=30, max_pages=10):
+    """True/False when target is (not) on the first-parent chain of the branch head,
+    None when undetermined within max_pages of history (read-only API)."""
+    r = repo(repository)
+    if branch is None:
+        info = request("GET", f"repos/{r}", transport=transport, timeout=timeout)
+        branch = info.get("default_branch") if isinstance(info, dict) else None
+        if not branch:
+            return None
+    parents, order, cursor = {}, {}, None
+    for page in range(1, max_pages + 1):
+        rows = request("GET", f"repos/{r}/commits?sha={urllib.parse.quote(branch, safe='')}&per_page=100&page={page}",
+                       transport=transport, timeout=timeout)
+        if not isinstance(rows, list) or not rows:
+            return False if parents else None
+        for row in rows:
+            if isinstance(row, dict) and isinstance(row.get("sha"), str):
+                parents[row["sha"]] = [p.get("sha") for p in row.get("parents") or [] if isinstance(p, dict)]
+                order.setdefault(row["sha"], len(order))
+        if cursor is None:
+            cursor = rows[0].get("sha")
+        while cursor in parents:
+            if cursor == target:
+                return True
+            if target in order and order[cursor] > order[target]:
+                return False  # the first-parent chain already went past the target (listing order)
+            nxt = parents[cursor]
+            if not nxt:
+                return False
+            cursor = nxt[0]
+        if len(rows) < 100:
+            return False
+    return None
+
+
+def verify_parent_ref(ref, *, transport="auto", timeout=30):
+    """Check a parent-pr-ref/1 against GitHub: repository_id, and commit equals the PR
+    merge_commit_sha (merged into the default branch) or head.sha (open)."""
+    problems = validate_parent_ref(ref)
+    out = {"status": "invalid", "problems": problems}
+    if problems:
+        return out
+    r = repo(ref["repository"])
+    try:
+        info = request("GET", f"repos/{r}", transport=transport, timeout=timeout)
+        pr = request("GET", f"repos/{r}/pulls/{ref['pull_number']}", transport=transport, timeout=timeout)
+    except Error as e:
+        return {"status": "unavailable", "problems": [e.code]}
+    if not isinstance(info, dict) or info.get("id") != ref["repository_id"]:
+        problems.append("repository_id_mismatch")
+    if not isinstance(pr, dict):
+        return {"status": "unavailable", "problems": ["invalid_pull"]}
+    state = "merged" if pr.get("merged_at") else pr.get("state")
+    expected = pr.get("merge_commit_sha") if state == "merged" else (pr.get("head") or {}).get("sha") if state == "open" else None
+    if expected != ref["commit"]:
+        problems.append("commit_mismatch")
+    if state == "merged" and (pr.get("base") or {}).get("ref") != info.get("default_branch"):
+        problems.append("not_merged_into_default_branch")
+    if state not in ("merged", "open"):
+        problems.append("pull_closed_unmerged")
+    return {"status": "ok" if not problems else "mismatch", "problems": problems, "pull_state": state}
+
+
+def load_child_heads(path):
+    """{owner/name: sha} from the parent's child-heads.json (child-heads/1)."""
+    data = _load_json_file(path, "heads")
+    if not isinstance(data, dict) or not str(data.get("schema", "")).startswith("child-heads/") \
+            or not isinstance(data.get("heads"), dict):
+        raise ValueError("expected child-heads/1")
+    out = {}
+    for name, row in data["heads"].items():
+        if not isinstance(row, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(row.get("sha"))):
+            raise ValueError("invalid head entry")
+        out[repo(name)] = row["sha"]
+    return out
+
+
+def _public_targets(owner, repos, *, include_forks=False, transport="auto", timeout=30):
+    """(targets, redacted): public, non-archived (non-fork) repositories. Anything else,
+    including names that cannot be read, is counted in `redacted` and never named."""
+    if repos is None:
+        return owner_repositories(owner, include_forks=include_forks, transport=transport, timeout=timeout), 0
+    targets, redacted = [], 0
+    for name in repos:
+        try:
+            d = request("GET", f"repos/{repo(owner + '/' + name)}", transport=transport, timeout=timeout)
+        except Error:
+            redacted += 1
+            continue
+        visibility = d.get("visibility") or ("private" if d.get("private") else "public") if isinstance(d, dict) else None
+        if not isinstance(d, dict) or visibility != "public" or d.get("private") or d.get("archived") \
+                or (d.get("fork") and not include_forks):
+            redacted += 1
+            continue
+        targets.append({"name": name, "default_branch": d.get("default_branch")})
+    return targets, redacted
+
+
+def enrollment_progress(owner, *, provider="myon-bioinformatics/gh_identity", source="gh_identity.py",
+                        repos=None, heads=None, lock_paths=("vendor.lock.json", "tool/python/vendor.lock.json"),
+                        include_forks=False, transport="auto", timeout=30, max_pages=10):
+    """Per public consumer repository: is provider:source in its vendor lock, at which pin,
+    is the pin stale, and is it on the provider's default-branch first-parent history."""
+    provider = repo(provider)
+    _vendor_path(source)
+    targets, redacted = _public_targets(owner, repos, include_forks=include_forks, transport=transport, timeout=timeout)
+    current = None
+    try:
+        info = request("GET", f"repos/{provider}", transport=transport, timeout=timeout)
+        branch = info.get("default_branch") if isinstance(info, dict) else None
+        head = request("GET", f"repos/{provider}/commits/{urllib.parse.quote(branch or 'HEAD', safe='')}", transport=transport, timeout=timeout)
+        current = git_blob_sha(_remote_file(provider, source, head["sha"], transport, timeout))
+    except (Error, KeyError, TypeError):
+        branch = None
+    first_parent_cache, rows, errors = {}, [], 0
+    for t in targets:
+        full = repo(f"{owner}/{t['name']}")
+        if full == provider:
+            continue
+        ref = (heads or {}).get(full) or t["default_branch"] or "HEAD"
+        try:
+            sha, files, _ = _repo_tree(full, ref, transport, timeout)
+            lp, lock = _repo_lock(full, sha, files, lock_paths, transport, timeout)
+        except (Error, ValueError, json.JSONDecodeError):
+            errors += 1
+            continue
+        entry = next((f for f in (lock or {"files": []})["files"]
+                      if f["repository"] == provider and f["source"] == source), None)
+        row = {"repository": full, "commit": sha, "lock": lp, "enrolled": entry is not None,
+               "destination": None, "pin": None, "stale": None, "first_parent": None}
+        if entry:
+            pin = entry["commit"]
+            if pin not in first_parent_cache:
+                try:
+                    first_parent_cache[pin] = _first_parent_contains(provider, pin, branch=branch, transport=transport,
+                                                                     timeout=timeout, max_pages=max_pages) if branch else None
+                except Error:
+                    first_parent_cache[pin] = None
+            row.update(destination=entry["destination"], pin=pin,
+                       stale=None if current is None else entry["blob_sha"] != current,
+                       first_parent=first_parent_cache[pin])
+        rows.append(row)
+    enrolled = [r for r in rows if r["enrolled"]]
+    return {"schema": "gh-identity-enrollment-progress/1", "write": False, "owner": owner, "provider": provider,
+            "source": source, "provider_blob": current, "repositories": rows,
+            "counts": {"repositories": len(rows), "enrolled": len(enrolled), "not_enrolled": len(rows) - len(enrolled),
+                       "stale": sum(bool(r["stale"]) for r in enrolled),
+                       "not_first_parent": sum(r["first_parent"] is False for r in enrolled),
+                       "first_parent_unknown": sum(r["first_parent"] is None for r in enrolled),
+                       "errors": errors, "redacted": redacted}}
 
 
 def local_position(root="."):
@@ -3888,14 +4103,15 @@ def _main(argv=None):
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("subtree-split",help="read-only git subtree split --prefix: print the split commit SHA (no refs changed)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
- x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--timeout",type=float,default=600)
+ x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--mainline",help="also check the source is on this ref's first-parent history");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("sync-provenance",help="record or verify which monorepo SHA a subtree sync came from (read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix");x.add_argument("--revision",default="HEAD");x.add_argument("--other-root");x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--direction",choices=("push","pull"));x.add_argument("--squash",action="store_true");x.add_argument("--generated-at");x.add_argument("--output-dir");x.add_argument("--verify",metavar="COMMIT",help="check Subtree-Split trailers of COMMIT in --root");x.add_argument("--monorepo-root",help="with --verify: recompute the split there");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("split-preflight",help="read-only checklist before splitting a directory into its own repository");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
- x=s.add_parser("vendor-lock-check",help="compare vendor.lock.json (vendor-lock/1) with files on disk; optional vendor-rules/1 (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--rules");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
- x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok (with --upstream, also when upstream moved)");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
+ x=s.add_parser("vendor-lock-check",help="compare vendor.lock.json (vendor-lock/1) with files on disk; optional vendor-rules/1 (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--rules");x.add_argument("--parent-ref",help="parent-pr.ref.json path (default: templates/ then root; required when given)");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
+ x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source");x.add_argument("--first-parent",action="store_true",help="pins must be on the source default branch first-parent history");x.add_argument("--check-parent-ref",action="store_true",help="verify parent-pr.ref.json repository_id and PR merge/head commit");x.add_argument("--parent-ref");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok (with --upstream, also when upstream moved)");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
  x=s.add_parser("vendor-plan",help="rule-based vendor placement plan for OWNER/REPO:PATH@SHA candidates (read-only)");x.add_argument("--root",default=".");x.add_argument("--rules");x.add_argument("--candidate",action="append",required=True,metavar="OWNER/REPO:PATH@SHA")
- x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH")
- x=s.add_parser("duplicate-files",help="same basename across an owner's repositories, with vendor-lock provenance (read-only)");x.add_argument("--owner",required=True);x.add_argument("--repos",help="comma-separated names (default: public, non-archived, non-fork repos owned by --owner)");x.add_argument("--ignore",action="append",default=[],metavar="GLOB",help="additional basename/path patterns to ignore");x.add_argument("--no-default-ignore",action="store_true");x.add_argument("--include-forks",action="store_true");x.add_argument("--min-repos",type=int,default=2);x.add_argument("--markdown",action="store_true",help="Markdown summary (for GITHUB_STEP_SUMMARY) instead of JSON");x.add_argument("--top",type=int,default=30,help="groups shown with --markdown")
+ x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH");x.add_argument("--heads",help="child-heads.json: read locks at the recorded commits")
+ x=s.add_parser("enrollment-progress",help="per public consumer: provider file in vendor lock, pin, stale, first-parent (read-only)");x.add_argument("--owner",required=True);x.add_argument("--provider",default="myon-bioinformatics/gh_identity");x.add_argument("--source",default="gh_identity.py");x.add_argument("--repos");x.add_argument("--heads");x.add_argument("--include-forks",action="store_true")
+ x=s.add_parser("duplicate-files",help="same basename across an owner's repositories, with vendor-lock provenance (read-only)");x.add_argument("--owner",required=True);x.add_argument("--repos",help="comma-separated names (default: public, non-archived, non-fork repos owned by --owner)");x.add_argument("--ignore",action="append",default=[],metavar="GLOB",help="additional basename/path patterns to ignore");x.add_argument("--no-default-ignore",action="store_true");x.add_argument("--include-forks",action="store_true");x.add_argument("--min-repos",type=int,default=2);x.add_argument("--heads",help="child-heads.json: scan the recorded commits");x.add_argument("--markdown",action="store_true",help="Markdown summary (for GITHUB_STEP_SUMMARY) instead of JSON");x.add_argument("--top",type=int,default=30,help="groups shown with --markdown")
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -3955,7 +4171,7 @@ def _main(argv=None):
    else:raise ValueError("branch required")
   elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,fetch_timeout=ns.fetch_timeout,write=ns.write)
   elif ns.cmd=="local-position":o=local_position(ns.root)
-  elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout)
+  elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout,mainline=ns.mainline)
   elif ns.cmd=="sync-provenance":
    if ns.verify:o=verify_sync_provenance(ns.root,ns.verify,monorepo_root=ns.monorepo_root,timeout=ns.timeout)
    else:
@@ -3965,11 +4181,12 @@ def _main(argv=None):
   elif ns.cmd=="split-preflight":o=split_preflight(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="duplicate-files":
    if ns.min_repos<2:raise ValueError("--min-repos must be at least 2")
-   o=duplicate_files(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,ignore=() if ns.no_default_ignore else DUPLICATE_IGNORE,extra_ignore=ns.ignore,min_repos=ns.min_repos,include_forks=ns.include_forks,transport=transport)
-  elif ns.cmd=="vendor-lock-check":o=vendor_lock_check(ns.root,ns.lock,ns.rules)
-  elif ns.cmd=="vendor-lock-verify-remote":o=vendor_lock_verify_remote(ns.root,ns.lock,upstream=ns.upstream,transport=transport)
+   o=duplicate_files(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,ignore=() if ns.no_default_ignore else DUPLICATE_IGNORE,extra_ignore=ns.ignore,min_repos=ns.min_repos,include_forks=ns.include_forks,heads=load_child_heads(ns.heads) if ns.heads else None,transport=transport)
+  elif ns.cmd=="vendor-lock-check":o=vendor_lock_check(ns.root,ns.lock,ns.rules,ns.parent_ref)
+  elif ns.cmd=="vendor-lock-verify-remote":o=vendor_lock_verify_remote(ns.root,ns.lock,upstream=ns.upstream,first_parent=ns.first_parent,check_parent_ref=ns.check_parent_ref,parent_ref=ns.parent_ref,transport=transport)
   elif ns.cmd=="vendor-plan":o=vendor_plan(ns.root,ns.candidate,ns.rules,transport=transport)
-  elif ns.cmd=="vendor-matrix":o=vendor_matrix(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,lock_paths=tuple(ns.lock_path) if ns.lock_path else ("vendor.lock.json","tool/python/vendor.lock.json"),transport=transport)
+  elif ns.cmd=="vendor-matrix":o=vendor_matrix(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,lock_paths=tuple(ns.lock_path) if ns.lock_path else ("vendor.lock.json","tool/python/vendor.lock.json"),heads=load_child_heads(ns.heads) if ns.heads else None,transport=transport)
+  elif ns.cmd=="enrollment-progress":o=enrollment_progress(ns.owner,provider=ns.provider,source=ns.source,repos=[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,heads=load_child_heads(ns.heads) if ns.heads else None,include_forks=ns.include_forks,transport=transport)
   elif ns.cmd=="subtree-split":o=git_subtree_split(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")

@@ -888,13 +888,22 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
 
 - The lock is `vendor-lock/1`, validated exactly like Ironmate `vendor/vendor_sync.py`
   (`repository, ref, commit, source, destination, blob_sha, sha256`).
+- `vendor-lock-check` also reports a `parent_ref` section for
+  `templates/parent-pr.ref.json` (or the root copy): schema, 40-hex non-zero
+  commit, repository_id and pull_number. Missing is allowed unless
+  `--parent-ref` is given; invalid fails the check.
 - `vendor-lock-check` hashes each destination: `ok`, `missing`,
   `digest_mismatch`, `header_modified` (only leading `#` lines were added, which
   breaks byte identity), `symlink`, and `unlocked` files under the vendor roots.
   With rules, destinations must match the layout and `ref` must be the commit.
 - `vendor-lock-verify-remote` reads `repository@commit:source` through the
   contents / git blobs API and compares both digests; `--upstream` adds the
-  latest upstream commit touching the source (information only).
+  latest upstream commit touching the source (information only);
+  `--first-parent` requires the pin to be on the source default-branch
+  first-parent history (PR-intermediate commits fail);
+  `--check-parent-ref` checks that `parent-pr.ref.json`'s commit equals the
+  PR's `merge_commit_sha` (merged into the default branch) or `head.sha`
+  (open) and that `repository_id` matches.
 - `vendor-plan` decides `place` or `skip` in a fixed order: pinned 40-hex
   commit, deny list, upstream exists, standard library only, no relative
   imports (single file), imported by this project, LICENSE sidecar, then the
@@ -925,7 +934,9 @@ python gh_identity.py duplicate-files --owner OWNER [--repos a,b] [--ignore GLOB
 Read-only. Repositories are always listed through the API for the user
 (`users/OWNER/repos?type=owner`, so organization repositories are excluded) and
 filtered explicitly: `visibility == public`, `archived == false`, forks
-excluded unless `--include-forks`. `--repos` overrides the list. Each default
+excluded unless `--include-forks`. Non-public names, including failures to
+read them, are counted as `redacted` and never printed. `--repos` overrides
+the list. `--heads child-heads.json` scans the recorded main SHAs. Each default
 branch tree is read once (no blobs), files are grouped by basename (common
 names such as `README.md`, `LICENSE`, `__init__.py`, `conftest.py`,
 `pyproject.toml`, `.gitignore`, images and workflow names are ignored by
@@ -941,6 +952,11 @@ default), and for each copy:
 Groups carry `warnings` (`content_differs`, `unknown_provenance`, `stale_pin`,
 `modified_after_lock`); `counts` summarizes null provenance and stale pins. `--markdown` prints a
 summary table of the top groups for `$GITHUB_STEP_SUMMARY`.
+`enrollment-progress --owner OWNER` reports, for each public consumer, whether
+`provider:source` (default `myon-bioinformatics/gh_identity:gh_identity.py`) is
+in its vendor lock, the pin, whether it is stale, and whether the pin is on the
+provider's first-parent history.
+`subtree-sync-status --mainline main` also reports `source_on_first_parent`.
 `vendor-lock-check` and `vendor-lock-verify-remote` also accept `--ci-check`
 (exit 1 unless ok; with `--upstream`, also when upstream moved) and
 `--markdown` (a table for `$GITHUB_STEP_SUMMARY`).
