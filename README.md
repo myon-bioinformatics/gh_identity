@@ -961,6 +961,29 @@ provider's first-parent history.
 (exit 1 unless ok; with `--upstream`, also when upstream moved) and
 `--markdown` (a table for `$GITHUB_STEP_SUMMARY`).
 
+## Pin audit (`pin-audit`)
+
+```bash
+python gh_identity.py pin-audit [--root .] [--json GLOB ...] [--only OWNER] [--remote-base https://github.com/] [--text]
+```
+
+Read-only. Collects commit pins from workflow `uses: OWNER/REPO@sha` and
+checkout `repository:`+`ref:`, and from JSON objects with `repository`+`commit`
+(vendor.lock.json, parent-pr.ref.json, child-heads.json, publication.json).
+Each distinct (repository, commit) is checked with plain git against the public
+remote (no API token; credential helpers disabled): a temporary bare repository
+fetches the default branch with `--filter=blob:none` (full history, no file
+contents — a shallow fetch cannot prove ancestry). States:
+
+* `ok`        on the default-branch first-parent line (`+N` since the pin);
+* `not_final` merged, but a PR head was pinned — `final` is the merge commit to pin;
+* `drift`     pinned source files differ between the pin and the default-branch tip;
+* `unmerged`  not reachable from the default branch;
+* `unavailable` the remote could not be read without credentials (name redacted).
+
+Exit 0 when every pin is `ok`, else 1. Generic: any repository. Parent-specific
+lock / catalog / materialize / auto-fix stay in the parent `vendor_sync.py`.
+
 ## Repository metadata (`repo-metadata`)
 
 ```bash

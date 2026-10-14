@@ -3877,6 +3877,175 @@ def enrollment_progress(owner, *, provider="myon-bioinformatics/gh_identity", so
                        "errors": errors, "redacted": redacted}}
 
 
+_PIN_USES = re.compile(r"uses:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?P<path>/[^@\s'\"]*)?@(?P<sha>[0-9a-f]{40})\b")
+_PIN_CHECKOUT_REPO = re.compile(r"^\s+repository:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)['\"]?\s*$")
+_PIN_CHECKOUT_REF = re.compile(r"^\s+ref:\s*['\"]?(?P<sha>[0-9a-f]{40})['\"]?\s*$")
+PIN_JSON_GLOBS = ("vendor.lock.json", "**/vendor.lock.json", "**/publication.json", "**/parent-pr.ref.json",
+                  "child-heads.json")
+
+
+def _pin_repo(value):
+    value = value.strip()
+    if value.endswith(".git"):
+        value = value[:-4]
+    m = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$", value.replace("https://github.com/", ""))
+    if not m:
+        raise ValueError("not an OWNER/REPO")
+    return m.group(1)
+
+
+def _workflow_pins(path, text):
+    pins, lines = [], text.splitlines()
+    for number, line in enumerate(lines, 1):
+        m = _PIN_USES.search(line)
+        if m:
+            pins.append({"repository": m["repo"], "commit": m["sha"], "file": path, "line": number,
+                         "entry": m["repo"] + (m["path"] or ""), "paths": []})
+        r = _PIN_CHECKOUT_REPO.match(line)
+        if r:
+            for later in range(number, min(number + 12, len(lines))):
+                ref = _PIN_CHECKOUT_REF.match(lines[later])
+                if ref:
+                    pins.append({"repository": r["repo"], "commit": ref["sha"], "file": path, "line": later + 1,
+                                 "entry": "checkout " + r["repo"], "paths": []})
+                    break
+    return pins
+
+
+def _json_pins(path, document):
+    pins = []
+    def walk(node, key=None):
+        if isinstance(node, dict):
+            commit = node.get("commit") or node.get("sha")
+            repository = node.get("repository") or key
+            if isinstance(repository, str) and isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) \
+                    and set(commit) != {"0"}:
+                try:
+                    name = _pin_repo(repository)
+                except ValueError:
+                    name = None
+                if name:
+                    source = node.get("source") or node.get("source_path")
+                    pins.append({"repository": name, "commit": commit, "file": path, "line": None,
+                                 "entry": node.get("destination") or node.get("path") or source or "",
+                                 "paths": [source] if isinstance(source, str) else []})
+            for k, value in node.items():
+                walk(value, k if isinstance(k, str) and "/" in k else None)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(document)
+    return pins
+
+
+def collect_pins(root=".", json_globs=PIN_JSON_GLOBS):
+    """Commit pins in a checkout: workflow `uses: OWNER/REPO@sha`, checkout `repository:`+`ref: sha`,
+    and JSON objects with `repository`+`commit` (vendor.lock.json, parent-pr.ref.json, ...)."""
+    root = os.path.abspath(os.fspath(root))
+    pins = []
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in (".git", "node_modules", ".venv", "__pycache__", ".test-deps"))
+        for name in sorted(files):
+            full = os.path.join(directory, name)
+            if os.path.islink(full):
+                continue
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            try:
+                if rel.startswith(".github/workflows/") and name.endswith((".yml", ".yaml")):
+                    with open(full, encoding="utf-8") as stream:
+                        pins += _workflow_pins(rel, stream.read(4 * 1024 * 1024))
+                elif name.endswith(".json") and any(fnmatch.fnmatch(rel, g) for g in json_globs):
+                    with open(full, encoding="utf-8") as stream:
+                        pins += _json_pins(rel, json.loads(stream.read(8 * 1024 * 1024)))
+            except (ValueError, UnicodeDecodeError):
+                continue
+    return pins
+
+
+def _audit_repository(repository, items, remote, timeout):
+    """Check all pins of one repository in a temporary bare repository (blob-less full history).
+    Git never receives credentials: credential helpers are disabled for these calls."""
+    nocred = ["-c", "credential.helper=", "-c", "http.extraHeader="]
+    with tempfile.TemporaryDirectory(prefix="ghi-pin-audit-") as bare:
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True, capture_output=True, timeout=60)
+        def git(*args, ok=(0,)):
+            raw, _, code = _git_run(bare, [*nocred, *args], max_bytes=64 * 1024 * 1024, ok=ok, timeout=timeout)
+            return _git_decode(raw), code
+        head, _ = git("ls-remote", "--symref", "--", remote, "HEAD")
+        m = re.search(r"ref: refs/heads/(\S+)\s+HEAD", head)
+        branch = m.group(1) if m else "main"
+        git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, f"+refs/heads/{branch}:refs/heads/{branch}")
+        first_parent = git("rev-list", "--first-parent", branch)[0].split()
+        tip = first_parent[0] if first_parent else None
+        on_line = set(first_parent)
+        rows = []
+        for commit in sorted({p["commit"] for p in items}):
+            pins = [p for p in items if p["commit"] == commit]
+            row = {"repository": repository, "commit": commit, "branch": branch, "pins": pins, "final": None}
+            if git("cat-file", "-e", commit + "^{commit}", ok=(0, 1, 128))[1] != 0:
+                if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, commit, ok=(0, 1, 128))[1] != 0:
+                    rows.append({**row, "state": "unmerged", "detail": "commit not found on the remote"})
+                    continue
+            if git("merge-base", "--is-ancestor", commit, branch, ok=(0, 1))[1] != 0:
+                rows.append({**row, "state": "unmerged", "detail": f"not reachable from {branch}"})
+                continue
+            since = int(git("rev-list", "--count", f"{commit}..{branch}")[0].strip() or 0)
+            if commit not in on_line:
+                descendants = set(git("rev-list", "--ancestry-path", f"{commit}..{branch}")[0].split())
+                merge = next((c for c in reversed(first_parent) if c in descendants), tip)
+                rows.append({**row, "state": "not_final", "final": merge, "since": since,
+                             "detail": "merged; pin the first-parent merge commit instead"})
+                continue
+            paths = sorted({p for pin in pins for p in pin["paths"] if isinstance(p, str)})
+            changed = git("diff", "--name-only", commit, branch, "--", *paths)[0].split() if paths else []
+            rows.append({**row, "state": "drift" if changed else "ok", "since": since, "changed": changed[:20],
+                         "detail": f"{len(changed)} pinned file(s) changed on {branch}" if changed else f"+{since} on {branch}"})
+        return rows
+
+
+def pin_audit(root=".", *, json_globs=PIN_JSON_GLOBS, only_owners=None, remote_base="https://github.com/", timeout=300):
+    """Audit commit pins of a checkout with plain git against public remotes (no API token).
+
+    States: ok, drift (pinned files changed on the default branch), not_final
+    (merged but not on the default branch first-parent line: a PR head was
+    pinned; `final` is the merge commit to pin), unmerged, unavailable. A
+    repository that cannot be fetched without credentials is reported without
+    its name (it may be private).
+    """
+    if not isinstance(remote_base, str) or not remote_base.startswith(("https://", "file://", "/")):
+        raise ValueError("remote_base must be https://, file:// or an absolute path")
+    pins = collect_pins(root, tuple(json_globs))
+    if only_owners:
+        pins = [p for p in pins if p["repository"].split("/")[0] in set(only_owners)]
+    by_repo = {}
+    for p in pins:
+        by_repo.setdefault(p["repository"], []).append(p)
+    rows, redacted = [], 0
+    for repository in sorted(by_repo):
+        try:
+            rows += _audit_repository(repository, by_repo[repository], remote_base + repository, timeout)
+        except (GitInspectionError, subprocess.SubprocessError, OSError):
+            redacted += 1
+            for p in by_repo[repository]:
+                rows.append({"repository": None, "commit": None, "branch": None, "final": None, "state": "unavailable",
+                             "pins": [{"file": p["file"], "line": p["line"]}], "detail": "remote not readable without credentials"})
+    counts = dict(Counter(r["state"] for r in rows))
+    return {"schema": "gh-identity-pin-audit/1", "write": False, "pins": len(pins), "results": rows,
+            "counts": counts, "redacted": redacted, "ok": all(r["state"] == "ok" for r in rows)}
+
+
+def render_pin_audit(o):
+    lines = []
+    for r in o["results"]:
+        where = sorted({p["file"] + (f":{p['line']}" if p.get("line") else "") for p in r["pins"]})
+        more = f" +{len(where) - 2} more" if len(where) > 2 else ""
+        name = f"{r['repository']}@{r['commit'][:7]}" if r["repository"] else "(redacted)"
+        final = f" -> {r['final']}" if r.get("final") else ""
+        lines.append(f"{r['state']} {name}{final} {r['detail']}  [{len(r['pins'])} pin(s): {', '.join(where[:2])}{more}]")
+    lines.append(f"pins={o['pins']} " + " ".join(f"{k}={v}" for k, v in sorted(o["counts"].items())))
+    return "\n".join(lines)
+
+
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
 
@@ -4112,6 +4281,7 @@ def _main(argv=None):
  x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH");x.add_argument("--heads",help="child-heads.json: read locks at the recorded commits")
  x=s.add_parser("enrollment-progress",help="per public consumer: provider file in vendor lock, pin, stale, first-parent (read-only)");x.add_argument("--owner",required=True);x.add_argument("--provider",default="myon-bioinformatics/gh_identity");x.add_argument("--source",default="gh_identity.py");x.add_argument("--repos");x.add_argument("--heads");x.add_argument("--include-forks",action="store_true")
  x=s.add_parser("duplicate-files",help="same basename across an owner's repositories, with vendor-lock provenance (read-only)");x.add_argument("--owner",required=True);x.add_argument("--repos",help="comma-separated names (default: public, non-archived, non-fork repos owned by --owner)");x.add_argument("--ignore",action="append",default=[],metavar="GLOB",help="additional basename/path patterns to ignore");x.add_argument("--no-default-ignore",action="store_true");x.add_argument("--include-forks",action="store_true");x.add_argument("--min-repos",type=int,default=2);x.add_argument("--heads",help="child-heads.json: scan the recorded commits");x.add_argument("--markdown",action="store_true",help="Markdown summary (for GITHUB_STEP_SUMMARY) instead of JSON");x.add_argument("--top",type=int,default=30,help="groups shown with --markdown")
+ x=s.add_parser("pin-audit",help="audit commit pins (workflows, vendor locks, parent-pr.ref.json) with plain git: ok/drift/not_final/unmerged (read-only, no token)");x.add_argument("--root",default=".");x.add_argument("--json",action="append",dest="json_globs",metavar="GLOB");x.add_argument("--only",action="append",metavar="OWNER");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true",help="one line per pinned commit")
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -4182,6 +4352,7 @@ def _main(argv=None):
   elif ns.cmd=="duplicate-files":
    if ns.min_repos<2:raise ValueError("--min-repos must be at least 2")
    o=duplicate_files(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,ignore=() if ns.no_default_ignore else DUPLICATE_IGNORE,extra_ignore=ns.ignore,min_repos=ns.min_repos,include_forks=ns.include_forks,heads=load_child_heads(ns.heads) if ns.heads else None,transport=transport)
+  elif ns.cmd=="pin-audit":o=pin_audit(ns.root,json_globs=tuple(ns.json_globs) if ns.json_globs else PIN_JSON_GLOBS,only_owners=ns.only,remote_base=ns.remote_base,timeout=ns.git_timeout)
   elif ns.cmd=="vendor-lock-check":o=vendor_lock_check(ns.root,ns.lock,ns.rules,ns.parent_ref)
   elif ns.cmd=="vendor-lock-verify-remote":o=vendor_lock_verify_remote(ns.root,ns.lock,upstream=ns.upstream,first_parent=ns.first_parent,check_parent_ref=ns.check_parent_ref,parent_ref=ns.parent_ref,transport=transport)
   elif ns.cmd=="vendor-plan":o=vendor_plan(ns.root,ns.candidate,ns.rules,transport=transport)
@@ -4250,8 +4421,10 @@ def _main(argv=None):
  elif ns.cmd in ("prs","issues") and ns.text:print(render_list(o))
  elif ns.cmd=="get" and ns.text:print(render_get(o))
  elif ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.markdown:print(render_vendor_markdown(o))
+ elif ns.cmd=="pin-audit" and ns.text:print(render_pin_audit(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd=="pin-audit":return 0 if o["ok"] else 1
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
   return 0 if o["ok"] and not drift else 1
