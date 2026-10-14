@@ -2840,6 +2840,283 @@ def git_subtree_split(root=".", prefix=None, revision="HEAD", *, timeout=600):
     return {**base, "source": source, "sha": sha[0], "reason": None}
 
 
+_SUBTREE_TRAILER = "Subtree-Split"
+
+
+def _rev_commit(root, revision):
+    if not isinstance(revision, str) or not revision or revision.startswith("-") or any(c in revision for c in ("\0", "\n", "\r")):
+        raise ValueError("invalid revision")
+    raw, _, code = _git_run(root, ["rev-parse", "--verify", "-q", "--end-of-options", revision + "^{commit}"],
+                            max_bytes=4096, ok=(0, 1, 128))
+    if code != 0:
+        raise ValueError("revision not found")
+    return _git_decode(raw).strip()
+
+
+def _rev_list(root, sha, max_bytes=16 * 1024 * 1024):
+    raw, truncated, _ = _git_run(root, ["rev-list", "--end-of-options", sha], max_bytes=max_bytes)
+    if truncated:
+        raise GitInspectionError("rev-list exceeds output limit")
+    return _git_decode(raw).split()
+
+
+def _changed_paths(root, sha):
+    raw, truncated, _ = _git_run(root, ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", "-m", sha],
+                                 max_bytes=4 * 1024 * 1024)
+    if truncated:
+        raise GitInspectionError("diff-tree exceeds output limit")
+    return sorted({p for p in _git_decode(raw).split("\0") if p})
+
+
+def subtree_sync_status(root=".", prefix=None, other_root=None, *, revision="HEAD", other_ref="HEAD",
+                        other_only_paths=(), max_listed=50, timeout=600):
+    """Compare `git subtree split --prefix` of a monorepo with a split-out checkout.
+
+    Local only, read-only, no fetch. git subtree split is deterministic, so the
+    split commits of the monorepo carry the same SHAs as the history of the
+    split-out repository; both histories are compared as SHA sets from their
+    own object databases. Commits of the other side touching only
+    `other_only_paths` (fnmatch patterns, e.g. repo-only files) are not counted.
+    """
+    if other_root is None:
+        raise ValueError("other_root required")
+    patterns = tuple(other_only_paths or ())
+    if any(not isinstance(p, str) or not p for p in patterns):
+        raise ValueError("invalid other_only_paths")
+    split = git_subtree_split(root, prefix, revision, timeout=timeout)
+    base = {"schema": "gh-identity-subtree-sync/1", "prefix": split["prefix"], "write": False,
+            "source": split["source"], "split_sha": split["sha"]}
+    if split["reason"]:
+        return {**base, "state": None, "reason": split["reason"]}
+    other_head = _rev_commit(other_root, other_ref)
+    mono = _rev_list(root, split["sha"])
+    other = _rev_list(other_root, other_head)
+    mono_set, other_set = set(mono), set(other)
+    mono_extra = [c for c in mono if c not in other_set]
+    other_extra, ignored = [], []
+    for c in other:
+        if c in mono_set:
+            continue
+        paths = _changed_paths(other_root, c)
+        if patterns and paths and all(any(fnmatch.fnmatchcase(p, pat) for pat in patterns) for p in paths):
+            ignored.append(c)
+        else:
+            other_extra.append(c)
+    if not mono_set & other_set:
+        state = "unrelated"
+    elif mono_extra and other_extra:
+        state = "diverged"
+    elif mono_extra:
+        state = "monorepo_ahead"
+    elif other_extra:
+        state = "other_ahead"
+    else:
+        state = "in_sync"
+    return {**base, "other_head": other_head, "split_in_other": split["sha"] in other_set,
+            "other_head_in_split": other_head in mono_set,
+            "monorepo_ahead": len(mono_extra), "other_ahead": len(other_extra), "other_only_ignored": len(ignored),
+            "monorepo_ahead_commits": mono_extra[:max_listed], "other_ahead_commits": other_extra[:max_listed],
+            "state": state, "reason": None}
+
+
+def _parse_split_trailer(message):
+    found = []
+    for line in message.splitlines():
+        m = re.fullmatch(_SUBTREE_TRAILER + r":\s*([0-9a-f]{40}|[0-9a-f]{64})\s+([0-9a-f]{40}|[0-9a-f]{64})\s+(\S+)\s*", line.strip())
+        if m:
+            found.append({"source": m.group(1), "split_sha": m.group(2), "prefix": m.group(3)})
+    return found
+
+
+def sync_provenance(root=".", prefix=None, other_root=None, *, revision="HEAD", other_ref="HEAD",
+                    direction=None, squash=False, generated_at=None, other_only_paths=(), timeout=600):
+    """Provenance record of a subtree sync: which monorepo SHA / split SHA it came from.
+
+    Read-only. The suggested commit trailer is
+    `Subtree-Split: <monorepo_sha> <split_sha> <prefix>`.
+    """
+    if direction not in (None, "push", "pull"):
+        raise ValueError("direction must be push or pull")
+    status = subtree_sync_status(root, prefix, other_root, revision=revision, other_ref=other_ref,
+                                 other_only_paths=other_only_paths, timeout=timeout)
+    def ident(path, sha):
+        return {"repository": remote_repository(path).get("full_name"), "sha": sha}
+    record = {"schema": "gh-identity-sync-provenance/1", "write": False, "prefix": status["prefix"],
+              "monorepo": ident(root, status["source"]), "split_sha": status["split_sha"],
+              "other": ident(other_root, status.get("other_head")), "state": status["state"],
+              "direction": direction, "squash": bool(squash),
+              "generated_at": generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "reason": status["reason"]}
+    if status["split_sha"]:
+        record["trailer"] = f"{_SUBTREE_TRAILER}: {status['source']} {status['split_sha']} {status['prefix']}"
+    return record
+
+
+def verify_sync_provenance(root=".", commit="HEAD", *, monorepo_root=None, timeout=600):
+    """Check Subtree-Split trailers of `commit` (in root). With monorepo_root, the
+    split is recomputed from the recorded monorepo SHA and must match."""
+    sha = _rev_commit(root, commit)
+    raw, _, _ = _git_run(root, ["log", "-1", "--format=%B", sha], max_bytes=256 * 1024)
+    trailers = _parse_split_trailer(_git_decode(raw))
+    base = {"schema": "gh-identity-sync-provenance-check/1", "write": False, "commit": sha}
+    if not trailers:
+        return {**base, "trailers": [], "ok": False, "reason": "no_trailer"}
+    results = []
+    for t in trailers:
+        row = dict(t)
+        if monorepo_root is not None:
+            try:
+                again = git_subtree_split(monorepo_root, t["prefix"], t["source"], timeout=timeout)
+                row["recomputed"] = again["sha"]
+                row["ok"] = again["sha"] == t["split_sha"]
+                row["reason"] = again["reason"] or (None if row["ok"] else "split_mismatch")
+            except ValueError as error:
+                row.update(recomputed=None, ok=False, reason=str(error).replace(" ", "_"))
+        results.append(row)
+    ok = all(r.get("ok", True) for r in results)
+    return {**base, "trailers": results, "ok": ok, "reason": None if ok else "mismatch"}
+
+
+def write_sync_provenance(record, output_dir):
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "sync-provenance.json").write_text(json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return {"json": "sync-provenance.json"}
+
+
+def _python_imports(source):
+    """({absolute top-level module: first line}, has_relative_import) from Python source; never executed."""
+    import ast
+    tree = ast.parse(source)
+    names, relative = {}, False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                names.setdefault(a.name.split(".")[0], node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                relative = True
+            elif node.module:
+                names.setdefault(node.module.split(".")[0], node.lineno)
+    return names, relative
+
+
+def _stdlib_names():
+    return set(getattr(sys, "stdlib_module_names", ())) | set(sys.builtin_module_names) | {"__future__"}
+
+
+def _git_blobs(root, specs, max_bytes=64 * 1024 * 1024):
+    """Read `<rev>:<path>` blobs with one `git cat-file --batch`; returns {spec: bytes}."""
+    if not specs:
+        return {}
+    raw, truncated, _ = _git_run(root, ["cat-file", "--batch"], input_bytes=("\n".join(specs) + "\n").encode(),
+                                 max_bytes=max_bytes)
+    if truncated:
+        raise GitInspectionError("cat-file exceeds output limit")
+    out, pos = {}, 0
+    for spec in specs:
+        end = raw.index(b"\n", pos)
+        header = raw[pos:end].split()
+        pos = end + 1
+        if len(header) == 3 and header[1] == b"blob":
+            size = int(header[2])
+            out[spec] = raw[pos:pos + size]
+            pos += size + 1
+    return out
+
+
+def split_preflight(root=".", prefix=None, revision="HEAD", *, timeout=600, max_listed=200):
+    """Read-only checklist before splitting `prefix` out of a monorepo.
+
+    Lists references into the prefix from outside (imports, paths, sys.path,
+    config), references from the prefix to the rest of the repository,
+    third-party imports inside the prefix, and the split SHA / history size.
+    """
+    prefix = _subtree_prefix(prefix)
+    source = _rev_commit(root, revision)
+    raw, truncated, _ = _git_run(root, ["ls-tree", "-r", "-z", "--name-only", source], max_bytes=32 * 1024 * 1024)
+    if truncated:
+        raise GitInspectionError("ls-tree exceeds output limit")
+    files = [p for p in _git_decode(raw).split("\0") if p]
+    inside = [p for p in files if p.startswith(prefix + "/")]
+    outside = [p for p in files if not p.startswith(prefix + "/")]
+    base = {"schema": "gh-identity-split-preflight/1", "write": False, "prefix": prefix, "source": source}
+    if not inside:
+        return {**base, "reason": "prefix_not_found", "checks": []}
+    tops = sorted({p.split("/", 1)[0] for p in outside if "/" in p} - {".git", ".github"})
+    def modules(paths, strip):
+        mods = set()
+        for p in paths:
+            rest = p[len(strip):] if strip else p
+            parts = rest.split("/")
+            if parts[-1].endswith(".py"):
+                mods.add(parts[-1][:-3])
+            if len(parts) > 1:
+                mods.add(parts[0])
+        mods.discard("__init__")
+        return mods
+    prefix_mods = modules(inside, prefix + "/")
+    outside_mods = modules([p for p in outside if p.endswith(".py")], "") - prefix_mods
+    blobs = _git_blobs(root, [source + ":" + p for p in files if p.endswith(".py")])
+    inbound, outbound, third, syntax = [], [], set(), []
+    stdlib = _stdlib_names()
+    for p in files:
+        data = blobs.get(source + ":" + p)
+        if data is None:
+            continue
+        try:
+            names, _ = _python_imports(data.decode("utf-8", "replace"))
+        except SyntaxError:
+            syntax.append(p)
+            continue
+        if p in inside:
+            for n in sorted(names):
+                if n in prefix_mods or n in stdlib:
+                    continue
+                if n in outside_mods:
+                    outbound.append({"file": p, "line": names[n], "kind": "import", "target": n})
+                else:
+                    third.add(n)
+        else:
+            for n in sorted(set(names) & prefix_mods):
+                inbound.append({"file": p, "line": names[n], "kind": "import", "target": n})
+    def grep(needles, pathspec):
+        args = ["grep", "-n", "-I", "-F"]
+        for needle in needles:
+            args += ["-e", needle]
+        raw, _, code = _git_run(root, [*args, source, "--", *pathspec], max_bytes=4 * 1024 * 1024, ok=(0, 1))
+        rows = []
+        for line in _git_decode(raw).splitlines():
+            parts = line.split(":", 3)
+            if len(parts) == 4:
+                rows.append((parts[1], int(parts[2]), parts[3]))
+        return rows
+    config_ext = (".toml", ".yml", ".yaml", ".cfg", ".ini", ".json")
+    for path, line, text in grep([prefix + "/", '"' + prefix + '"', "'" + prefix + "'"], [":(exclude)" + prefix]):
+        kind = "sys.path" if "sys.path" in text else "config" if path.endswith(config_ext) else "path"
+        inbound.append({"file": path, "line": line, "kind": kind, "target": text.strip()[:200]})
+    if tops:
+        needles = [t + "/" for t in tops] + ["'" + t + "'" for t in tops] + ['"' + t + '"' for t in tops]
+        for path, line, text in grep(needles, [prefix]):
+            outbound.append({"file": path, "line": line, "kind": "sys.path" if "sys.path" in text else "path",
+                             "target": text.strip()[:200]})
+    split = git_subtree_split(root, prefix, source, timeout=timeout)
+    history = len(_rev_list(root, split["sha"])) if split["sha"] else None
+    config_refs = sorted({f"{r['file']}:{r['line']}" for r in inbound if r["kind"] == "config"})
+    checks = [
+        {"id": "split", "ok": split["sha"] is not None, "detail": split["reason"]},
+        {"id": "inbound_refs", "ok": not inbound, "detail": len(inbound)},
+        {"id": "outbound_refs", "ok": not outbound, "detail": len(outbound)},
+        {"id": "third_party_imports", "ok": not third, "detail": sorted(third)},
+        {"id": "syntax", "ok": not syntax, "detail": syntax[:max_listed]},
+    ]
+    return {**base, "split_sha": split["sha"], "history_commits": history,
+            "files": len(inside), "inbound_refs": inbound[:max_listed], "outbound_refs": outbound[:max_listed],
+            "inbound_total": len(inbound), "outbound_total": len(outbound),
+            "third_party_imports": sorted(third), "config_refs": config_refs,
+            "checks": checks, "ok": all(c["ok"] for c in checks), "reason": split["reason"]}
+
+
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
 
@@ -3066,6 +3343,9 @@ def _main(argv=None):
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("subtree-split",help="read-only git subtree split --prefix: print the split commit SHA (no refs changed)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
+ x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--timeout",type=float,default=600)
+ x=s.add_parser("sync-provenance",help="record or verify which monorepo SHA a subtree sync came from (read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix");x.add_argument("--revision",default="HEAD");x.add_argument("--other-root");x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--direction",choices=("push","pull"));x.add_argument("--squash",action="store_true");x.add_argument("--generated-at");x.add_argument("--output-dir");x.add_argument("--verify",metavar="COMMIT",help="check Subtree-Split trailers of COMMIT in --root");x.add_argument("--monorepo-root",help="with --verify: recompute the split there");x.add_argument("--timeout",type=float,default=600)
+ x=s.add_parser("split-preflight",help="read-only checklist before splitting a directory into its own repository");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo");x.add_argument("repo")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
@@ -3125,6 +3405,14 @@ def _main(argv=None):
    else:raise ValueError("branch required")
   elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,fetch_timeout=ns.fetch_timeout,write=ns.write)
   elif ns.cmd=="local-position":o=local_position(ns.root)
+  elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout)
+  elif ns.cmd=="sync-provenance":
+   if ns.verify:o=verify_sync_provenance(ns.root,ns.verify,monorepo_root=ns.monorepo_root,timeout=ns.timeout)
+   else:
+    if not ns.prefix or not ns.other_root:raise ValueError("--prefix and --other-root required")
+    o=sync_provenance(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,direction=ns.direction,squash=ns.squash,generated_at=ns.generated_at,other_only_paths=ns.other_only_path,timeout=ns.timeout)
+    if ns.output_dir:write_sync_provenance(o,ns.output_dir)
+  elif ns.cmd=="split-preflight":o=split_preflight(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="subtree-split":o=git_subtree_split(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")
