@@ -1,5 +1,8 @@
 """Public GitHub URL helpers (Atom branch feed, raw.githubusercontent.com)."""
-from unittest.mock import patch
+import base64
+import io
+import urllib.error
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -54,11 +57,109 @@ def test_public_github_repository_check_invalid_commit():
         g.public_github_repository_check("me/up", "main")
 
 
-def test_remote_file_falls_back_to_api_on_public_miss():
-    import base64
-    meta = {"type": "file", "sha": g.git_blob_sha(b"v\n"), "size": 2}
-    blob = {"encoding": "base64", "content": base64.b64encode(b"v\n").decode()}
-    with patch.object(g, "public_github_raw_bytes", side_effect=g.Error("not_found_or_inaccessible")), \
+COMMIT = "c" * 40
+
+
+def _api_file_payload(body):
+    meta = {"type": "file", "sha": g.git_blob_sha(body), "size": len(body)}
+    blob = {"encoding": "base64", "content": base64.b64encode(body).decode()}
+    return meta, blob
+
+
+def test_remote_file_raw_success_skips_api():
+    body = b"from raw\n"
+    with patch.object(g, "public_github_raw_bytes", return_value=body) as raw, \
+         patch.object(g, "request") as req:
+        assert g._remote_file("o/up", "mod.py", COMMIT) == body
+    raw.assert_called_once()
+    req.assert_not_called()
+
+
+def test_remote_file_branch_ref_skips_raw_uses_api():
+    body = b"api only\n"
+    meta, blob = _api_file_payload(body)
+    with patch.object(g, "public_github_raw_bytes") as raw, \
          patch.object(g, "request", side_effect=[meta, blob]) as req:
-        assert g._remote_file("o/up", "mod.py", "c" * 40) == b"v\n"
+        assert g._remote_file("o/up", "mod.py", "main") == body
+    raw.assert_not_called()
     assert req.call_count == 2
+
+
+@pytest.mark.parametrize("raw_code", [
+    "permission_or_rate_limit", "rate_limit", "server_error", "operation_timeout",
+])
+def test_remote_file_raw_errors_fallback_to_api(raw_code):
+    body = b"v\n"
+    meta, blob = _api_file_payload(body)
+    with patch.object(g, "public_github_raw_bytes", side_effect=g.Error(raw_code)), \
+         patch.object(g, "request", side_effect=[meta, blob]) as req:
+        assert g._remote_file("o/up", "mod.py", COMMIT) == body
+    assert req.call_count == 2
+
+
+def test_remote_file_raw_404_api_403_is_permission():
+    with patch.object(g, "public_github_raw_bytes", side_effect=g.Error("not_found_or_inaccessible")), \
+         patch.object(g, "request", side_effect=g.Error("permission_or_rate_limit")):
+        with pytest.raises(g.Error) as exc:
+            g._remote_file("o/up", "mod.py", COMMIT)
+    assert exc.value.code == "permission_or_rate_limit"
+
+
+def test_remote_file_raw_404_api_404_is_not_found():
+    with patch.object(g, "public_github_raw_bytes", side_effect=g.Error("not_found_or_inaccessible")), \
+         patch.object(g, "request", side_effect=g.Error("not_found_or_inaccessible")):
+        with pytest.raises(g.Error) as exc:
+            g._remote_file("o/up", "mod.py", COMMIT)
+    assert exc.value.code == "not_found_or_inaccessible"
+
+
+def test_public_github_raw_bytes_url_encodes_ref():
+    captured = {}
+    def fake(url, **kw):
+        captured["url"] = url
+        return b"x"
+    ref = "a" * 40
+    with patch.object(g, "_public_github_get", side_effect=fake):
+        g.public_github_raw_bytes("me/up", "f.py", ref)
+    assert f"/{ref}/f.py" in captured["url"]
+    with patch.object(g, "_public_github_get", side_effect=fake):
+        g.public_github_raw_bytes("me/up", "f.py", "feature/foo")
+    assert "/feature%2Ffoo/f.py" in captured["url"]
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("https://example.test/", code, "msg", {}, io.BytesIO(b""))
+
+
+@pytest.mark.parametrize("status,expected", [
+    (404, "not_found_or_inaccessible"),
+    (403, "permission_or_rate_limit"),
+    (401, "permission_or_rate_limit"),
+    (429, "rate_limit"),
+    (500, "server_error"),
+    (502, "server_error"),
+    (418, "invalid_response"),
+])
+def test_public_github_get_http_status_mapping(status, expected):
+    with patch("urllib.request.urlopen", side_effect=_http_error(status)):
+        with pytest.raises(g.Error) as exc:
+            g._public_github_get("https://github.com/o/r/commits/main.atom")
+    assert exc.value.code == expected
+
+
+def test_public_github_get_timeout_is_operation_timeout():
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError(TimeoutError())):
+        with pytest.raises(g.Error) as exc:
+            g._public_github_get("https://raw.githubusercontent.com/o/r/sha/f")
+    assert exc.value.code == "operation_timeout"
+
+
+def test_public_github_get_200_returns_body():
+    payload = b"ok"
+    response = MagicMock()
+    response.__enter__ = lambda s: s
+    response.__exit__ = MagicMock(return_value=False)
+    response.getcode = MagicMock(return_value=200)
+    response.read = MagicMock(return_value=payload)
+    with patch("urllib.request.urlopen", return_value=response):
+        assert g._public_github_get("https://example.test/x") == payload

@@ -3385,13 +3385,24 @@ def public_github_branch_head(repository, branch="main", *, timeout=30, max_byte
     return commits[0]
 
 
+def _pinned_commit_ref(ref):
+    return isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref, re.I) and set(ref.lower()) != {"0"}
+
+
+_REMOTE_FILE_RAW_FALLBACK = frozenset({
+    "not_found_or_inaccessible", "permission_or_rate_limit", "rate_limit", "server_error",
+    "operation_timeout", "transport_error",
+})
+
+
 def public_github_raw_bytes(repository, path, ref, *, timeout=30, max_bytes=8 * 1024 * 1024):
     """File bytes at repository@ref:path via raw.githubusercontent.com (read-only, no token)."""
     r = repo(repository)
     owner, name = r.split("/", 1)
     clean = _vendor_path(path)
     segments = [urllib.parse.quote(part, safe="") for part in clean.split("/") if part]
-    url = f"https://raw.githubusercontent.com/{owner}/{name}/{ref}/{'/'.join(segments)}"
+    ref_part = urllib.parse.quote(ref, safe="")
+    url = f"https://raw.githubusercontent.com/{owner}/{name}/{ref_part}/{'/'.join(segments)}"
     return _public_github_get(url, timeout=timeout, max_bytes=max_bytes)
 
 
@@ -3431,12 +3442,12 @@ def _remote_file(repository, path, commit, transport="auto", timeout=30, max_byt
     """Bytes of repository@commit:path via raw.githubusercontent.com, else the contents API (read-only)."""
     r = repo(repository)
     clean = _vendor_path(path)
-    try:
-        return public_github_raw_bytes(r, clean, commit, timeout=timeout, max_bytes=max_bytes)
-    except Error as exc:
-        if exc.code not in ("not_found_or_inaccessible", "transport_error", "server_error", "invalid_response",
-                            "operation_timeout", "rate_limit", "permission_or_rate_limit"):
-            raise
+    if _pinned_commit_ref(commit):
+        try:
+            return public_github_raw_bytes(r, clean, commit, timeout=timeout, max_bytes=max_bytes)
+        except Error as exc:
+            if exc.code not in _REMOTE_FILE_RAW_FALLBACK:
+                raise
     meta = request("GET", f"repos/{r}/contents/{urllib.parse.quote(clean)}?ref={commit}",
                    transport=transport, timeout=timeout)
     if not isinstance(meta, dict) or meta.get("type") != "file" or not isinstance(meta.get("sha"), str):
