@@ -3717,11 +3717,12 @@ def validate_parent_ref(ref):
     for key in ("pull_number", "repository_id"):
         if type(ref.get(key)) is not int or ref[key] < 1:
             problems.append(key)
+    c = ref.get("commit")
+    if not isinstance(c, str) or not re.fullmatch(r"[0-9a-f]{40}", c) or set(c) == {"0"}:
+        problems.append("commit")
     if "optional" in ref and not isinstance(ref["optional"], dict):
         problems.append("optional")
-    if "commit" in ref:
-        problems.append("commit")
-    extra = set(ref) - {"schema", "repository", "pull_number", "repository_id", "optional"}
+    extra = set(ref) - {"schema", "repository", "pull_number", "repository_id", "commit", "optional"}
     if extra:
         problems.append("unknown_fields")
     return problems
@@ -3739,7 +3740,7 @@ def parent_ref_status(root=".", path=None):
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return {"path": rel, "status": "invalid", "problems": ["not_json"], "ref": None}
             problems = validate_parent_ref(ref)
-            keep = {k: ref.get(k) for k in ("repository", "pull_number", "repository_id")} if isinstance(ref, dict) else None
+            keep = {k: ref.get(k) for k in ("repository", "pull_number", "repository_id", "commit")} if isinstance(ref, dict) else None
             return {"path": rel, "status": "invalid" if problems else "ok", "problems": problems, "ref": keep}
     return {"path": None, "status": "missing", "problems": [], "ref": None}
 
@@ -3780,7 +3781,8 @@ def _first_parent_contains(repository, target, *, branch=None, transport="auto",
 
 
 def verify_parent_ref(ref, *, transport="auto", timeout=30):
-    """Check a parent-pr-ref/1 against GitHub: repository_id and pull request identity."""
+    """Check a parent-pr-ref/1 against GitHub: repository_id, and commit equals the PR
+    merge_commit_sha (merged into the default branch) or head.sha (open)."""
     problems = validate_parent_ref(ref)
     out = {"status": "invalid", "problems": problems}
     if problems:
@@ -3796,6 +3798,9 @@ def verify_parent_ref(ref, *, transport="auto", timeout=30):
     if not isinstance(pr, dict):
         return {"status": "unavailable", "problems": ["invalid_pull"]}
     state = "merged" if pr.get("merged_at") else pr.get("state")
+    expected = pr.get("merge_commit_sha") if state == "merged" else (pr.get("head") or {}).get("sha") if state == "open" else None
+    if expected != ref["commit"]:
+        problems.append("commit_mismatch")
     if state == "merged" and (pr.get("base") or {}).get("ref") != info.get("default_branch"):
         problems.append("not_merged_into_default_branch")
     if state not in ("merged", "open"):
@@ -3895,7 +3900,7 @@ def enrollment_progress(owner, *, provider="myon-bioinformatics/gh_identity", so
 _PIN_USES = re.compile(r"uses:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?P<path>/[^@\s'\"]*)?@(?P<sha>[0-9a-f]{40})\b")
 _PIN_CHECKOUT_REPO = re.compile(r"^\s+repository:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)['\"]?\s*$")
 _PIN_CHECKOUT_REF = re.compile(r"^\s+ref:\s*['\"]?(?P<sha>[0-9a-f]{40})['\"]?\s*$")
-PIN_JSON_GLOBS = ("vendor.lock.json", "**/vendor.lock.json", "**/publication.json",
+PIN_JSON_GLOBS = ("vendor.lock.json", "**/vendor.lock.json", "**/publication.json", "**/parent-pr.ref.json",
                   "child-heads.json")
 
 
@@ -3959,7 +3964,7 @@ class PinInputError(ValueError):
 
 def collect_pins(root=".", json_globs=PIN_JSON_GLOBS):
     """Commit pins in a checkout: workflow `uses: OWNER/REPO@sha`, checkout `repository:`+`ref: sha`,
-    and JSON objects with `repository`+`commit` (vendor.lock.json, ...)."""
+    and JSON objects with `repository`+`commit` (vendor.lock.json, parent-pr.ref.json, ...)."""
     root = os.path.abspath(os.fspath(root))
     pins = []
     for directory, dirs, files in os.walk(root):
@@ -4497,12 +4502,12 @@ def _main(argv=None):
  x=s.add_parser("sync-provenance",help="record or verify which monorepo SHA a subtree sync came from (read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix");x.add_argument("--revision",default="HEAD");x.add_argument("--other-root");x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--direction",choices=("push","pull"));x.add_argument("--squash",action="store_true");x.add_argument("--generated-at");x.add_argument("--output-dir");x.add_argument("--verify",metavar="COMMIT",help="check Subtree-Split trailers of COMMIT in --root");x.add_argument("--monorepo-root",help="with --verify: recompute the split there");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("split-preflight",help="read-only checklist before splitting a directory into its own repository");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("vendor-lock-check",help="compare vendor.lock.json (vendor-lock/1) with files on disk; optional vendor-rules/1 (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--rules");x.add_argument("--parent-ref",help="parent-pr.ref.json path (default: templates/ then root; required when given)");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
- x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source");x.add_argument("--first-parent",action="store_true",help="pins must be on the source default branch first-parent history");x.add_argument("--check-parent-ref",action="store_true",help="verify parent-pr.ref.json repository_id and pull request identity");x.add_argument("--parent-ref");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok (with --upstream, also when upstream moved)");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
+ x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source");x.add_argument("--first-parent",action="store_true",help="pins must be on the source default branch first-parent history");x.add_argument("--check-parent-ref",action="store_true",help="verify parent-pr.ref.json repository_id and PR merge/head commit");x.add_argument("--parent-ref");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok (with --upstream, also when upstream moved)");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
  x=s.add_parser("vendor-plan",help="rule-based vendor placement plan for OWNER/REPO:PATH@SHA candidates (read-only)");x.add_argument("--root",default=".");x.add_argument("--rules");x.add_argument("--candidate",action="append",required=True,metavar="OWNER/REPO:PATH@SHA")
  x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH");x.add_argument("--heads",help="child-heads.json: read locks at the recorded commits")
  x=s.add_parser("enrollment-progress",help="per public consumer: provider file in vendor lock, pin, stale, first-parent (read-only)");x.add_argument("--owner",required=True);x.add_argument("--provider",default="myon-bioinformatics/gh_identity");x.add_argument("--source",default="gh_identity.py");x.add_argument("--repos");x.add_argument("--heads");x.add_argument("--include-forks",action="store_true")
  x=s.add_parser("duplicate-files",help="same basename across an owner's repositories, with vendor-lock provenance (read-only)");x.add_argument("--owner",required=True);x.add_argument("--repos",help="comma-separated names (default: public, non-archived, non-fork repos owned by --owner)");x.add_argument("--ignore",action="append",default=[],metavar="GLOB",help="additional basename/path patterns to ignore");x.add_argument("--no-default-ignore",action="store_true");x.add_argument("--include-forks",action="store_true");x.add_argument("--min-repos",type=int,default=2);x.add_argument("--heads",help="child-heads.json: scan the recorded commits");x.add_argument("--markdown",action="store_true",help="Markdown summary (for GITHUB_STEP_SUMMARY) instead of JSON");x.add_argument("--top",type=int,default=30,help="groups shown with --markdown")
- x=s.add_parser("pin-audit",help="audit commit pins (workflows, vendor locks) with plain git: ok/drift/not_final/unmerged (read-only, no token)");x.add_argument("--root",default=".");x.add_argument("--json",action="append",dest="json_globs",metavar="GLOB");x.add_argument("--only",action="append",metavar="OWNER");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true",help="one line per pinned commit")
+ x=s.add_parser("pin-audit",help="audit commit pins (workflows, vendor locks, parent-pr.ref.json) with plain git: ok/drift/not_final/unmerged (read-only, no token)");x.add_argument("--root",default=".");x.add_argument("--json",action="append",dest="json_globs",metavar="GLOB");x.add_argument("--only",action="append",metavar="OWNER");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true",help="one line per pinned commit")
  x=s.add_parser("repo-identity",help="public repository id, visibility, default branch, head SHA (read-only)");x.add_argument("repository")
  x=s.add_parser("owner-repositories",help="public repositories of a user or org (read-only; no hard-coded names)");x.add_argument("owner");x.add_argument("--kind",choices=("auto","user","org"),default="auto");x.add_argument("--include-forks",action="store_true");x.add_argument("--include-archived",action="store_true")
  x=s.add_parser("pr-identity",help="PR state, head/base SHAs, merge_commit_sha, repository_id (read-only)");x.add_argument("repository");x.add_argument("number",type=int)
