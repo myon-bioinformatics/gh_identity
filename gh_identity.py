@@ -3326,10 +3326,129 @@ def vendor_lock_check(root=".", lock="vendor.lock.json", rules=None, parent_ref=
             "counts": dict(Counter(r["status"] for r in rows)), "ok": ok}
 
 
-def _remote_file(repository, path, commit, transport="auto", timeout=30, max_bytes=8 * 1024 * 1024):
-    """Bytes of repository@commit:path via the contents and git/blobs API (read-only)."""
+_PUBLIC_ATOM_COMMIT = re.compile(
+    r"<id>tag:github\.com,2008:(?:Grit::Commit|Commit)/([0-9a-f]{40})</id>", re.IGNORECASE)
+
+
+def _public_github_get(url, *, timeout=30, max_bytes=8 * 1024 * 1024, accept="*/*"):
+    """GET a public github.com or raw.githubusercontent.com URL (no token)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "gh_identity/0.1", "Accept": accept})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            status = response.getcode()
+            if status == 404:
+                raise Error("not_found_or_inaccessible")
+            if status == 429:
+                raise Error("rate_limit")
+            if status in (401, 403):
+                raise Error("permission_or_rate_limit")
+            if status != 200:
+                raise Error("server_error" if status >= 500 else "invalid_response")
+            data = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise Error("not_found_or_inaccessible") from None
+        if exc.code == 429:
+            raise Error("rate_limit") from None
+        if exc.code in (401, 403):
+            raise Error("permission_or_rate_limit") from None
+        raise Error("server_error" if exc.code >= 500 else "invalid_response") from None
+    except urllib.error.URLError as exc:
+        code = "operation_timeout" if isinstance(exc.reason, TimeoutError) else "transport_error"
+        raise Error(code) from None
+    except TimeoutError:
+        raise Error("operation_timeout") from None
+    except OSError:
+        raise Error("transport_error") from None
+    if len(data) > max_bytes:
+        raise Error("file_too_large")
+    budget = _BUDGET.get()
+    if budget is not None:
+        budget.charge("bytes", len(data))
+    return data
+
+
+def public_github_branch_commits(repository, branch="main", *, timeout=30, max_bytes=512 * 1024):
+    """Recent commit SHAs on a branch from the public commits Atom feed (read-only, no token)."""
     r = repo(repository)
-    meta = request("GET", f"repos/{r}/contents/{urllib.parse.quote(_vendor_path(path))}?ref={commit}",
+    owner, name = r.split("/", 1)
+    url = f"https://github.com/{owner}/{name}/commits/{urllib.parse.quote(branch, safe='')}.atom"
+    text = _public_github_get(url, timeout=timeout, max_bytes=max_bytes, accept="application/atom+xml").decode("utf-8", "replace")
+    return [m.group(1).lower() for m in _PUBLIC_ATOM_COMMIT.finditer(text)]
+
+
+def public_github_branch_head(repository, branch="main", *, timeout=30, max_bytes=512 * 1024):
+    """Tip commit SHA on a branch via the public commits Atom feed (read-only, no token)."""
+    commits = public_github_branch_commits(repository, branch, timeout=timeout, max_bytes=max_bytes)
+    if not commits:
+        raise Error("not_found_or_inaccessible")
+    return commits[0]
+
+
+def _pinned_commit_ref(ref):
+    return isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref, re.I) and set(ref.lower()) != {"0"}
+
+
+_REMOTE_FILE_RAW_FALLBACK = frozenset({
+    "not_found_or_inaccessible", "permission_or_rate_limit", "rate_limit", "server_error",
+    "operation_timeout", "transport_error",
+})
+
+
+def public_github_raw_bytes(repository, path, ref, *, timeout=30, max_bytes=8 * 1024 * 1024):
+    """File bytes at repository@ref:path via raw.githubusercontent.com (read-only, no token)."""
+    r = repo(repository)
+    owner, name = r.split("/", 1)
+    clean = _vendor_path(path)
+    segments = [urllib.parse.quote(part, safe="") for part in clean.split("/") if part]
+    ref_part = urllib.parse.quote(ref, safe="")
+    url = f"https://raw.githubusercontent.com/{owner}/{name}/{ref_part}/{'/'.join(segments)}"
+    return _public_github_get(url, timeout=timeout, max_bytes=max_bytes)
+
+
+def public_github_repository_check(repository, commit, *, branch="main", source=None, timeout=30, max_bytes=8 * 1024 * 1024):
+    """Generic read-only pin check using public GitHub URLs (no token).
+
+    The commit must appear among recent commits on ``branch`` in the Atom feed.
+    When ``source`` is set, the file at ``repository@commit:source`` must be readable from raw.githubusercontent.com.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or "") or set(commit) == {"0"}:
+        raise ValueError("commit must be a 40-character lowercase hex SHA")
+    recent = []
+    atom = {"status": "unavailable", "recent_commits": recent, "in_recent": False}
+    try:
+        recent[:] = public_github_branch_commits(repository, branch, timeout=timeout)
+        atom["status"] = "ok"
+        atom["in_recent"] = commit.lower() in recent
+    except Error as exc:
+        atom["detail"] = exc.code
+    file_row = None
+    if source is not None:
+        file_row = {"path": _vendor_path(source), "status": "unavailable"}
+        try:
+            body = public_github_raw_bytes(repository, source, commit, timeout=timeout, max_bytes=max_bytes)
+            file_row["status"] = "ok"
+            file_row["bytes"] = len(body)
+            file_row["blob_sha"] = git_blob_sha(body)
+            file_row["sha256"] = hashlib.sha256(body).hexdigest()
+        except Error as exc:
+            file_row["detail"] = exc.code
+    ok = atom.get("in_recent") is True and (file_row is None or file_row.get("status") == "ok")
+    return {"schema": "gh-identity-public-repo-check/1", "write": False, "repository": repo(repository),
+            "commit": commit.lower(), "branch": branch, "atom": atom, "source": file_row, "ok": ok}
+
+
+def _remote_file(repository, path, commit, transport="auto", timeout=30, max_bytes=8 * 1024 * 1024):
+    """Bytes of repository@commit:path via raw.githubusercontent.com, else the contents API (read-only)."""
+    r = repo(repository)
+    clean = _vendor_path(path)
+    if _pinned_commit_ref(commit):
+        try:
+            return public_github_raw_bytes(r, clean, commit, timeout=timeout, max_bytes=max_bytes)
+        except Error as exc:
+            if exc.code not in _REMOTE_FILE_RAW_FALLBACK:
+                raise
+    meta = request("GET", f"repos/{r}/contents/{urllib.parse.quote(clean)}?ref={commit}",
                    transport=transport, timeout=timeout)
     if not isinstance(meta, dict) or meta.get("type") != "file" or not isinstance(meta.get("sha"), str):
         raise Error("not_a_file")
