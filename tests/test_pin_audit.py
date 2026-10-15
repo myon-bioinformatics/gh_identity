@@ -46,9 +46,6 @@ def world(tmp_path):
         {"repository": "me/up", "commit": first, "source": "tool.py", "destination": "vendor/tool.py"},
         {"repository": "me/up", "commit": side, "source": "x", "destination": "vendor/x"},
         {"repository": "me/hidden", "commit": "f" * 40, "source": "a.py", "destination": "vendor/a.py"}]}))
-    (child / "templates").mkdir()
-    (child / "templates" / "parent-pr.ref.json").write_text(json.dumps(
-        {"schema": "parent-pr-ref/1", "repository": "me/up", "pull_number": 1, "repository_id": 1, "commit": tip}))
     return {"root": child, "base": str(tmp_path / "remotes") + "/", "first": first, "pr_head": pr_head,
             "merge": merge, "tip": tip, "side": side}
 
@@ -57,7 +54,7 @@ def test_collect_pins(world):
     pins = g.collect_pins(world["root"])
     found = {(p["file"], p["commit"]) for p in pins}
     assert (".github/workflows/ci.yml", world["merge"]) in found and (".github/workflows/ci.yml", world["pr_head"]) in found
-    assert ("templates/parent-pr.ref.json", world["tip"]) in found and ("vendor.lock.json", world["first"]) in found
+    assert ("vendor.lock.json", world["first"]) in found
     assert all(p["repository"] != "actions/checkout" for p in pins)
 
 
@@ -65,7 +62,6 @@ def test_pin_audit_states(world):
     out = g.pin_audit(world["root"], remote_base=world["base"])
     by = {r["commit"]: r for r in out["results"] if r["repository"]}
     assert by[world["merge"]]["state"] == "ok"
-    assert by[world["tip"]]["state"] == "ok" and by[world["tip"]]["since"] == 0
     assert by[world["pr_head"]]["state"] == "not_final" and by[world["pr_head"]]["final"] == world["merge"]
     assert by[world["first"]]["state"] == "drift" and by[world["first"]]["changed"] == ["tool.py"]
     assert by[world["side"]]["state"] == "unmerged"

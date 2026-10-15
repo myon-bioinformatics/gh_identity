@@ -889,8 +889,8 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
 - The lock is `vendor-lock/1`, validated exactly like Ironmate `vendor/vendor_sync.py`
   (`repository, ref, commit, source, destination, blob_sha, sha256`).
 - `vendor-lock-check` also reports a `parent_ref` section for
-  `templates/parent-pr.ref.json` (or the root copy): schema, 40-hex non-zero
-  commit, repository_id and pull_number. Missing is allowed unless
+  `templates/parent-pr.ref.json` (or the root copy): schema, repository_id and
+  pull_number (no parent commit SHA in the file). Missing is allowed unless
   `--parent-ref` is given; invalid fails the check.
 - `vendor-lock-check` hashes each destination: `ok`, `missing`,
   `digest_mismatch`, `header_modified` (only leading `#` lines were added, which
@@ -901,9 +901,8 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
   latest upstream commit touching the source (information only);
   `--first-parent` requires the pin to be on the source default-branch
   first-parent history (PR-intermediate commits fail);
-  `--check-parent-ref` checks that `parent-pr.ref.json`'s commit equals the
-  PR's `merge_commit_sha` (merged into the default branch) or `head.sha`
-  (open) and that `repository_id` matches.
+  `--check-parent-ref` checks `parent-pr.ref.json` repository_id and pull
+  request identity against GitHub (read-only).
 - `vendor-plan` decides `place` or `skip` in a fixed order: pinned 40-hex
   commit, deny list, upstream exists, standard library only, no relative
   imports (single file), imported by this project, LICENSE sidecar, then the
@@ -969,7 +968,7 @@ python gh_identity.py pin-audit [--root .] [--json GLOB ...] [--only OWNER] [--r
 
 Read-only. Collects commit pins from workflow `uses: OWNER/REPO@sha` and
 checkout `repository:`+`ref:`, and from JSON objects with `repository`+`commit`
-(vendor.lock.json, parent-pr.ref.json, child-heads.json, publication.json).
+(vendor.lock.json, child-heads.json, publication.json).
 Each distinct (repository, commit) is checked with plain git against the public
 remote (no API token; credential helpers disabled): a temporary bare repository
 fetches the default branch with `--filter=blob:none` (full history, no file

@@ -9,7 +9,7 @@ import pytest
 import gh_identity as g
 
 GOOD = {"schema": "parent-pr-ref/1", "repository": "me/parent", "pull_number": 78, "repository_id": 638801160,
-        "optional": {"note": "x"}, "commit": "b" * 40}
+        "optional": {"note": "x"}}
 DATA = b"x = 1\n"
 
 
@@ -41,15 +41,14 @@ def test_parent_ref_missing_is_not_failure_by_default(child):
 
 def test_parent_ref_templates_first_and_ok(child):
     write(child, "templates/parent-pr.ref.json", GOOD)
-    write(child, "parent-pr.ref.json", {**GOOD, "commit": "0" * 40})
+    write(child, "parent-pr.ref.json", {**GOOD, "pull_number": 79})
     out = g.vendor_lock_check(child)
     assert out["parent_ref"]["path"] == "templates/parent-pr.ref.json" and out["parent_ref"]["status"] == "ok"
     assert out["ok"] is True
 
 
 @pytest.mark.parametrize("mutate,problem", [
-    (lambda r: r.update(commit="0" * 40), "commit"),
-    (lambda r: r.update(commit="B" * 40), "commit"),
+    (lambda r: r.update(commit="b" * 40), "commit"),
     (lambda r: r.update(pull_number=0), "pull_number"),
     (lambda r: r.update(repository_id="638801160"), "repository_id"),
     (lambda r: r.update(schema="parent-pr-ref/2"), "schema"),
@@ -124,9 +123,8 @@ def parent_fake(pr):
 @pytest.mark.parametrize("pr,status,problems", [
     ({"merged_at": "t", "merge_commit_sha": "b" * 40, "base": {"ref": "main"}, "head": {"sha": "e" * 40}}, "ok", []),
     ({"state": "open", "head": {"sha": "b" * 40}, "base": {"ref": "main"}}, "ok", []),
-    ({"merged_at": "t", "merge_commit_sha": "e" * 40, "base": {"ref": "main"}, "head": {"sha": "b" * 40}}, "mismatch", ["commit_mismatch"]),
     ({"merged_at": "t", "merge_commit_sha": "b" * 40, "base": {"ref": "dev"}}, "mismatch", ["not_merged_into_default_branch"]),
-    ({"state": "closed", "head": {"sha": "b" * 40}}, "mismatch", ["commit_mismatch", "pull_closed_unmerged"]),
+    ({"state": "closed", "head": {"sha": "b" * 40}}, "mismatch", ["pull_closed_unmerged"]),
 ])
 def test_verify_parent_ref(pr, status, problems):
     with patch.object(g, "request", side_effect=parent_fake(pr)):
