@@ -3,8 +3,8 @@
   "files": [
     {
       "repository": "myon-bioinformatics/myon-bioinformatics",
-      "ref": "ab17b409d82f95abc81116af7ff0d3e7bdc4158c",
-      "commit": "ab17b409d82f95abc81116af7ff0d3e7bdc4158c",
+      "ref": "b000e5967cb7596f6f9f20fe396a686fdc700c16",
+      "commit": "b000e5967cb7596f6f9f20fe396a686fdc700c16",
       "source": "LICENSE",
       "destination": "vendor/myon-bioinformatics-LICENSE",
       "blob_sha": "4ec4989b801bf1a3df6184d21f79e6e7ed5931f6",
