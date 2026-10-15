@@ -93,4 +93,4 @@ jobs:
     if: needs.changes.outputs.workflow_changed == 'true'
     permissions:
       contents: read
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-actionlint.yml@40bd74c4a36896509b506d6d06251255be6c77c7
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-actionlint.yml@ab17b409d82f95abc81116af7ff0d3e7bdc4158c
