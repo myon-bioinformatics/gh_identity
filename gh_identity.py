@@ -3570,7 +3570,7 @@ def _repo_tree(full, branch, transport, timeout):
         raise Error("invalid_tree_response")
     files = {e["path"]: e["sha"] for e in d["tree"] if isinstance(e, dict) and e.get("type") == "blob"
              and e.get("mode") in ("100644", "100755") and isinstance(e.get("path"), str) and isinstance(e.get("sha"), str)}
-    return head["sha"], files, bool(d.get("truncated"))
+    return head["sha"], files, d.get("truncated")
 
 
 def _repo_lock(full, ref, paths, lock_paths, transport, timeout):
@@ -3602,6 +3602,10 @@ def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=
         full = repo(f"{owner}/{t['name']}")
         try:
             sha, files, truncated = _repo_tree(full, (heads or {}).get(full) or t["default_branch"] or "HEAD", transport, timeout)
+            if type(truncated) is not bool:
+                raise Error("invalid_tree_response")
+            if truncated:
+                raise Error("truncated_tree")
             lp, lock = _repo_lock(full, sha, files, lock_paths, transport, timeout)
         except (Error, ValueError, json.JSONDecodeError) as e:
             errors.append({"repository": full, "detail": getattr(e, "code", str(e))})
@@ -3656,7 +3660,8 @@ def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=
     groups.sort(key=lambda g_: (-g_["repositories"], g_["basename"]))
     all_rows = [r for g_ in groups for r in g_["files"]]
     return {"schema": "gh-identity-duplicate-files/1", "write": False, "owner": owner, "scanned": scanned,
-            "errors": errors, "redacted": redacted, "ignore": list(patterns), "groups": groups,
+            "errors": errors, "complete": not errors, "aggregation_scope": "complete_repositories_only",
+            "redacted": redacted, "ignore": list(patterns), "groups": groups,
             "counts": {"groups": len(groups), "copies": len(all_rows),
                        "null_provenance": sum(r["provenance"] is None for r in all_rows),
                        "null_provenance_non_origin": sum(r["provenance"] is None and not r["origin"] for r in all_rows),
@@ -3672,6 +3677,7 @@ def render_duplicates_markdown(o, top=30):
              f"(non-origin {c['null_provenance_non_origin']}), stale pins {c['stale']}, "
              f"groups with warnings {c['groups_with_warnings']}", ""]
     if o["errors"]:
+        lines += [f"**INCOMPLETE: {len(o['errors'])} repositories failed. Counts cover only complete repositories; absence of duplicates or stale pins is not an all-repository result.**", ""]
         lines += ["errors: " + ", ".join(f"{e['repository']} ({e['detail']})" for e in o["errors"]), ""]
     lines += ["| basename | repos | versions | null provenance | stale | origin | warnings |", "|---|---|---|---|---|---|---|"]
     for grp in o["groups"][:max(0, top)]:
@@ -4662,6 +4668,7 @@ def _main(argv=None):
  elif ns.cmd=="pin-audit" and ns.text:print(render_pin_audit(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
  if ns.cmd=="pin-audit":return 0 if o["ok"] else 1
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
