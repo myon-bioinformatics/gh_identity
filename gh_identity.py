@@ -4383,8 +4383,9 @@ def merge_preview(repository, numbers=None, *, all_open=False, base=None, pairs=
                   transport="auto", timeout=300, remote_base="https://github.com/", remote=None):
     """Would these open PRs merge together? Read-only: a temporary repository, nothing pushed.
 
-    Fetches the base branch and each PR head (``refs/pull/N/head``) into a temporary
-    partial clone (blobs fetched on demand) and uses ``git merge-tree --write-tree``:
+    Fetches the base branch and the exact PR head SHAs reported by the API into a
+    temporary partial clone (blobs fetched on demand), verifies the fetched commits,
+    and uses those immutable SHAs with ``git merge-tree --write-tree``:
 
     * ``alone``: each PR against the base tip (what GitHub's mergeability reports);
     * ``sequence``: the PRs merged one after another in the given order, as when they
@@ -4413,8 +4414,11 @@ def merge_preview(repository, numbers=None, *, all_open=False, base=None, pairs=
     prs = []
     for number in numbers:
         pr = request("GET", f"repos/{r}/pulls/{number}", transport=transport, timeout=30)
+        head_sha = (pr.get("head") or {}).get("sha")
+        if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+            raise Error("invalid_pr_head_sha")
         prs.append({"number": number, "title": pr.get("title"), "state": pr.get("state"),
-                    "base": (pr.get("base") or {}).get("ref"), "head_sha": (pr.get("head") or {}).get("sha")})
+                    "base": (pr.get("base") or {}).get("ref"), "head_sha": head_sha})
     url = _validate_remote(remote if remote is not None else remote_base.rstrip("/") + "/" + r)
     out = {"schema": "gh-identity-merge-preview/1", "write": False, "repository": r, "base": base, "prs": prs,
            "alone": [], "sequence": [], "pairs": [], "observed_at": now()}
@@ -4432,8 +4436,14 @@ def merge_preview(repository, numbers=None, *, all_open=False, base=None, pairs=
         git("config", "remote.origin.partialclonefilter", "blob:none")
         git("config", "user.name", "merge-preview")  # commit-tree in this throwaway repository only
         git("config", "user.email", "merge-preview@invalid")
-        refspecs = [f"+refs/heads/{base}:refs/heads/{base}"] + [f"+refs/pull/{p['number']}/head:refs/pr/{p['number']}" for p in prs]
+        refspecs = [f"+refs/heads/{base}:refs/heads/{base}"] + [f"+{p['head_sha']}:refs/pr/{p['number']}" for p in prs]
         git("fetch", "-q", "--no-tags", "--filter=blob:none", "origin", *refspecs)
+        # Verify every fetched commit before producing any comparison. A missing
+        # snapshot or moved ref must fail, never silently compare a newer PR head.
+        for p in prs:
+            fetched = git("rev-parse", "--verify", f"refs/pr/{p['number']}^{{commit}}")[0].strip()
+            if fetched != p["head_sha"]:
+                raise Error("pr_head_sha_mismatch")
         tip = git("rev-parse", f"refs/heads/{base}")[0].strip()
         out["base_sha"] = tip
 
@@ -4443,20 +4453,20 @@ def merge_preview(repository, numbers=None, *, all_open=False, base=None, pairs=
             return code == 0, lines[0] if lines else None, lines[1:]
 
         for p in prs:
-            clean, _, files = merge(tip, f"refs/pr/{p['number']}")
+            clean, _, files = merge(tip, p["head_sha"])
             out["alone"].append({"number": p["number"], "status": "clean" if clean else "conflict", "files": files})
         current = tip
         for p in prs:
-            clean, tree, files = merge(current, f"refs/pr/{p['number']}")
+            clean, tree, files = merge(current, p["head_sha"])
             if clean:
-                current = git("commit-tree", tree, "-p", current, "-p", f"refs/pr/{p['number']}",
+                current = git("commit-tree", tree, "-p", current, "-p", p["head_sha"],
                               "-m", f"preview #{p['number']}")[0].strip()
             out["sequence"].append({"number": p["number"], "status": "clean" if clean else "conflict_skipped",
                                     "files": files})
         if pairs:
             for i, a in enumerate(prs):
                 for b in prs[i + 1:]:
-                    clean, _, files = merge(f"refs/pr/{a['number']}", f"refs/pr/{b['number']}")
+                    clean, _, files = merge(a["head_sha"], b["head_sha"])
                     out["pairs"].append({"a": a["number"], "b": b["number"], "status": "clean" if clean else "conflict",
                                          "files": files})
     out["ok"] = all(s["status"] == "clean" for s in out["sequence"])
