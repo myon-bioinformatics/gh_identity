@@ -1314,3 +1314,20 @@ the entire affected repository from aggregation. JSON `complete` is false,
 Markdown explicitly warns that the report is incomplete. Both output formats
 exit 1 on incomplete scans (exit 0 on complete scans); excluded nonpublic
 repositories are outside the scan scope.
+
+## Several clones at once (fleet)
+
+```bash
+python gh_identity.py fleet-status ../repo-a ../repo-b --text            # branch, upstream +ahead/-behind, changes
+python gh_identity.py fleet-status ../repo-* --fix-tracking --write --text # set the missing upstream + fetch refspec
+python gh_identity.py fleet-checks ../repo-* --steps --wait 900 --text   # CI of each HEAD: failed steps, annotations
+python gh_identity.py fleet-pr ../repo-* --title "ci: ..." --body-file body.md --write --text
+```
+
+One row per clone. `fleet-status --fix-tracking` targets the shallow-clone case where a
+pushed branch has no `branch.<b>.remote/merge` or fetch refspec, so tools report it as
+unpushed; it plans the config (as `git-work` does) and applies it only with `--write`.
+`fleet-checks` ignores `copilot-pull-request-reviewer` by default (`--ignore NAME` to
+change), keeps failure/warning annotations and drops runner notices; exit 0 green,
+1 failed, 3 still pending. `fleet-pr` reports an open PR instead of opening a second
+one and writes only with `--write`.
