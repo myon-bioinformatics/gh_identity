@@ -4379,6 +4379,105 @@ def render_fleet_pr(o):
                      for r in o["rows"])
 
 
+def merge_preview(repository, numbers=None, *, all_open=False, base=None, pairs=True, max_prs=15,
+                  transport="auto", timeout=300, remote_base="https://github.com/", remote=None):
+    """Would these open PRs merge together? Read-only: a temporary repository, nothing pushed.
+
+    Fetches the base branch and each PR head (``refs/pull/N/head``) into a temporary
+    partial clone (blobs fetched on demand) and uses ``git merge-tree --write-tree``:
+
+    * ``alone``: each PR against the base tip (what GitHub's mergeability reports);
+    * ``sequence``: the PRs merged one after another in the given order, as when they
+      are first combined on one integration branch; a conflicting PR is reported with
+      its files and skipped, so the later steps still say something;
+    * ``pairs`` (optional): every pair of PR heads against their merge base, to tell
+      which PRs collide with each other.
+
+    PR numbers come from ``numbers`` or, with ``all_open``, every open PR into
+    ``base`` (default: the repository's default branch), oldest first.
+    """
+    r = repo(repository)
+    if all_open == bool(numbers):
+        raise ValueError("give PR numbers or all_open, not both")
+    info = request("GET", f"repos/{r}", transport=transport, timeout=30)
+    base = base or info.get("default_branch")
+    if all_open:
+        listed = request("GET", f"repos/{r}/pulls?state=open&base={urllib.parse.quote(base)}&sort=created&direction=asc&per_page=100",
+                         transport=transport, timeout=30) or []
+        numbers = [p["number"] for p in listed]
+    numbers = list(numbers)
+    if any(type(n) is not int or n < 1 for n in numbers):
+        raise ValueError("PR numbers must be positive integers")
+    if len(numbers) > max_prs:
+        raise ValueError(f"at most {max_prs} PRs (pairs grow quadratically)")
+    prs = []
+    for number in numbers:
+        pr = request("GET", f"repos/{r}/pulls/{number}", transport=transport, timeout=30)
+        prs.append({"number": number, "title": pr.get("title"), "state": pr.get("state"),
+                    "base": (pr.get("base") or {}).get("ref"), "head_sha": (pr.get("head") or {}).get("sha")})
+    url = _validate_remote(remote if remote is not None else remote_base.rstrip("/") + "/" + r)
+    out = {"schema": "gh-identity-merge-preview/1", "write": False, "repository": r, "base": base, "prs": prs,
+           "alone": [], "sequence": [], "pairs": [], "observed_at": now()}
+    if not prs:
+        out["ok"] = True
+        return out
+    with tempfile.TemporaryDirectory(prefix="ghi-merge-preview-") as tmp:
+        def git(*args, ok=(0,)):
+            raw, _, code = _git_run(tmp, list(args), max_bytes=16 * 1024 * 1024, ok=ok, timeout=timeout,
+                                    inherit_auth=args[:1] == ("fetch",))
+            return _git_decode(raw), code
+        git("init", "-q", "--bare")
+        git("remote", "add", "origin", url)
+        git("config", "remote.origin.promisor", "true")
+        git("config", "remote.origin.partialclonefilter", "blob:none")
+        git("config", "user.name", "merge-preview")  # commit-tree in this throwaway repository only
+        git("config", "user.email", "merge-preview@invalid")
+        refspecs = [f"+refs/heads/{base}:refs/heads/{base}"] + [f"+refs/pull/{p['number']}/head:refs/pr/{p['number']}" for p in prs]
+        git("fetch", "-q", "--no-tags", "--filter=blob:none", "origin", *refspecs)
+        tip = git("rev-parse", f"refs/heads/{base}")[0].strip()
+        out["base_sha"] = tip
+
+        def merge(a, b):
+            text, code = git("merge-tree", "--write-tree", "--name-only", "--no-messages", a, b, ok=(0, 1))
+            lines = [l for l in text.splitlines() if l]
+            return code == 0, lines[0] if lines else None, lines[1:]
+
+        for p in prs:
+            clean, _, files = merge(tip, f"refs/pr/{p['number']}")
+            out["alone"].append({"number": p["number"], "status": "clean" if clean else "conflict", "files": files})
+        current = tip
+        for p in prs:
+            clean, tree, files = merge(current, f"refs/pr/{p['number']}")
+            if clean:
+                current = git("commit-tree", tree, "-p", current, "-p", f"refs/pr/{p['number']}",
+                              "-m", f"preview #{p['number']}")[0].strip()
+            out["sequence"].append({"number": p["number"], "status": "clean" if clean else "conflict_skipped",
+                                    "files": files})
+        if pairs:
+            for i, a in enumerate(prs):
+                for b in prs[i + 1:]:
+                    clean, _, files = merge(f"refs/pr/{a['number']}", f"refs/pr/{b['number']}")
+                    out["pairs"].append({"a": a["number"], "b": b["number"], "status": "clean" if clean else "conflict",
+                                         "files": files})
+    out["ok"] = all(s["status"] == "clean" for s in out["sequence"])
+    return out
+
+
+def render_merge_preview(o):
+    out = [f"{o['repository']} base {o['base']}@{(o.get('base_sha') or '')[:7]}: {len(o['prs'])} PR(s), "
+           f"{'all merge cleanly in order' if o['ok'] else 'conflicts'}"]
+    alone = {a["number"]: a for a in o["alone"]}
+    for step in o["sequence"]:
+        a = alone[step["number"]]
+        extra = "" if a["status"] == "clean" else f" (also conflicts with {o['base']} alone)"
+        files = f" {', '.join(step['files'][:5])}" if step["files"] else ""
+        out.append(f"  {step['status']:16} #{step['number']}{extra}{files}")
+    for pair in o["pairs"]:
+        if pair["status"] != "clean":
+            out.append(f"  pair conflict    #{pair['a']} x #{pair['b']} {', '.join(pair['files'][:5])}")
+    return "\n".join(out)
+
+
 @contextlib.contextmanager
 def request_stub(handler):
     """Temporarily replace GitHub `request` for tests (stdlib ContextVar)."""
@@ -4804,6 +4903,7 @@ def _main(argv=None):
  x=s.add_parser("fleet-status",help="branch, upstream +ahead/-behind, changes of several clones (local; --fix-tracking plans upstream config, --write applies)");x.add_argument("roots",nargs="+");x.add_argument("--fix-tracking",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-checks",help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
+ x=s.add_parser("merge-preview",help="would these open PRs merge together (alone, in sequence, pairwise)? temporary repository, nothing pushed");x.add_argument("repository");x.add_argument("--pr",type=int,action="append",dest="numbers");x.add_argument("--all-open",action="store_true");x.add_argument("--base");x.add_argument("--no-pairs",action="store_true");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--text",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("subtree-split",help="read-only git subtree split --prefix: print the split commit SHA (no refs changed)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--mainline",help="also check the source is on this ref's first-parent history");x.add_argument("--timeout",type=float,default=600)
@@ -4880,6 +4980,7 @@ def _main(argv=None):
    else:raise ValueError("branch required")
   elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,fetch_timeout=ns.fetch_timeout,write=ns.write)
   elif ns.cmd=="local-position":o=local_position(ns.root)
+  elif ns.cmd=="merge-preview":o=merge_preview(ns.repository,ns.numbers,all_open=ns.all_open,base=ns.base,pairs=not ns.no_pairs,transport=transport,timeout=ns.git_timeout,remote_base=ns.remote_base)
   elif ns.cmd=="fleet-status":o=fleet_status(ns.roots,fix_tracking=ns.fix_tracking,write=ns.write)
   elif ns.cmd=="fleet-checks":
    ignore=tuple(ns.ignore) if ns.ignore is not None else FLEET_IGNORE;deadline=time.monotonic()+ns.wait
@@ -4976,6 +5077,7 @@ def _main(argv=None):
  elif ns.cmd=="get" and ns.text:print(render_get(o))
  elif ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.markdown:print(render_vendor_markdown(o))
  elif ns.cmd=="pin-audit" and ns.text:print(render_pin_audit(o))
+ elif ns.cmd=="merge-preview" and ns.text:print(render_merge_preview(o))
  elif ns.cmd=="fleet-status" and ns.text:print(render_fleet_status(o))
  elif ns.cmd=="fleet-checks" and ns.text:print(render_fleet_checks(o))
  elif ns.cmd=="fleet-pr" and ns.text:print(render_fleet_pr(o))
@@ -4983,6 +5085,7 @@ def _main(argv=None):
  else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
  if ns.cmd=="pin-audit":return 0 if o["ok"] else 1
+ if ns.cmd=="merge-preview":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-status":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-checks":return 0 if o["state"]=="green" else 3 if o["state"]=="pending" else 1
  if ns.cmd=="fleet-pr":return 0 if o["status"] in ("planned","verified") else 1
@@ -5020,7 +5123,7 @@ for _name in ("_gh","_url","request","pages","repository","repositories","reposi
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
-              "enrollment_progress","repo_identity","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
+              "enrollment_progress","repo_identity","merge_preview","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
  globals()[_name]=_bounded(globals()[_name])
 # Capture the final bounded function, so injected request replacements are respected.
 _DEFAULT_REQUEST = request
