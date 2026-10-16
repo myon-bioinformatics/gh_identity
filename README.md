@@ -1331,3 +1331,18 @@ unpushed; it plans the config (as `git-work` does) and applies it only with `--w
 change), keeps failure/warning annotations and drops runner notices; exit 0 green,
 1 failed, 3 still pending. `fleet-pr` reports an open PR instead of opening a second
 one and writes only with `--write`.
+
+## Will these PRs merge together? (merge-preview)
+
+```bash
+python gh_identity.py merge-preview OWNER/REPO --all-open --text      # every open PR into the default branch
+python gh_identity.py merge-preview OWNER/REPO --pr 104 --pr 106 --base main --text
+```
+
+Before stacking several PRs on one integration branch, this answers whether they
+conflict, without merging or pushing anything: the base branch and each
+`refs/pull/N/head` are fetched into a temporary partial clone and combined with
+`git merge-tree --write-tree` (Git 2.38+). It reports each PR `alone` against the
+base, the `sequence` in the given order (a conflicting PR is listed with its files and
+skipped, so later steps still report), and every `pair` of PR heads against their
+merge base (`--no-pairs` to skip). Exit 0 when the whole sequence is clean, 1 otherwise.
