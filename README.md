@@ -900,8 +900,11 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
   breaks byte identity), `symlink`, and `unlocked` files under the vendor roots.
   With rules, destinations must match the layout and `ref` must be the commit.
 - `vendor-lock-verify-remote` reads `repository@commit:source` through
-  `raw.githubusercontent.com` when possible, otherwise the contents / git blobs
-  API, and compares both digests; `--upstream` adds the
+  `raw.githubusercontent.com` for pinned commits with the default `auto`
+  transport, otherwise the contents / git blobs API, and compares both digests.
+  Explicit `gh`/`urllib` transports, `request_stub`, and a replaced `request`
+  always use the API path. Public raw failures fall back to that same API path.
+  `--upstream` adds the
   latest upstream commit touching the source (information only);
   `--first-parent` requires the pin to be on the source default-branch
   first-parent history (PR-intermediate commits fail);

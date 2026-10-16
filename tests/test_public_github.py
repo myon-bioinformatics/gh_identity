@@ -1,12 +1,25 @@
 """Public GitHub URL helpers (Atom branch feed, raw.githubusercontent.com)."""
 import base64
 import io
+import json
+import socket
 import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import gh_identity as g
+
+@pytest.fixture(autouse=True)
+def no_live_http(monkeypatch):
+    """Any unmocked HTTP/socket call fails immediately, including raw reads."""
+    def blocked(*args, **kwargs):
+        pytest.fail("unexpected live HTTP/socket access")
+    monkeypatch.setattr(g.urllib.request, "urlopen", blocked)
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(g, "_process", blocked)
+
 
 def _atom(*shas):
     entries = "".join(f'<entry><id>tag:github.com,2008:Grit::Commit/{sha}</id></entry>' for sha in shas)
@@ -69,7 +82,8 @@ def _api_file_payload(body):
 def test_remote_file_raw_success_skips_api():
     body = b"from raw\n"
     with patch.object(g, "public_github_raw_bytes", return_value=body) as raw, \
-         patch.object(g, "request") as req:
+         patch.object(g, "_url") as req, \
+         patch.object(g, "gh_available", return_value=False):
         assert g._remote_file("o/up", "mod.py", COMMIT) == body
     raw.assert_called_once()
     req.assert_not_called()
@@ -86,20 +100,22 @@ def test_remote_file_branch_ref_skips_raw_uses_api():
 
 
 @pytest.mark.parametrize("raw_code", [
-    "permission_or_rate_limit", "rate_limit", "server_error", "operation_timeout",
+    "permission_or_rate_limit", "rate_limit", "server_error", "operation_timeout", "transport_error", "not_found_or_inaccessible",
 ])
 def test_remote_file_raw_errors_fallback_to_api(raw_code):
     body = b"v\n"
     meta, blob = _api_file_payload(body)
     with patch.object(g, "public_github_raw_bytes", side_effect=g.Error(raw_code)), \
-         patch.object(g, "request", side_effect=[meta, blob]) as req:
+         patch.object(g, "_url", side_effect=[meta, blob]) as req, \
+         patch.object(g, "gh_available", return_value=False):
         assert g._remote_file("o/up", "mod.py", COMMIT) == body
     assert req.call_count == 2
 
 
 def test_remote_file_raw_404_api_403_is_permission():
     with patch.object(g, "public_github_raw_bytes", side_effect=g.Error("not_found_or_inaccessible")), \
-         patch.object(g, "request", side_effect=g.Error("permission_or_rate_limit")):
+         patch.object(g, "_url", side_effect=g.Error("permission_or_rate_limit")), \
+         patch.object(g, "gh_available", return_value=False):
         with pytest.raises(g.Error) as exc:
             g._remote_file("o/up", "mod.py", COMMIT)
     assert exc.value.code == "permission_or_rate_limit"
@@ -107,7 +123,8 @@ def test_remote_file_raw_404_api_403_is_permission():
 
 def test_remote_file_raw_404_api_404_is_not_found():
     with patch.object(g, "public_github_raw_bytes", side_effect=g.Error("not_found_or_inaccessible")), \
-         patch.object(g, "request", side_effect=g.Error("not_found_or_inaccessible")):
+         patch.object(g, "_url", side_effect=g.Error("not_found_or_inaccessible")), \
+         patch.object(g, "gh_available", return_value=False):
         with pytest.raises(g.Error) as exc:
             g._remote_file("o/up", "mod.py", COMMIT)
     assert exc.value.code == "not_found_or_inaccessible"
@@ -163,3 +180,79 @@ def test_public_github_get_200_returns_body():
     response.read = MagicMock(return_value=payload)
     with patch("urllib.request.urlopen", return_value=response):
         assert g._public_github_get("https://example.test/x") == payload
+
+
+@pytest.mark.parametrize("transport", ["auto", "gh", "urllib"])
+@pytest.mark.parametrize("injection", ["stub", "replacement"])
+def test_remote_file_injected_request_wins_over_successful_raw(transport, injection):
+    body = b"injected private file\n"
+    meta, blob = _api_file_payload(body)
+    handler = MagicMock(side_effect=[meta, blob])
+    context = g.request_stub(handler) if injection == "stub" else patch.object(g, "request", handler)
+    with patch.object(g, "public_github_raw_bytes", return_value=b"wrong raw body") as raw, context:
+        assert g._remote_file("o/private", "mod.py", COMMIT, transport, 7) == body
+    raw.assert_not_called()
+    assert handler.call_count == 2
+    for call in handler.call_args_list:
+        assert call.kwargs["transport"] == transport
+        assert call.kwargs["timeout"] == 7
+
+
+@pytest.mark.parametrize("transport,backend", [("gh", "_gh"), ("urllib", "_url")])
+def test_remote_file_explicit_transport_never_tries_raw(transport, backend):
+    body = b"selected transport\n"
+    meta, blob = _api_file_payload(body)
+    with patch.object(g, "public_github_raw_bytes", return_value=b"wrong") as raw, \
+         patch.object(g, backend, side_effect=[meta, blob]) as send:
+        assert g._remote_file("o/private", "mod.py", COMMIT, transport) == body
+    raw.assert_not_called()
+    assert send.call_count == 2
+
+
+@pytest.mark.parametrize("code", ["authentication_required", "permission_or_rate_limit", "transport_error", "operation_timeout"])
+@pytest.mark.parametrize("injection", ["stub", "replacement"])
+def test_remote_file_injected_errors_do_not_escape_to_network(code, injection):
+    handler = MagicMock(side_effect=g.Error(code))
+    context = g.request_stub(handler) if injection == "stub" else patch.object(g, "request", handler)
+    with context, pytest.raises(g.Error) as exc:
+        g._remote_file("o/private", "mod.py", COMMIT)
+    assert exc.value.code == code
+    handler.assert_called_once()
+
+
+def test_remote_file_stub_reset_restores_public_raw():
+    body = b"api\n"
+    meta, blob = _api_file_payload(body)
+    with g.request_stub(MagicMock(side_effect=[meta, blob])):
+        assert g._remote_file("o/private", "mod.py", COMMIT) == body
+    with patch.object(g, "public_github_raw_bytes", return_value=b"public") as raw:
+        assert g._remote_file("o/up", "mod.py", COMMIT) == b"public"
+    raw.assert_called_once()
+
+
+@pytest.mark.parametrize("code", ["file_too_large", "bytes_limit", "invalid_response"])
+def test_remote_file_nonfallback_raw_errors_propagate(code):
+    with patch.object(g, "public_github_raw_bytes", side_effect=g.Error(code)), \
+         patch.object(g, "_url") as api:
+        with pytest.raises(g.Error) as exc:
+            g._remote_file("o/up", "mod.py", COMMIT)
+    assert exc.value.code == code
+    api.assert_not_called()
+
+
+@pytest.mark.parametrize("raw_code", ["not_found_or_inaccessible", "permission_or_rate_limit"])
+def test_remote_file_private_repository_uses_authenticated_api_after_raw_failure(raw_code):
+    body = b"private content\n"
+    meta, blob = _api_file_payload(body)
+    replies = [(0, json.dumps(value).encode(), b"") for value in (meta, blob)]
+    with patch.object(g, "public_github_raw_bytes", side_effect=g.Error(raw_code)) as raw, \
+         patch.object(g, "gh_available", return_value=False), \
+         patch.object(g, "token", return_value="fixture-token"), \
+         patch.object(g, "_process", side_effect=replies) as worker:
+        assert g._remote_file("o/private", "mod.py", COMMIT) == body
+    raw.assert_called_once()
+    assert worker.call_count == 2
+    for call in worker.call_args_list:
+        spec = json.loads(call.args[1])
+        assert spec["headers"]["Authorization"] == "Bearer fixture-token"
+        assert spec["url"].startswith(g.API + "/repos/o/private/")

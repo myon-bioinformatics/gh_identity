@@ -3442,7 +3442,8 @@ def _remote_file(repository, path, commit, transport="auto", timeout=30, max_byt
     """Bytes of repository@commit:path via raw.githubusercontent.com, else the contents API (read-only)."""
     r = repo(repository)
     clean = _vendor_path(path)
-    if _pinned_commit_ref(commit):
+    if (transport == "auto" and request is _DEFAULT_REQUEST
+            and _REQUEST.get() is None and _pinned_commit_ref(commit)):
         try:
             return public_github_raw_bytes(r, clean, commit, timeout=timeout, max_bytes=max_bytes)
         except Error as exc:
@@ -4825,6 +4826,9 @@ for _name in ("_gh","_url","request","pages","repository","repositories","reposi
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
               "enrollment_progress","repo_identity","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
  globals()[_name]=_bounded(globals()[_name])
+# Capture the final bounded function, so injected request replacements are respected.
+_DEFAULT_REQUEST = request
+
 if __name__=="__main__":
  raise SystemExit(_http_worker() if sys.argv[1:]==["--_http-worker"] else
                   _job_log_worker() if sys.argv[1:]==["--_job-log-worker"] else main())
