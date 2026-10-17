@@ -91,15 +91,46 @@ def test_missing_subtree_is_clear_error(world, monkeypatch):
     assert r.returncode == 2 and not r.stdout
 
 
+def _local_repo_snapshot(root):
+    git_dir = Path(_git(root, "rev-parse", "--absolute-git-dir"))
+    fetch_head = git_dir / "FETCH_HEAD"
+    index = git_dir / "index"
+    return {
+        "refs": _refs(root),
+        "head": _git(root, "rev-parse", "HEAD"),
+        "status": subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                 capture_output=True, text=True).stdout,
+        "fetch_head": fetch_head.read_text(encoding="utf-8") if fetch_head.exists() else None,
+        "index_sha": g.git_blob_sha(index.read_bytes()) if index.exists() else None,
+    }
+
+
 @needs_subtree
-def test_push_plan_changes_nothing(world):
-    before_mono, before_child = _refs(world["mono"]), _refs(world["child"])
-    out = g.subtree_sync(world["mono"], "sub", str(world["child"]), "sync/one", direction="push")
+def test_push_plan_changes_nothing(world, monkeypatch):
+    mono, child = world["mono"], world["child"]
+    split = g.git_subtree_split(mono, "sub")["sha"]
+    _git(mono, "push", "-q", str(child), f"{split}:refs/heads/trunk")
+    before_mono, before_child = _local_repo_snapshot(mono), _refs(child)
+    fetch_on_mono = []
+    real = g._git_run
+
+    def spy(run_root, args, **kw):
+        if args[:1] == ["fetch"] and str(g._git_root(run_root)) == str(g._git_root(mono)):
+            fetch_on_mono.append(list(args))
+        return real(run_root, args, **kw)
+
+    monkeypatch.setattr(g, "_git_run", spy)
+    out = g.subtree_sync(mono, "sub", str(child), "sync/one", direction="push", remote_compare_ref="trunk")
     assert out["state"] == "planned" and out["write"] is False
-    assert out["command"] == ["git", "subtree", "push", "--prefix=sub", str(world["child"]), "sync/one"]
+    assert out["command"] == [
+        "git", "push", "--", str(child), f"{out['split_sha']}:refs/heads/sync/one",
+    ]
     assert out["provenance"]["trailer"] == f"Subtree-Split: {out['source']} {out['split_sha']} sub"
-    assert _refs(world["mono"]) == before_mono and _refs(world["child"]) == before_child
-    assert not (Path(_git(world["mono"], "rev-parse", "--absolute-git-dir")) / "subtree-cache").exists()
+    assert out["split"]["fallback_used"] is False
+    assert "branch_race_note" in out["push_guard"]
+    assert _local_repo_snapshot(mono) == before_mono and _refs(child) == before_child
+    assert not fetch_on_mono
+    assert not (Path(_git(mono, "rev-parse", "--absolute-git-dir")) / "subtree-cache").exists()
 
 
 @needs_subtree
@@ -174,5 +205,5 @@ def test_cli_plan_prints_command(world):
                         "--direction", "push"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out["state"] == "planned" and out["command"][:3] == ["git", "subtree", "push"]
+    assert out["state"] == "planned" and out["command"][:2] == ["git", "push"]
     assert _refs(world["child"]) == ""
