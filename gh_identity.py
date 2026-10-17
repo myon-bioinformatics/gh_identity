@@ -5743,7 +5743,7 @@ def _main(argv=None):
  x=s.add_parser("git-work",help="work branch from a PR head (#N) or remote branch, with branch.<name>.remote/merge set (planned unless --write)");x.add_argument("--root",default=".");x.add_argument("source",metavar="#N|pr/N|BRANCH");x.add_argument("branch",metavar="WORK_BRANCH");x.add_argument("--upstream",metavar="REMOTE_BRANCH");x.add_argument("--remote",default="origin");x.add_argument("--depth",type=int);x.add_argument("--fetch-timeout",type=float,default=120);x.add_argument("--write",action="store_true")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("fleet-status",help="branch, upstream +ahead/-behind, changes of several clones (local; --fix-tracking plans upstream config, --write applies)");x.add_argument("roots",nargs="+");x.add_argument("--fix-tracking",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
- x=s.add_parser("fleet-checks",help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true")
+ x=s.add_parser("fleet-checks",help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
  x=s.add_parser("merge-readiness",help="review findings (Must/Blocking/Should), changes requested, open threads and head moves to confirm before merging; exit 0 clear, 1 blocked, 3 attention");x.add_argument("repository");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-preview",help="would these open PRs merge together (alone, in sequence, pairwise)? temporary repository, nothing pushed");x.add_argument("repository");x.add_argument("--pr",type=int,action="append",dest="numbers");x.add_argument("--all-open",action="store_true");x.add_argument("--base");x.add_argument("--no-pairs",action="store_true");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--text",action="store_true")
@@ -5830,7 +5830,7 @@ def _main(argv=None):
   elif ns.cmd=="fleet-checks":
    ignore=tuple(ns.ignore) if ns.ignore is not None else FLEET_IGNORE;deadline=time.monotonic()+ns.wait
    while True:
-    o=fleet_checks(ns.roots,ignore=ignore,steps=ns.steps,transport=transport)
+    o=fleet_checks(ns.roots,ignore=ignore,steps=ns.steps,transport=transport,timeout=ns.poll_timeout)
     if o["state"]!="pending" or time.monotonic()+ns.interval>deadline:break
     time.sleep(ns.interval)
   elif ns.cmd=="merge-readiness":o=merge_readiness(ns.repository,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
@@ -5951,6 +5951,16 @@ def _main(argv=None):
  if ns.cmd in ("comment","variable-set","git-switch","git-work","labels"):
   return 0 if o.get("status") in ("planned","already_exists","already_satisfied","verified") else 1
  return 0
+def _argv_positive_wait(argv):
+ for index,arg in enumerate(argv):
+  if arg=="--wait":
+   if index+1>=len(argv):return True
+   try:return float(argv[index+1])>0
+   except ValueError:return True
+  if arg.startswith("--wait="):
+   try:return float(arg.split("=",1)[1])>0
+   except ValueError:return True
+ return False
 def main(argv=None):
  args=list(sys.argv[1:] if argv is None else argv);limits={}
  try:
@@ -5963,6 +5973,10 @@ def main(argv=None):
   # wait-checks spans many bounded polls; --timeout then bounds each poll.
   if args[:1]==["wait-checks"]:
    if set(limits)-{"timeout"}:raise ValueError("wait-checks accepts --timeout only (per poll)")
+   return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
+  # fleet-checks --wait polls for minutes: each poll gets its own budget, not one shared 30 s scope.
+  if args[:1]==["fleet-checks"] and _argv_positive_wait(args):
+   if set(limits)-{"timeout"}:raise ValueError("fleet-checks --wait accepts --timeout only (per poll)")
    return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
   with operation(**limits):return _main(args)
  except (ValueError,Error,GitInspectionError) as e:
