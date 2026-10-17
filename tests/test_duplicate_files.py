@@ -299,3 +299,17 @@ def test_different_copy_sha_is_reported_separately_from_lock_provenance():
     assert row["matches_lock"] is False and row["stale"] is False
     assert "modified_after_lock" in group["warnings"]
     assert "unknown_provenance" in group["warnings"]  # unrelated drifted copy
+
+
+def test_line_wrapped_github_base64_is_accepted():
+    trees = TREES[CC] + [blob("python/vendor.lock.json", b"lock")]
+    def transport(method, path, **kw):
+        if path == f"repos/me/consumer/contents/python/vendor.lock.json?ref={CC}":
+            encoded = lock([entry("vendor/tool.py", UP_OLD)])["content"]
+            return {"encoding": "base64", "content": "\n".join(encoded[i:i+60] for i in range(0, len(encoded), 60))}
+        return fake(method, path, **kw)
+    with patch.dict(TREES, {CC: trees}), patch.object(g, "pages", return_value=REPOS), \
+         patch.object(g, "request", side_effect=transport):
+        result = g.duplicate_files("me")
+    assert result["complete"] is True
+    assert result["scanned"]["me/consumer"]["lock_paths"] == ["vendor.lock.json", "python/vendor.lock.json"]
