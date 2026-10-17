@@ -1314,3 +1314,42 @@ the entire affected repository from aggregation. JSON `complete` is false,
 Markdown explicitly warns that the report is incomplete. Both output formats
 exit 1 on incomplete scans (exit 0 on complete scans); excluded nonpublic
 repositories are outside the scan scope.
+
+## Several clones at once (fleet)
+
+```bash
+python gh_identity.py fleet-status ../repo-a ../repo-b --text            # branch, upstream +ahead/-behind, changes
+python gh_identity.py fleet-status ../repo-* --fix-tracking --write --text # set the missing upstream + fetch refspec
+python gh_identity.py fleet-checks ../repo-* --steps --wait 900 --text   # CI of each HEAD: failed steps, annotations
+python gh_identity.py fleet-pr ../repo-* --title "ci: ..." --body-file body.md --write --text
+```
+
+One row per clone. `fleet-status --fix-tracking` targets the shallow-clone case where a
+pushed branch has no `branch.<b>.remote/merge` or fetch refspec, so tools report it as
+unpushed; it plans the config (as `git-work` does) and applies it only with `--write`.
+`fleet-checks` ignores `copilot-pull-request-reviewer` by default (`--ignore NAME` to
+change), keeps failure/warning annotations and drops runner notices; exit 0 green,
+1 failed, 3 still pending. `fleet-pr` reports an open PR instead of opening a second
+one and writes only with `--write`.
+
+## Will these PRs merge together? (merge-preview)
+
+```bash
+python gh_identity.py merge-preview OWNER/REPO --all-open --text      # every open PR into the default branch
+python gh_identity.py merge-preview OWNER/REPO --pr 104 --pr 106 --base main --text
+```
+
+Before stacking several PRs on one integration branch, this answers whether they
+conflict, without merging or pushing anything: the base branch and each exact
+PR `head_sha` reported by the GitHub API are fetched into a temporary partial clone.
+Every fetched PR commit is checked against its API SHA before any comparison, and
+all comparisons and temporary merge parents use those immutable SHAs, even if a PR
+is updated or force-pushed during retrieval. The commits are combined with
+`git merge-tree --write-tree` (Git 2.38+). It reports each PR `alone` against the
+base, the `sequence` in the given order (a conflicting PR is listed with its files and
+skipped, so later steps still report), and every `pair` of PR heads against their
+merge base (`--no-pairs` to skip). Exit 0 when the whole sequence is clean, 1 for
+conflicts, 2 for errors (JSON on stderr, no result on stdout). If a snapshot cannot
+be fetched or verification reports `pr_head_sha_mismatch`, rerun to read fresh API
+heads; it never falls back to a moving PR ref. The JSON schema and `write: false`
+contract are unchanged.

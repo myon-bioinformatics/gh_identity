@@ -4200,6 +4200,294 @@ def render_pin_audit(o):
 _REQUEST = contextvars.ContextVar("ghi_request", default=None)
 
 
+# ---------------------------------------------------------------------------
+# Fleet: the same question asked of several local clones, one row per clone.
+# ---------------------------------------------------------------------------
+FLEET_IGNORE = ("copilot-pull-request-reviewer",)
+_FLEET_NOISE = re.compile(r"ubuntu-latest label will migrate|^Process completed with exit code")
+
+
+def _upstream(root):
+    raw, _, code = _git_run(root, ["rev-parse", "--abbrev-ref", "@{upstream}"], max_bytes=4096, ok=(0, 128))
+    return _git_decode(raw).strip() if code == 0 else None
+
+
+def fleet_status(roots, *, fix_tracking=False, write=False, remote="origin", timeout=120):
+    """Branch, upstream ahead/behind and local changes of each clone (local; fetch only to fix tracking).
+
+    A pushed branch whose clone lacks ``branch.<b>.remote/merge`` or a fetch refspec
+    for it (shallow single-branch clones) has no upstream, so hooks report it as
+    unpushed. ``fix_tracking`` plans the same config git-work writes (remote, merge,
+    refspec) when the remote branch exists; ``write=True`` applies it and fetches.
+    """
+    if isinstance(roots, (str, os.PathLike)):
+        roots = [roots]
+    rows = []
+    for root in roots:
+        row = {"root": os.fspath(root)}
+        try:
+            head = checkout_head(root)
+            status = git_status(root)
+            kinds = Counter("untracked" if r["kind"] == "?" else "changed" for r in status["records"])
+            branch, upstream = head["branch"], _upstream(root)
+            row.update(repository=remote_repository(root, remote)["full_name"], branch=branch,
+                       head_sha=head["sha"], changed=kinds.get("changed", 0), untracked=kinds.get("untracked", 0))
+            if upstream is None and fix_tracking and branch:
+                listed = _git_decode(_git_run(root, ["ls-remote", "--heads", remote, branch], timeout=timeout,
+                                              inherit_auth=True, max_bytes=64 * 1024)[0]).strip()
+                refspec = f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"
+                existing = _git_decode(_git_run(root, ["config", "--local", "--get-all", f"remote.{remote}.fetch"],
+                                                ok=(0, 1))[0]).split()
+                steps = [["config", "--local", f"branch.{branch}.remote", remote],
+                         ["config", "--local", f"branch.{branch}.merge", f"refs/heads/{branch}"]]
+                if refspec not in existing and f"+refs/heads/*:refs/remotes/{remote}/*" not in existing:
+                    steps.append(["config", "--local", "--add", f"remote.{remote}.fetch", refspec])
+                steps.append(["fetch", "--no-tags", remote, branch])
+                if not listed:
+                    row["tracking_fix"] = {"status": "remote_branch_missing"}
+                elif not write:
+                    row["tracking_fix"] = {"status": "planned", "commands": [["git", *s] for s in steps]}
+                else:
+                    for step in steps:
+                        _git_run(root, step, timeout=timeout if step[0] == "fetch" else None,
+                                 inherit_auth=step[0] == "fetch")
+                    upstream = _upstream(root)
+                    row["tracking_fix"] = {"status": "verified" if upstream else "verification_mismatch"}
+            if upstream:
+                counts = _git_decode(_git_run(root, ["rev-list", "--left-right", "--count",
+                                                     f"{upstream}...HEAD"])[0]).split()
+                row.update(upstream=upstream, behind=int(counts[0]), ahead=int(counts[1]))
+            else:
+                row.update(upstream=None, behind=None, ahead=None)
+            row["ok"] = bool(upstream) and row["ahead"] == 0 and not kinds
+        except (GitInspectionError, ValueError, OSError) as error:
+            row.update(ok=False, error=str(error))
+        rows.append(row)
+    return {"schema": "gh-identity-fleet-status/1", "ok": all(r["ok"] for r in rows), "rows": rows,
+            "observed_at": now()}
+
+
+def render_fleet_status(o):
+    out = []
+    for r in o["rows"]:
+        name = os.path.basename(os.path.abspath(r["root"]))
+        if "error" in r:
+            out.append(f"error {name}: {r['error']}")
+            continue
+        track = f"{r['upstream']} +{r['ahead']}/-{r['behind']}" if r["upstream"] else "no upstream"
+        fix = f" tracking:{r['tracking_fix']['status']}" if "tracking_fix" in r else ""
+        out.append(f"{'ok  ' if r['ok'] else 'todo'} {name} {r['branch'] or '(detached)'}@{r['head_sha'][:7]} {track}"
+                   f" changed={r['changed']} untracked={r['untracked']}{fix}")
+    return "\n".join(out)
+
+
+def fleet_checks(roots, *, ignore=FLEET_IGNORE, steps=False, transport="auto", timeout=30):
+    """Checks of each clone's checked-out HEAD; with steps, failed job steps and failure/warning annotations."""
+    if isinstance(roots, (str, os.PathLike)):
+        roots = [roots]
+    rows = []
+    for root in roots:
+        row = {"root": os.fspath(root)}
+        try:
+            full = remote_repository(root)["full_name"]
+            if not full:
+                raise ValueError("origin is not a GitHub remote")
+            sha = checkout_head(root)["sha"]
+            observed = checks_for_sha(full, sha, transport=transport, timeout=timeout)
+            kept = [c for c in observed["checks"] if c["name"] not in set(ignore)]
+            summary = summarize_checks(kept, len(kept)) if kept else {"state": "pending", "checks": []}
+            failed = [c for c in kept if c["status"] == "completed"
+                      and c["conclusion"] not in ("success", "skipped", "neutral")]
+            row.update(repository=full, sha=sha, state=summary["state"], count=len(kept),
+                       pending=sum(c["status"] != "completed" for c in kept),
+                       failed=[{"id": c["id"], "name": c["name"], "conclusion": c["conclusion"]} for c in failed])
+            if steps:
+                for item in row["failed"]:
+                    try:
+                        job = request("GET", f"repos/{full}/actions/jobs/{item['id']}", transport=transport, timeout=timeout)
+                        item["failed_steps"] = [s.get("name") for s in job.get("steps") or [] if s.get("conclusion") == "failure"]
+                    except Error:
+                        item["failed_steps"] = None
+                    notes = request("GET", f"repos/{full}/check-runs/{item['id']}/annotations", transport=transport,
+                                    timeout=timeout) or []
+                    item["annotations"] = [
+                        {"level": n.get("annotation_level"), "path": n.get("path"), "line": n.get("start_line"),
+                         "message": " ".join((n.get("message") or "").split())[:300]}
+                        for n in notes if n.get("annotation_level") in ("failure", "warning")
+                        and not _FLEET_NOISE.search(" ".join((n.get("message") or "").split()))]
+        except (GitInspectionError, ValueError, Error) as error:
+            row.update(state="error", error=str(getattr(error, "code", "")) or str(error))
+        rows.append(row)
+    states = {r["state"] for r in rows}
+    state = "error" if "error" in states else "failed" if "failed" in states else "pending" if states - {"green"} else "green"
+    return {"schema": "gh-identity-fleet-checks/1", "state": state, "rows": rows, "observed_at": now()}
+
+
+def render_fleet_checks(o):
+    out = []
+    for r in o["rows"]:
+        if r["state"] == "error":
+            out.append(f"error   {r['root']}: {r['error']}")
+            continue
+        out.append(f"{r['state']:7} {r['repository']}@{r['sha'][:7]} runs={r['count']} pending={r['pending']} failed={len(r['failed'])}")
+        for item in r["failed"]:
+            out.append(f"   x {item['name']} ({item['conclusion']})")
+            for name in item.get("failed_steps") or []:
+                out.append(f"     step: {name}")
+            for n in item.get("annotations") or []:
+                out.append(f"     {n['level']}: {n['path']}:{n['line']} {n['message'][:200]}")
+    return "\n".join(out)
+
+
+def fleet_pr(roots, title, body, *, base="main", draft=False, write=False, transport="auto", timeout=30):
+    """Open a PR for each clone's current branch (planned unless write=True); an open PR is reported, not duplicated."""
+    if not isinstance(title, str) or not title.strip() or not isinstance(body, str):
+        raise ValueError("title and body are required")
+    if isinstance(roots, (str, os.PathLike)):
+        roots = [roots]
+    rows = []
+    for root in roots:
+        row = {"root": os.fspath(root)}
+        try:
+            full = remote_repository(root)["full_name"]
+            branch = checkout_head(root)["branch"]
+            if not full or not branch:
+                raise ValueError("needs a GitHub origin and a checked-out branch")
+            row.update(repository=full, head=branch, base=base)
+            open_prs = request("GET", f"repos/{full}/pulls?state=open&head={full.split('/')[0]}:{branch}",
+                               transport=transport, timeout=timeout) or []
+            if open_prs:
+                row.update(status="already_exists", number=open_prs[0]["number"], url=open_prs[0].get("html_url"))
+            elif not write:
+                row["status"] = "planned"
+            else:
+                made = request("POST", f"repos/{full}/pulls", {"title": title, "head": branch, "base": base,
+                                                               "body": body, "draft": bool(draft)},
+                               transport=transport, timeout=timeout, mutating=True)
+                row.update(status="verified" if made.get("number") else "verification_mismatch",
+                           number=made.get("number"), url=made.get("html_url"))
+        except (GitInspectionError, ValueError, Error) as error:
+            row.update(status="error", error=str(getattr(error, "code", "")) or str(error))
+        rows.append(row)
+    ok = all(r["status"] in ("planned", "already_exists", "verified") for r in rows)
+    return {"schema": "gh-identity-fleet-pr/1", "status": "verified" if write and ok else "planned" if ok else "error",
+            "rows": rows, "observed_at": now()}
+
+def render_fleet_pr(o):
+    return "\n".join(f"{r['status']} {r.get('repository') or r['root']}"
+                     f"{' #' + str(r['number']) if r.get('number') else ''} {r.get('url') or r.get('error') or ''}".rstrip()
+                     for r in o["rows"])
+
+
+def merge_preview(repository, numbers=None, *, all_open=False, base=None, pairs=True, max_prs=15,
+                  transport="auto", timeout=300, remote_base="https://github.com/", remote=None):
+    """Would these open PRs merge together? Read-only: a temporary repository, nothing pushed.
+
+    Fetches the base branch and the exact PR head SHAs reported by the API into a
+    temporary partial clone (blobs fetched on demand), verifies the fetched commits,
+    and uses those immutable SHAs with ``git merge-tree --write-tree``:
+
+    * ``alone``: each PR against the base tip (what GitHub's mergeability reports);
+    * ``sequence``: the PRs merged one after another in the given order, as when they
+      are first combined on one integration branch; a conflicting PR is reported with
+      its files and skipped, so the later steps still say something;
+    * ``pairs`` (optional): every pair of PR heads against their merge base, to tell
+      which PRs collide with each other.
+
+    PR numbers come from ``numbers`` or, with ``all_open``, every open PR into
+    ``base`` (default: the repository's default branch), oldest first.
+    """
+    r = repo(repository)
+    if all_open == bool(numbers):
+        raise ValueError("give PR numbers or all_open, not both")
+    info = request("GET", f"repos/{r}", transport=transport, timeout=30)
+    base = base or info.get("default_branch")
+    if all_open:
+        listed = request("GET", f"repos/{r}/pulls?state=open&base={urllib.parse.quote(base)}&sort=created&direction=asc&per_page=100",
+                         transport=transport, timeout=30) or []
+        numbers = [p["number"] for p in listed]
+    numbers = list(numbers)
+    if any(type(n) is not int or n < 1 for n in numbers):
+        raise ValueError("PR numbers must be positive integers")
+    if len(numbers) > max_prs:
+        raise ValueError(f"at most {max_prs} PRs (pairs grow quadratically)")
+    prs = []
+    for number in numbers:
+        pr = request("GET", f"repos/{r}/pulls/{number}", transport=transport, timeout=30)
+        head_sha = (pr.get("head") or {}).get("sha")
+        if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+            raise Error("invalid_pr_head_sha")
+        prs.append({"number": number, "title": pr.get("title"), "state": pr.get("state"),
+                    "base": (pr.get("base") or {}).get("ref"), "head_sha": head_sha})
+    url = _validate_remote(remote if remote is not None else remote_base.rstrip("/") + "/" + r)
+    out = {"schema": "gh-identity-merge-preview/1", "write": False, "repository": r, "base": base, "prs": prs,
+           "alone": [], "sequence": [], "pairs": [], "observed_at": now()}
+    if not prs:
+        out["ok"] = True
+        return out
+    with tempfile.TemporaryDirectory(prefix="ghi-merge-preview-") as tmp:
+        def git(*args, ok=(0,)):
+            raw, _, code = _git_run(tmp, list(args), max_bytes=16 * 1024 * 1024, ok=ok, timeout=timeout,
+                                    inherit_auth=args[:1] == ("fetch",))
+            return _git_decode(raw), code
+        git("init", "-q", "--bare")
+        git("remote", "add", "origin", url)
+        git("config", "remote.origin.promisor", "true")
+        git("config", "remote.origin.partialclonefilter", "blob:none")
+        git("config", "user.name", "merge-preview")  # commit-tree in this throwaway repository only
+        git("config", "user.email", "merge-preview@invalid")
+        refspecs = [f"+refs/heads/{base}:refs/heads/{base}"] + [f"+{p['head_sha']}:refs/pr/{p['number']}" for p in prs]
+        git("fetch", "-q", "--no-tags", "--filter=blob:none", "origin", *refspecs)
+        # Verify every fetched commit before producing any comparison. A missing
+        # snapshot or moved ref must fail, never silently compare a newer PR head.
+        for p in prs:
+            fetched = git("rev-parse", "--verify", f"refs/pr/{p['number']}^{{commit}}")[0].strip()
+            if fetched != p["head_sha"]:
+                raise Error("pr_head_sha_mismatch")
+        tip = git("rev-parse", f"refs/heads/{base}")[0].strip()
+        out["base_sha"] = tip
+
+        def merge(a, b):
+            text, code = git("merge-tree", "--write-tree", "--name-only", "--no-messages", a, b, ok=(0, 1))
+            lines = [l for l in text.splitlines() if l]
+            return code == 0, lines[0] if lines else None, lines[1:]
+
+        for p in prs:
+            clean, _, files = merge(tip, p["head_sha"])
+            out["alone"].append({"number": p["number"], "status": "clean" if clean else "conflict", "files": files})
+        current = tip
+        for p in prs:
+            clean, tree, files = merge(current, p["head_sha"])
+            if clean:
+                current = git("commit-tree", tree, "-p", current, "-p", p["head_sha"],
+                              "-m", f"preview #{p['number']}")[0].strip()
+            out["sequence"].append({"number": p["number"], "status": "clean" if clean else "conflict_skipped",
+                                    "files": files})
+        if pairs:
+            for i, a in enumerate(prs):
+                for b in prs[i + 1:]:
+                    clean, _, files = merge(a["head_sha"], b["head_sha"])
+                    out["pairs"].append({"a": a["number"], "b": b["number"], "status": "clean" if clean else "conflict",
+                                         "files": files})
+    out["ok"] = all(s["status"] == "clean" for s in out["sequence"])
+    return out
+
+
+def render_merge_preview(o):
+    out = [f"{o['repository']} base {o['base']}@{(o.get('base_sha') or '')[:7]}: {len(o['prs'])} PR(s), "
+           f"{'all merge cleanly in order' if o['ok'] else 'conflicts'}"]
+    alone = {a["number"]: a for a in o["alone"]}
+    for step in o["sequence"]:
+        a = alone[step["number"]]
+        extra = "" if a["status"] == "clean" else f" (also conflicts with {o['base']} alone)"
+        files = f" {', '.join(step['files'][:5])}" if step["files"] else ""
+        out.append(f"  {step['status']:16} #{step['number']}{extra}{files}")
+    for pair in o["pairs"]:
+        if pair["status"] != "clean":
+            out.append(f"  pair conflict    #{pair['a']} x #{pair['b']} {', '.join(pair['files'][:5])}")
+    return "\n".join(out)
+
+
 @contextlib.contextmanager
 def request_stub(handler):
     """Temporarily replace GitHub `request` for tests (stdlib ContextVar)."""
@@ -4622,6 +4910,10 @@ def _main(argv=None):
   if command=="git-ignore":x.add_argument("paths",nargs="+")
  x=s.add_parser("git-work",help="work branch from a PR head (#N) or remote branch, with branch.<name>.remote/merge set (planned unless --write)");x.add_argument("--root",default=".");x.add_argument("source",metavar="#N|pr/N|BRANCH");x.add_argument("branch",metavar="WORK_BRANCH");x.add_argument("--upstream",metavar="REMOTE_BRANCH");x.add_argument("--remote",default="origin");x.add_argument("--depth",type=int);x.add_argument("--fetch-timeout",type=float,default=120);x.add_argument("--write",action="store_true")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
+ x=s.add_parser("fleet-status",help="branch, upstream +ahead/-behind, changes of several clones (local; --fix-tracking plans upstream config, --write applies)");x.add_argument("roots",nargs="+");x.add_argument("--fix-tracking",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
+ x=s.add_parser("fleet-checks",help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true")
+ x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
+ x=s.add_parser("merge-preview",help="would these open PRs merge together (alone, in sequence, pairwise)? temporary repository, nothing pushed");x.add_argument("repository");x.add_argument("--pr",type=int,action="append",dest="numbers");x.add_argument("--all-open",action="store_true");x.add_argument("--base");x.add_argument("--no-pairs",action="store_true");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--text",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("subtree-split",help="read-only git subtree split --prefix: print the split commit SHA (no refs changed)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--mainline",help="also check the source is on this ref's first-parent history");x.add_argument("--timeout",type=float,default=600)
@@ -4698,6 +4990,15 @@ def _main(argv=None):
    else:raise ValueError("branch required")
   elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,fetch_timeout=ns.fetch_timeout,write=ns.write)
   elif ns.cmd=="local-position":o=local_position(ns.root)
+  elif ns.cmd=="merge-preview":o=merge_preview(ns.repository,ns.numbers,all_open=ns.all_open,base=ns.base,pairs=not ns.no_pairs,transport=transport,timeout=ns.git_timeout,remote_base=ns.remote_base)
+  elif ns.cmd=="fleet-status":o=fleet_status(ns.roots,fix_tracking=ns.fix_tracking,write=ns.write)
+  elif ns.cmd=="fleet-checks":
+   ignore=tuple(ns.ignore) if ns.ignore is not None else FLEET_IGNORE;deadline=time.monotonic()+ns.wait
+   while True:
+    o=fleet_checks(ns.roots,ignore=ignore,steps=ns.steps,transport=transport)
+    if o["state"]!="pending" or time.monotonic()+ns.interval>deadline:break
+    time.sleep(ns.interval)
+  elif ns.cmd=="fleet-pr":o=fleet_pr(ns.roots,ns.title,Path(ns.body_file).read_text(encoding="utf-8"),base=ns.base,draft=ns.draft,write=ns.write,transport=transport)
   elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout,mainline=ns.mainline)
   elif ns.cmd=="sync-provenance":
    if ns.verify:o=verify_sync_provenance(ns.root,ns.verify,monorepo_root=ns.monorepo_root,timeout=ns.timeout)
@@ -4786,10 +5087,18 @@ def _main(argv=None):
  elif ns.cmd=="get" and ns.text:print(render_get(o))
  elif ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.markdown:print(render_vendor_markdown(o))
  elif ns.cmd=="pin-audit" and ns.text:print(render_pin_audit(o))
+ elif ns.cmd=="merge-preview" and ns.text:print(render_merge_preview(o))
+ elif ns.cmd=="fleet-status" and ns.text:print(render_fleet_status(o))
+ elif ns.cmd=="fleet-checks" and ns.text:print(render_fleet_checks(o))
+ elif ns.cmd=="fleet-pr" and ns.text:print(render_fleet_pr(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
  if ns.cmd=="pin-audit":return 0 if o["ok"] else 1
+ if ns.cmd=="merge-preview":return 0 if o["ok"] else 1
+ if ns.cmd=="fleet-status":return 0 if o["ok"] else 1
+ if ns.cmd=="fleet-checks":return 0 if o["state"]=="green" else 3 if o["state"]=="pending" else 1
+ if ns.cmd=="fleet-pr":return 0 if o["status"] in ("planned","verified") else 1
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
   return 0 if o["ok"] and not drift else 1
@@ -4824,7 +5133,7 @@ for _name in ("_gh","_url","request","pages","repository","repositories","reposi
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
-              "enrollment_progress","repo_identity","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
+              "enrollment_progress","repo_identity","merge_preview","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
  globals()[_name]=_bounded(globals()[_name])
 # Capture the final bounded function, so injected request replacements are respected.
 _DEFAULT_REQUEST = request
