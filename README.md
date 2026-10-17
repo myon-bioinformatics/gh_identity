@@ -552,14 +552,14 @@ round-trip newline drift or establish CSS/JS equivalence for arbitrary pages.
 
 ### Optional internal reproduction when a site cannot be inspected
 
-`scripts/serve_dom_lab.py` provides an optional local Gradio fixture renderer.
+`scripts/gh_identity_serve_dom_lab.py` provides an optional local Gradio fixture renderer.
 Use it to separate local rendering/extraction behavior from an inaccessible site's
 network or access failure; it is not a replacement for live-site evidence or a
 CORS bypass. It does not fetch remote pages and binds only to 127.0.0.1, with public
 sharing disabled. Supply an existing trusted markdown.py:
 
 ```sh
-python scripts/serve_dom_lab.py /path/to/vendor/markdown.py
+python scripts/gh_identity_serve_dom_lab.py /path/to/vendor/markdown.py
 ```
 
 Install Gradio separately in a disposable test environment if needed; it is not
@@ -567,7 +567,7 @@ a GHI runtime dependency. Inspect `#dom-lab-body` in the rendered page and save
 its DOM for offline comparison. For fixture-only generation without Gradio:
 
 ```sh
-python scripts/serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixture.html
+python scripts/gh_identity_serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixture.html
 python gh_identity.py html-content fixture.html --selector '#dom-lab-body'
 ```
 
@@ -576,7 +576,7 @@ Gradio was unavailable. Later, web-ui PR #43 at `8ff5bfb` added and passed a
 local Gradio + Chromium DOM integration test
 ([CI evidence](https://github.com/myon-bioinformatics/web-ui/actions/runs/37887560280)).
 That validates web-ui's shared reproduction path, not this GHI-specific
-`serve_dom_lab.py` server path, which remains unverified.
+`gh_identity_serve_dom_lab.py` server path, which remains unverified.
 The built-in representative fixture does not reproduce an arbitrary site's DOM,
 computed CSS, JavaScript state, authentication, or network restrictions.
 
@@ -698,6 +698,21 @@ configuration is trusted input, not an isolation boundary for hostile repositori
 Parent execution location does not imply parent ownership of this implementation.
 A parent compatibility adapter can expose the old function names over these APIs
 once its consumer lock explicitly selects this revision.
+
+### Repository orientation (`scripts/repo_overview.py`)
+
+Bounded, human-oriented repository summary (stdlib-only, `python -S`), migrated
+from browser-test-kit (provenance in the file header). It prints about/README
+excerpt, key config files, a file list via `git_ls_files` from this repo's
+`gh_identity.py`, and optional `--stats` / `--churn`. It is not merged into
+`gh_identity.py`.
+
+```bash
+python -S scripts/repo_overview.py --stats --churn 10
+```
+
+The built-in `overview` command remains the JSON workspace summary; `repo_overview.py`
+is the log-friendly orientation format previously shipped from browser-test-kit.
 
 ## Local branch switching (`git-switch`)
 
@@ -826,7 +841,15 @@ repository). No `--write` is needed: `--branch`, `--rejoin`, `--onto` and
 `--annotate` are never passed, so no ref is created or moved and the current
 branch gets no commit (only new objects are added to the object database; the
 `.git/subtree-cache/<pid>` scratch directory git-subtree leaves behind is removed).
-`add` / `pull` / `merge` / `push` are not implemented.
+If a successful `git subtree split` returns a stale SHA, its root tree is rejected
+and a temporary local clone runs `filter-branch --subdirectory-filter` instead.
+The resulting objects are imported with `fetch --no-write-fetch-head`: refs,
+HEAD, index, working tree and `FETCH_HEAD` are preserved. The returned SHA is
+unreferenced and may be pruned by Git GC; publish it or create a ref to retain it.
+`method`, `warning`, `fallback_used` and `fallback_elapsed_seconds` expose recovery
+and its cost. Recovery copies and filters the repository, so it can be expensive;
+split and recovery share the specified timeout budget. No network fetch occurs.
+Use `subtree-sync` below for guarded push/pull.
 `DIR` must be a relative path inside the repository (no absolute path, `..`,
 `.git` or leading `-`); `REV` is resolved to a SHA first. A missing directory is
 `reason: "prefix_not_found"`; if the contrib `git subtree` command is not
@@ -839,12 +862,16 @@ python gh_identity.py subtree-sync-status --root MONOREPO --prefix DIR --other-r
   [--other-ref main] [--revision REV] [--other-only-path GLOB ...]
 ```
 
-Local and read-only (no fetch, no ref changes). `git subtree split` is
-deterministic, so the split commits of `DIR` carry the same SHAs as the history
-of a repository split out of it; both histories are compared as SHA sets in
-their own object databases. `state` is `in_sync`, `monorepo_ahead`,
-`other_ahead`, `diverged` or `unrelated`, with counts and (bounded) commit
-lists. Commits of the other side that only touch `--other-only-path` files
+Local inspection with the same object-only recovery and metadata preservation
+as `subtree-split`. `trees_match` compares content; `history_related` independently
+checks ancestry or an import trailer naming a commit in the compared child's
+history (including squash imports). An old trailer for another child is not
+evidence of a connection. Both checks use the requested revision.
+`state` is `in_sync`, `monorepo_ahead`, `other_ahead`, `diverged`, `unrelated`,
+or `subtree_add_required` (equal trees with unrelated histories). Commit counts,
+bounded lists and SHA membership fields retain their actual values even when
+trees match. `split_method`, `split_warning`, `fallback_used` and
+`fallback_elapsed_seconds` report split recovery. Commits of the other side that only touch `--other-only-path` files
 (e.g. `pyproject.toml`, `uv.lock`) are reported as `other_only_ignored`.
 
 ## Sync provenance (`sync-provenance`)
@@ -856,7 +883,8 @@ python gh_identity.py sync-provenance --root SPLIT_CHECKOUT --verify COMMIT [--m
 ```
 
 Records which monorepo SHA and split SHA a sync came from
-(`gh-identity-sync-provenance/1`) and suggests the commit trailer
+(`gh-identity-sync-provenance/1`), preserves `state`, `trees_match` and
+`history_related`, and suggests the commit trailer
 `Subtree-Split: <monorepo_sha> <split_sha> <prefix>`. `--output-dir` writes
 `sync-provenance.json`. `--verify` reads the trailers of `COMMIT`; with
 `--monorepo-root` the split is recomputed from the recorded SHA and must match
@@ -868,10 +896,21 @@ Records which monorepo SHA and split SHA a sync came from
 python gh_identity.py subtree-sync --prefix DIR --remote URL --branch B --direction push|pull [--squash] [-m MSG] [--write]
 ```
 
-Wraps `git subtree push` / `git subtree pull`. Without `--write` it is plan-only:
+Push sends the validated split SHA directly with
+`git push --force-with-lease=refs/heads/BRANCH: -- REMOTE SHA:refs/heads/BRANCH`.
+The empty lease means BRANCH must still be absent on the remote, so a branch
+created by someone else between the check and the push makes the push fail,
+even when it would be a fast-forward. Pull uses `git subtree pull`.
+`git subtree push` is never used because it would recompute an unchecked split.
+Without `--write` it is plan-only:
 it prints the git command, the split SHA (push) or remote tip (pull) and the
 `Subtree-Split: <monorepo_sha> <split_sha> <prefix>` provenance, and changes
-nothing. `--write` runs the command and then verifies it (pushed branch equals the
+no remote refs. Planning leaves refs, index, work tree and `FETCH_HEAD`
+unchanged; the split still writes unreferenced commit objects (as
+`git subtree split` does), and the ancestry / child-only-path guards fetch the
+remote only inside a temporary clone. Immediately before
+push, the split tree is checked again; a mismatch aborts before any push.
+`--write` runs the command and then verifies it (pushed branch equals the
 split SHA; pulled tip reachable from HEAD, or recorded as `git-subtree-split:` with
 `--squash`). Pull also reports whether the pulled tip carries a valid
 `Subtree-Split:` trailer (recomputed against this checkout).
@@ -953,6 +992,48 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
  "deny_sources": [],
  "overrides": [{"repository": "OWNER/REPO", "source": "PATH", "destination": "PATH", "reason": "why"}]}
 ```
+
+## Files named after each repository (`repo-name-files`)
+
+```bash
+python gh_identity.py repo-name-files OWNER [--repos a,b] [--parent OWNER/REPO] [--parent-ref main] \
+  [--include-forks] [--no-raw]
+```
+
+Read-only: search, existence checks and fetches only (no bundling, no writes).
+Targets are the owner's public, non-archived, non-fork repositories (same
+listing as `duplicate-files`). For each repository the candidate names are the
+repository name as written, lowercased, with `-`/`.` replaced by `_`, and that
+lowercased, crossed with `.py`, `.js`, `.mjs`, `.sh`, `.dart`; the top level is
+checked first, then `src/<pkg>/`. Existence comes from one recursive tree read
+of the default branch. Each hit reports its `raw.githubusercontent.com` URL at the
+default branch (`raw_url`) and at the commit whose tree was read (`raw_commit_url`),
+the fetch status, the tree blob SHA and whether the fetched bytes match it; the
+bytes themselves are fetched at that commit, so `raw_commit_url` keeps pointing at
+exactly what was checked after the branch moves. Python hits get a static `ast` import classification (`stdlib` via
+`sys.stdlib_module_names`, `local` when the module exists next to the file, at
+the top level or under `src/`, otherwise `external`).
+
+The parent (`--parent`, default `OWNER/OWNER`) is read at one resolved commit:
+`vendor-catalog.json` (an entry without `source` means `<repo>.py`),
+`vendor-consumers.json` and `child-heads.json`. Consumption also comes from every
+`vendor.lock.json` in every scanned tree, nested ones included; files with the
+same name but another schema are listed in `other_lock_schemas`. Flags per
+repository:
+
+- `unregistered_source`: a hit that has no catalog entry
+- `catalog_default_mismatch`: a catalog entry without `source` whose `<repo>.py` is not in the tree
+- `consumed_uncatalogued`: a `.py/.js/.mjs/.sh/.dart` file of this repository that is locked or registered by a consumer but not catalogued
+- `fleet_missing`: not in `child-heads.json` (the parent itself is exempt)
+- `needs_bundle`: a Python hit with local, relative or external imports (a Python
+  hit whose bytes were not fetched or did not match the blob reports
+  `needs_bundle: null`, not `false`)
+
+With `--repos`, consumption is only collected from the listed repositories. The
+exit code is 0 only when every tree, lock and parent file was read, every raw fetch
+that was attempted succeeded and matched its blob (failures are listed in
+`raw_errors`), and nothing was truncated or redacted. `--no-raw` skips the
+fetches, so it does not affect the exit code.
 
 ## Duplicate files across repositories (`duplicate-files`)
 
