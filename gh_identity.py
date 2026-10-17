@@ -369,19 +369,82 @@ def _review_rest(path,transport,timeout,max_items,max_pages):
   path=next_path
  return rows,False,"max_pages"
 
+_SEVERITY_NAMES=("Must","Blocking","Should","Non-blocking","Nit")
+_SEVERITY_BY_LOWER={n.lower():n for n in _SEVERITY_NAMES}
+_FENCE_START=re.compile(r"^\s*(```|~~~)")
+_INLINE_LABEL=re.compile(r"^\s*(?:[-*]\s+|#{1,6}\s+)?(?:\*\*|__)?(Must|Blocking|Should|Non-blocking|Nit)(?:\*\*|__)?(?:\s+\d+)?(?=\s*(?:[:：—–]|-\s|$))",re.I)
+_BOLD_SEVERITY_HEADING=re.compile(r"^\s*(?:\*\*|__)(Must|Blocking|Should|Non-blocking|Nit)(?:\*\*|__)\s*$",re.I)
+_MD_HEADING=re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
+
+def _severity_word(word):
+ return _SEVERITY_BY_LOWER.get(word.lower())
+
+def _is_nashi_line(line):
+ text=line.strip()
+ return bool(re.fullmatch(r"(?i)(?:なし|none|n/?a|—|-)\.?",text) or text in ("なし。","なし．"))
+
+def _heading_kind(line):
+ bold=_BOLD_SEVERITY_HEADING.match(line)
+ if bold:return ("severity",_severity_word(bold.group(1)))
+ md=_MD_HEADING.match(line)
+ if md:
+  title=md.group(2).strip()
+  inner=re.match(r"^(?:\*\*|__)?(Must|Blocking|Should|Non-blocking|Nit)(?:\*\*|__)?$",title,re.I)
+  if inner:return ("severity",_severity_word(inner.group(1)))
+  return ("other",title)
+ return None
+
+def _list_top_indent(line):
+ m=re.match(r"^(\s*)(?:[-*]|\d+\.)\s",line)
+ return len(m.group(1)) if m else None
+
+def _skip_fence(lines,i):
+ i+=1
+ while i<len(lines) and not _FENCE_START.match(lines[i]):i+=1
+ return i+1 if i<len(lines) else i
+
 def _explicit_severity(body):
- # Only standalone labels or labels introducing a finding; never prose keywords.
- labels=[]
- pattern=r"^\s*(?:[-*]\s+|#{1,6}\s+)?(?:\*\*)?(Blocking|Should|Non-blocking|Nit)(?:\*\*)?(?=\s*(?::|$))"
- fenced=False
- for line in body.splitlines():
-  if re.match(r"^\s*(```|~~~)",line):fenced=not fenced;continue
-  if fenced:continue
-  match=re.match(pattern,line,re.I)
-  if match:
-   label={"blocking":"Blocking","should":"Should","non-blocking":"Non-blocking","nit":"Nit"}[match[1].lower()]
-   labels.append({"label":label,"source":"explicit_body_label","text":line})
- return labels
+ """Section parser for explicit Must/Blocking/Should labels in review bodies."""
+ findings=[];lines=body.splitlines();i=0;doc_fenced=False
+ while i<len(lines):
+  line=lines[i]
+  if _FENCE_START.match(line):doc_fenced=not doc_fenced;i+=1;continue
+  if doc_fenced:i+=1;continue
+  kind=_heading_kind(line)
+  if kind and kind[0]=="severity":
+   section=kind[1];i+=1;section_lines=[]
+   while i<len(lines):
+    if _FENCE_START.match(lines[i]):i=_skip_fence(lines,i);continue
+    inner=_heading_kind(lines[i])
+    if inner:break
+    if lines[i].strip():section_lines.append(lines[i])
+    i+=1
+   if section_lines and all(_is_nashi_line(x) for x in section_lines):continue
+   k=0
+   while k<len(section_lines):
+    sl=section_lines[k];indent=_list_top_indent(sl)
+    if indent is not None:
+     block=[sl];k+=1
+     while k<len(section_lines):
+      nxt=section_lines[k];ni=_list_top_indent(nxt)
+      if ni is not None and ni<=indent:break
+      block.append(nxt);k+=1
+     text=" ".join(" ".join(block).split());im=_INLINE_LABEL.match(block[0])
+     lab=_severity_word(im.group(1)) if im else section
+     if not _is_nashi_line(block[0]):findings.append({"label":lab,"source":"explicit_body_label","text":text})
+    else:
+     im=_INLINE_LABEL.match(sl)
+     if im:findings.append({"label":_severity_word(im.group(1)),"source":"explicit_body_label","text":sl})
+     k+=1
+   continue
+  if kind and kind[0]=="other":
+   im=_INLINE_LABEL.match(line)
+   if im:findings.append({"label":_severity_word(im.group(1)),"source":"explicit_body_label","text":line})
+   i+=1;continue
+  im=_INLINE_LABEL.match(line)
+  if im:findings.append({"label":_severity_word(im.group(1)),"source":"explicit_body_label","text":line})
+  i+=1
+ return findings
 
 def _review_body(x):
  body=x.get("body") or ""
@@ -4944,6 +5007,160 @@ def render_merge_preview(o):
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Merge readiness: review findings that are easy to miss before merging.
+# ---------------------------------------------------------------------------
+_FINDING_ORDER = ("Must", "Blocking", "Should")
+
+
+def _when(text):
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def _ccr_review_threads(r, n, obs, *, transport, timeout):
+    """Fill review threads from the REST route Claude Code sessions offer when GraphQL is unavailable."""
+    try:
+        rows = request("GET", f"repos/{r}/pulls/{n}/ccr/review_threads", transport=transport, timeout=timeout)
+    except Error:
+        return
+    if not isinstance(rows, list) or any(not isinstance(x, dict) or type(x.get("resolved")) is not bool for x in rows):
+        return
+    threads = []
+    for x in rows:
+        ids = [i for i in x.get("comment_ids") or [] if type(i) is int]
+        threads.append({"kind": "review_thread", "id": f"ccr:{ids[0] if ids else len(threads)}", "is_resolved": x["resolved"],
+                        "is_outdated": bool(x.get("outdated")), "path": x.get("path"), "line": x.get("line"),
+                        "comment_ids": ids, "url": None})
+    mapping = {i: t["id"] for t in threads for i in t["comment_ids"]}
+    urls = {c["id"]: c.get("url") for c in obs["inline_comment"]}
+    for t in threads:
+        t["url"] = next((urls[i] for i in t["comment_ids"] if urls.get(i)), None)
+    for c in obs["inline_comment"]:
+        c["thread_id"] = mapping.get(c["id"])
+    obs["review_thread"] = threads
+    obs["components"]["review_thread"] = {"complete": True, "truncated": False, "limit_reason": None, "source": "ccr"}
+
+
+def merge_readiness(repository, number, *, max_items=100, max_pages=10, transport="auto", timeout=30):
+    """What a reviewer asked for that the PR head may not have answered yet. Read-only.
+
+    Collects Must/Blocking/Should findings (explicit labels only, as in
+    review_observations) from review bodies, conversation and inline comments,
+    the latest CHANGES_REQUESTED per reviewer, unresolved review threads and
+    whether the head moved after the last human review. Each finding says whether
+    it came after the head commit (the code has not changed since) and whether
+    the same reviewer approved later (superseded).
+
+    ``verdict``: ``blocked`` (Must/Blocking or changes requested with no newer
+    code, or an unresolved thread carrying one), ``attention`` (anything else
+    listed: confirm before merging) or ``clear``. An observation, not a gate.
+    """
+    r = repo(repository)
+    n = _review_limits(number, max_items, max_pages)
+    head = pr(r, n, transport=transport, timeout=timeout)
+    sha = head["head_sha"]
+    commit = request("GET", f"repos/{r}/commits/{sha}", transport=transport, timeout=timeout) or {}
+    head_at = ((commit.get("commit") or {}).get("committer") or {}).get("date")
+    obs = review_observations(r, n, max_items=max_items, max_pages=max_pages, transport=transport, timeout=timeout)
+    if obs["components"]["review_thread"].get("error"):
+        _ccr_review_threads(r, n, obs, transport=transport, timeout=timeout)
+    threads = {t["id"]: t for t in obs["review_thread"]}
+    human = [x for x in obs["review_submission"] if not (x.get("author") or "").endswith("[bot]")]
+    approved_at = {}
+    for x in human:
+        if x.get("state") == "APPROVED":
+            approved_at[x["author"]] = max(filter(None, (approved_at.get(x["author"]), _when(x.get("submitted_at")))),
+                                           default=None)
+    findings = []
+    for kind, rows, field in (("review_submission", obs["review_submission"], "submitted_at"),
+                              ("conversation", obs["conversation"], "created_at"),
+                              ("inline_comment", obs["inline_comment"], "created_at")):
+        for x in rows:
+            labels = [l for l in x.get("severity_labels") or [] if l["label"] in _FINDING_ORDER]
+            if not labels:
+                continue
+            at = _when(x.get(field))
+            thread = threads.get(x.get("thread_id")) if kind == "inline_comment" else None
+            later = approved_at.get(x.get("author"))
+            for lab in labels:
+                findings.append({
+                    "kind": kind, "author": x.get("author"), "at": x.get(field), "url": x.get("url"),
+                    "label": lab["label"],
+                    "text": " ".join(lab["text"].split())[:200],
+                    "after_head": bool(at and _when(head_at) and at > _when(head_at)),
+                    "superseded_by_approval": bool(at and later and later > at),
+                    "thread": None if thread is None else {"resolved": thread["is_resolved"], "outdated": thread["is_outdated"]}})
+    latest = {}
+    for x in human:
+        if x.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[x["author"]] = x
+    changes_requested = [{"author": a, "at": x.get("submitted_at"), "commit_id": x.get("commit_id"), "url": x.get("url")}
+                         for a, x in latest.items() if x.get("state") == "CHANGES_REQUESTED"]
+    open_threads = [{"path": t.get("path"), "line": t.get("line"), "url": t.get("url"), "outdated": t["is_outdated"]}
+                    for t in obs["review_thread"] if not t["is_resolved"]]
+    last_review = human[-1] if human else None
+    moved = None
+    if last_review and last_review.get("commit_id") and last_review["commit_id"] != sha:
+        try:
+            cmp = request("GET", f"repos/{r}/compare/{last_review['commit_id']}...{sha}", transport=transport, timeout=timeout)
+            moved = {"author": last_review.get("author"), "reviewed": last_review["commit_id"], "commits": cmp.get("ahead_by"),
+                     "messages": [(((c.get("commit") or {}).get("message") or "").splitlines() or [""])[0][:100]
+                                  for c in (cmp.get("commits") or [])][-5:]}
+        except Error:
+            moved = {"author": last_review.get("author"), "reviewed": last_review["commit_id"], "commits": None, "messages": []}
+    live = [f for f in findings if not f["superseded_by_approval"] and not (f["thread"] and f["thread"]["resolved"])]
+    blockers = [f for f in live if f["label"] in ("Must", "Blocking") and (f["after_head"] or (f["thread"] and not f["thread"]["outdated"]))]
+    blockers += [c for c in changes_requested if c["commit_id"] == sha]
+    reasons = []
+    if head["state"] != "open":
+        reasons.append("merged" if head["merged"] else f"PR is {head['state']}")
+    if head["draft"]:
+        reasons.append("draft")
+    if head["mergeable_state"] in ("dirty", "blocked", "behind", "unstable"):
+        reasons.append(f"mergeable_state {head['mergeable_state']}")
+    if live:
+        reasons.append(f"{len(live)} Must/Blocking/Should finding(s) to confirm")
+    if changes_requested:
+        reasons.append("changes requested by " + ", ".join(c["author"] for c in changes_requested))
+    if [t for t in open_threads if not t["outdated"]]:
+        reasons.append(f"{sum(not t['outdated'] for t in open_threads)} unresolved thread(s)")
+    if moved:
+        reasons.append(f"head moved {moved['commits'] if moved['commits'] is not None else '?'} commit(s) after {moved['author']}'s review")
+    if not human:
+        reasons.append("no human review")
+    gaps = [f"{k} {v.get('error') or v.get('limit_reason')}" for k, v in obs["components"].items() if not v["complete"]]
+    if gaps:
+        reasons.append("unobserved: " + ", ".join(gaps))
+    verdict = "blocked" if blockers else "attention" if reasons else "clear"
+    return {"schema": "gh-identity-merge-readiness/1", "repository": r, "number": n, "verdict": verdict,
+            "reasons": reasons, "head_sha": sha, "head_committed_at": head_at,
+            "pr": {k: head[k] for k in ("state", "draft", "mergeable_state", "head_ref", "base_ref", "url")},
+            "findings": findings, "changes_requested": changes_requested, "open_threads": open_threads,
+            "head_moved_after_review": moved, "complete": not gaps, "observed_at": now()}
+
+
+def render_merge_readiness(o):
+    out = [f"{o['repository']}#{o['number']} {o['pr']['head_ref']}@{o['head_sha'][:7]} -> {o['pr']['base_ref']}: "
+           f"{o['verdict']}" + (f" ({'; '.join(o['reasons'])})" if o["reasons"] else "")]
+    for f in o["findings"]:
+        state = ("superseded by approval" if f["superseded_by_approval"] else
+                 "thread resolved" if f["thread"] and f["thread"]["resolved"] else
+                 "newer than head" if f["after_head"] else "code changed since")
+        out.append(f"  {f['label']:8} {f['kind']} by {f['author']} [{state}] {f['text'][:120]} {f['url'] or ''}".rstrip())
+    for c in o["changes_requested"]:
+        out.append(f"  changes requested by {c['author']} at {(c['commit_id'] or '')[:7]} {c['url'] or ''}".rstrip())
+    for t in o["open_threads"]:
+        out.append(f"  open thread{' (outdated)' if t['outdated'] else ''} {t['path']}:{t['line']} {t['url'] or ''}".rstrip())
+    moved = o["head_moved_after_review"]
+    if moved:
+        out.append(f"  head moved after {moved['author']}'s review of {moved['reviewed'][:7]}: "
+                   + ("; ".join(moved["messages"]) or "?"))
+    return "\n".join(out)
+
+
 @contextlib.contextmanager
 def request_stub(handler):
     """Temporarily replace GitHub `request` for tests (stdlib ContextVar)."""
@@ -5564,17 +5781,20 @@ def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", includ
             "observed_at": now()}
 
 
-def _main(argv=None):
- argv=list(sys.argv[1:] if argv is None else argv)
- if not argv:argv=["overview"]
+_CLI_PARSER=None
+def _argv_transport(argv):
  transport="auto"
  if "--transport" in argv:
   i=argv.index("--transport")
-  if i+1>=len(argv): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
+  if i+1>=len(argv):raise ValueError("missing transport")
   transport=argv[i+1]
-  if transport not in ("auto","gh","urllib"): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
+  if transport not in ("auto","gh","urllib"):raise ValueError("invalid transport")
   del argv[i:i+2]
- a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
+ return transport
+def _cli_parser():
+ global _CLI_PARSER
+ if _CLI_PARSER is not None:return _CLI_PARSER
+ a=argparse.ArgumentParser(allow_abbrev=False,epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
  x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
  s.add_parser("capabilities")
  s.add_parser("overview",help="best-effort local and GitHub workspace summary (default)")
@@ -5590,7 +5810,8 @@ def _main(argv=None):
  x=s.add_parser("git-work",help="work branch from a PR head (#N) or remote branch, with branch.<name>.remote/merge set (planned unless --write)");x.add_argument("--root",default=".");x.add_argument("source",metavar="#N|pr/N|BRANCH");x.add_argument("branch",metavar="WORK_BRANCH");x.add_argument("--upstream",metavar="REMOTE_BRANCH");x.add_argument("--remote",default="origin");x.add_argument("--depth",type=int);x.add_argument("--fetch-timeout",type=float,default=120);x.add_argument("--write",action="store_true")
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("fleet-status",help="branch, upstream +ahead/-behind, changes of several clones (local; --fix-tracking plans upstream config, --write applies)");x.add_argument("roots",nargs="+");x.add_argument("--fix-tracking",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
- x=s.add_parser("fleet-checks",help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true")
+ x=s.add_parser("fleet-checks",allow_abbrev=False,help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
+ x=s.add_parser("merge-readiness",help="review findings (Must/Blocking/Should), changes requested, open threads and head moves to confirm before merging; exit 0 clear, 1 blocked, 3 attention");x.add_argument("repository");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-preview",help="would these open PRs merge together (alone, in sequence, pairwise)? temporary repository, nothing pushed");x.add_argument("repository");x.add_argument("--pr",type=int,action="append",dest="numbers");x.add_argument("--all-open",action="store_true");x.add_argument("--base");x.add_argument("--no-pairs",action="store_true");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--text",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
@@ -5650,7 +5871,14 @@ def _main(argv=None):
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
  x=s.add_parser("labels",help="add/remove existing labels on one Issue/PR (planned unless --write)");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--add",action="append",default=[],metavar="LABEL");x.add_argument("--remove",action="append",default=[],metavar="LABEL");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
- try:ns=a.parse_args(argv)
+ _CLI_PARSER=a;return a
+def _main(argv=None):
+ argv=list(sys.argv[1:] if argv is None else argv)
+ if not argv:argv=["overview"]
+ try:transport=_argv_transport(argv)
+ except ValueError:
+  print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
+ try:ns=_cli_parser().parse_args(argv)
  except SystemExit as e:return int(e.code)
  try:
   if ns.cmd=="capabilities":o=capabilities()
@@ -5676,9 +5904,10 @@ def _main(argv=None):
   elif ns.cmd=="fleet-checks":
    ignore=tuple(ns.ignore) if ns.ignore is not None else FLEET_IGNORE;deadline=time.monotonic()+ns.wait
    while True:
-    o=fleet_checks(ns.roots,ignore=ignore,steps=ns.steps,transport=transport)
+    o=fleet_checks(ns.roots,ignore=ignore,steps=ns.steps,transport=transport,timeout=ns.poll_timeout)
     if o["state"]!="pending" or time.monotonic()+ns.interval>deadline:break
     time.sleep(ns.interval)
+  elif ns.cmd=="merge-readiness":o=merge_readiness(ns.repository,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="fleet-pr":o=fleet_pr(ns.roots,ns.title,Path(ns.body_file).read_text(encoding="utf-8"),base=ns.base,draft=ns.draft,write=ns.write,transport=transport)
   elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout,mainline=ns.mainline)
   elif ns.cmd=="sync-provenance":
@@ -5774,6 +6003,7 @@ def _main(argv=None):
  elif ns.cmd=="fleet-status" and ns.text:print(render_fleet_status(o))
  elif ns.cmd=="fleet-checks" and ns.text:print(render_fleet_checks(o))
  elif ns.cmd=="fleet-pr" and ns.text:print(render_fleet_pr(o))
+ elif ns.cmd=="merge-readiness" and ns.text:print(render_merge_readiness(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
@@ -5782,6 +6012,7 @@ def _main(argv=None):
  if ns.cmd=="merge-preview":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-status":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-checks":return 0 if o["state"]=="green" else 3 if o["state"]=="pending" else 1
+ if ns.cmd=="merge-readiness":return {"clear":0,"blocked":1}.get(o["verdict"],3)
  if ns.cmd=="fleet-pr":return 0 if o["status"] in ("planned","verified") else 1
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
@@ -5794,6 +6025,14 @@ def _main(argv=None):
  if ns.cmd in ("comment","variable-set","git-switch","git-work","labels"):
   return 0 if o.get("status") in ("planned","already_exists","already_satisfied","verified") else 1
  return 0
+def _fleet_checks_wait_value(argv):
+ if not argv or argv[0]!="fleet-checks":return None
+ argv=list(argv)
+ try:_argv_transport(argv)
+ except ValueError:return 0.0
+ try:ns=_cli_parser().parse_args(argv)
+ except SystemExit:return 0.0
+ return ns.wait if ns.cmd=="fleet-checks" else None
 def main(argv=None):
  args=list(sys.argv[1:] if argv is None else argv);limits={}
  try:
@@ -5807,6 +6046,11 @@ def main(argv=None):
   if args[:1]==["wait-checks"]:
    if set(limits)-{"timeout"}:raise ValueError("wait-checks accepts --timeout only (per poll)")
    return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
+  # fleet-checks --wait polls for minutes: each poll gets its own budget, not one shared 30 s scope.
+  wait=_fleet_checks_wait_value(args)
+  if wait is not None and wait>0:
+   if set(limits)-{"timeout"}:raise ValueError("fleet-checks --wait accepts --timeout only (per poll)")
+   return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
   with operation(**limits):return _main(args)
  except (ValueError,Error,GitInspectionError) as e:
   print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument")}),file=sys.stderr)
@@ -5817,7 +6061,7 @@ for _name in ("_gh","_url","request","pages","repository","repositories","reposi
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
-              "enrollment_progress","repo_identity","merge_preview","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):
+               "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):
  globals()[_name]=_bounded(globals()[_name])
 # Capture the final bounded function, so injected request replacements are respected.
 _DEFAULT_REQUEST = request

@@ -1351,9 +1351,10 @@ component and set `complete=false`; byte/time/global-budget failures raise.
 Raw GraphQL messages are not echoed. CLI exit is 0 for complete, 1 for a returned
 incomplete observation, and 2 for invalid input or a raised API/transport error.
 
-`severity_labels` preserves explicit `Blocking`, `Should`, `Non-blocking`, and
+`severity_labels` preserves explicit `Must`, `Blocking`, `Should`, `Non-blocking`, and
 `Nit` labels at the start of a line, optionally in a bullet, Markdown heading,
-or bold form, followed by a colon or end of line. The exact labelled line and
+or bold form, followed by a colon (`:` or `：`), a dash (`—`, `–`, or ` - `) or end
+of line, so `**Should — re-pin first.**` counts. The exact labelled line and
 `source=explicit_body_label` are retained. Fenced examples, ordinary prose,
 summary counts such as `Blocking 0`, and review submission state do not assign
 severity. Multiple labels are preserved without selecting a merge gate.
@@ -1433,8 +1434,11 @@ pushed branch has no `branch.<b>.remote/merge` or fetch refspec, so tools report
 unpushed; it plans the config (as `git-work` does) and applies it only with `--write`.
 `fleet-checks` ignores `copilot-pull-request-reviewer` by default (`--ignore NAME` to
 change), keeps failure/warning annotations and drops runner notices; exit 0 green,
-1 failed, 3 still pending. `fleet-pr` reports an open PR instead of opening a second
-one and writes only with `--write`.
+1 failed, 3 still pending. With `--wait`, each poll runs in its own operation budget
+(the global `--timeout` sets the per-poll limit; other limit flags such as
+`--max-pages` are rejected with exit code 2). Without `--wait`, one shared scope
+applies as for other commands. `fleet-pr` reports an open PR instead of opening a
+second one and writes only with `--write`.
 
 ## Will these PRs merge together? (merge-preview)
 
@@ -1457,3 +1461,21 @@ conflicts, 2 for errors (JSON on stderr, no result on stdout). If a snapshot can
 be fetched or verification reports `pr_head_sha_mismatch`, rerun to read fresh API
 heads; it never falls back to a moving PR ref. The JSON schema and `write: false`
 contract are unchanged.
+
+## Before merging: what reviewers asked for (merge-readiness)
+
+```bash
+python gh_identity.py merge-readiness OWNER/REPO 39 --text
+```
+
+`merge-readiness` lists, for one PR, the explicit `Must`/`Blocking`/`Should`
+findings in review bodies, conversation and inline comments, the latest
+`CHANGES_REQUESTED` per reviewer, unresolved review threads, and whether the head
+moved after the last human review (with the commit subjects since). Each finding
+says whether it is newer than the head commit (no code change since), whether its
+thread is resolved, and whether the same reviewer approved later. Verdict and exit:
+`clear` 0, `blocked` 1 (a Must/Blocking finding or changes requested with no newer
+code, or on an unresolved current thread), `attention` 3 (anything listed: confirm
+before merging). It reads only. When GraphQL is unavailable (Claude Code sessions),
+review threads come from the session's `pulls/N/ccr/review_threads` REST route;
+anything still unobserved is named in the reasons.
