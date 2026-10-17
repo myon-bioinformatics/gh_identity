@@ -86,14 +86,20 @@ def test_rejects_bad_revision(repo, revision):
 def test_never_passes_ref_changing_options(repo, monkeypatch):
     calls = []
     real = g._git_run
+    fake = "a" * 40
     def spy(root, args, **kw):
         calls.append(list(args))
         if args[:1] == ["subtree"]:
-            return (b"a" * 40 + b"\n", False, 0)
+            return (fake + "\n").encode(), False, 0
         return real(root, args, **kw)
+    def fake_match(monorepo_root, source, prefix, split_sha, *, split_root=None):
+        if split_sha == fake:
+            return {"prefix_tree": "t", "split_tree": "t", "trees_match": True}
+        return g._subtree_split_matches_prefix_tree(monorepo_root, source, prefix, split_sha, split_root=split_root)
     monkeypatch.setattr(g, "_git_run", spy)
     monkeypatch.setattr(g, "_git_subtree_available", lambda root: True)
-    assert g.git_subtree_split(repo, "sub")["sha"] == "a" * 40
+    monkeypatch.setattr(g, "_subtree_split_matches_prefix_tree", fake_match)
+    assert g.git_subtree_split(repo, "sub")["sha"] == fake
     sub = [c for c in calls if c[:1] == ["subtree"]][0]
     assert sub[:2] == ["subtree", "split"]
     assert not any(a.startswith(("--branch", "-b", "--rejoin", "--onto", "--annotate")) for a in sub)
