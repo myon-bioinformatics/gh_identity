@@ -5018,6 +5018,220 @@ def overview():
   except (OSError,ValueError,Error,GitInspectionError):pass
  return out
 
+REPO_NAME_EXTENSIONS = (".py", ".js", ".mjs", ".sh", ".dart")
+REPO_NAME_FLAGS = ("unregistered_source", "catalog_default_mismatch", "consumed_uncatalogued",
+                   "fleet_missing", "needs_bundle")
+
+
+def repo_name_candidates(name):
+    """Candidate paths named after repository `name`: top level first, then src/<pkg>/.
+
+    Stems: the name as written, lowercased, with '-' and '.' replaced by '_',
+    and that lowercased; each crossed with REPO_NAME_EXTENSIONS. Order is stable."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in (".", ".."):
+        raise ValueError("invalid repository name")
+    snake = re.sub(r"[-.]", "_", name)
+    stems = list(dict.fromkeys((name, name.lower(), snake, snake.lower())))
+    packages = list(dict.fromkeys((snake, snake.lower())))
+    top = [stem + ext for stem in stems for ext in REPO_NAME_EXTENSIONS]
+    nested = [f"src/{pkg}/{stem}{ext}" for pkg in packages for stem in stems for ext in REPO_NAME_EXTENSIONS]
+    return top + nested
+
+
+def classify_python_imports(source, path, files):
+    """Static import classification (never executed): stdlib, local or external.
+
+    stdlib uses sys.stdlib_module_names; a module is local when the scanned tree has
+    `<dir><module>.py` or a `<dir><module>/` package next to the file, at the top
+    level or under src/. Relative imports are always local."""
+    try:
+        names, relative = _python_imports(source)
+    except (SyntaxError, ValueError):
+        return {"status": "syntax_error", "stdlib": [], "local": [], "external": [], "relative": False}
+    stdlib = _stdlib_names()
+    here = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    dirs = tuple(dict.fromkeys(("", here, "src/")))
+    out = {"status": "ok", "stdlib": [], "local": [], "external": [], "relative": relative}
+    for module in sorted(names):
+        if module in stdlib:
+            kind = "stdlib"
+        elif any(d + module + ".py" in files or any(p.startswith(d + module + "/") for p in files) for d in dirs):
+            kind = "local"
+        else:
+            kind = "external"
+        out[kind].append(module)
+    return out
+
+
+def _rnf_json(repository, path, commit, timeout):
+    data = public_github_raw_bytes(repository, path, commit, timeout=timeout)
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise Error("invalid_json") from None
+
+
+def _rnf_pairs(document, key):
+    """(repository casefold, source) pairs from a vendor-lock/1 `files` or registry `entries` list."""
+    rows = document.get(key) if isinstance(document, dict) else None
+    if not isinstance(rows, list):
+        raise Error("invalid_json")
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("repository"), str) or not isinstance(row.get("source"), str):
+            raise Error("invalid_json")
+        out.append((row["repository"].casefold(), row["source"]))
+    return out
+
+
+def _rnf_parent(parent, parent_ref, timeout, transport):
+    """Parent catalog/registry/child-heads at one resolved commit; errors are recorded, not raised."""
+    commit = resolve_ref(parent, parent_ref, transport=transport, timeout=timeout)["sha"]
+    state = {"repository": parent, "ref": parent_ref, "commit": commit, "errors": {},
+             "catalog": None, "consumed": set(), "heads": None}
+    try:
+        doc = _rnf_json(parent, "vendor-catalog.json", commit, timeout)
+        tools = doc.get("tools") if isinstance(doc, dict) else None
+        if not isinstance(tools, list) or not all(isinstance(t, dict) and isinstance(t.get("repository"), str) for t in tools):
+            raise Error("invalid_json")
+        state["catalog"] = [{"repository": t["repository"].casefold(),
+                             "source": t.get("source", t["repository"].split("/")[-1] + ".py"),
+                             "explicit": "source" in t} for t in tools]
+    except Error as exc:
+        state["errors"]["vendor-catalog.json"] = exc.code
+    try:
+        doc = _rnf_json(parent, "vendor-consumers.json", commit, timeout)
+        consumers = doc.get("consumers") if isinstance(doc, dict) else None
+        if not isinstance(consumers, list):
+            raise Error("invalid_json")
+        for consumer in consumers:
+            state["consumed"].update((r, s, "vendor-consumers.json") for r, s in _rnf_pairs(consumer, "entries"))
+    except Error as exc:
+        state["errors"]["vendor-consumers.json"] = exc.code
+    try:
+        doc = _rnf_json(parent, "child-heads.json", commit, timeout)
+        if not isinstance(doc, dict) or not isinstance(doc.get("heads"), dict):
+            raise Error("invalid_json")
+        state["heads"] = {name.casefold() for name in doc["heads"]}
+    except Error as exc:
+        state["errors"]["child-heads.json"] = exc.code
+    return state
+
+
+def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", include_forks=False, fetch_raw=True,
+                    transport="auto", timeout=30):
+    """Find files named after each public, non-archived (non-fork) repository and cross-check the parent.
+
+    Read-only: search, existence checks and fetches only (no bundling, no writes).
+    Each candidate (see repo_name_candidates) is checked in the default-branch tree;
+    a hit reports its raw.githubusercontent.com URL, fetch status and blob SHA, and
+    Python hits get a static import classification. Consumption comes from every
+    vendor.lock.json in every scanned tree (nested ones included) plus the parent's
+    vendor-consumers.json."""
+    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
+        raise ValueError("invalid owner")
+    parent = repo(parent if parent is not None else owner + "/" + owner)
+    if not isinstance(parent_ref, str) or not parent_ref:
+        raise ValueError("parent_ref is required")
+    targets, redacted = _public_targets(owner, repos, include_forks=include_forks, transport=transport, timeout=timeout)
+    state = _rnf_parent(parent, parent_ref, timeout, transport)
+    consumed = set(state["consumed"])
+    lock_errors = []
+    scanned = []
+    for target in targets:
+        name = target["name"]
+        full = owner + "/" + name
+        branch = target.get("default_branch") or "main"
+        row = {"name": name, "full_name": full, "default_branch": branch, "commit": None, "found": [],
+               "vendor_locks": [], "other_lock_schemas": [], "flags": [], "details": {}}
+        scanned.append(row)
+        try:
+            commit, files, truncated = _repo_tree(full, branch, transport, timeout)
+        except Error as exc:
+            row["error"] = exc.code
+            continue
+        row["commit"] = commit
+        row["truncated"] = bool(truncated)
+        row["files"] = files
+        for path in sorted(p for p in files if p.rsplit("/", 1)[-1] == "vendor.lock.json"):
+            row["vendor_locks"].append(path)
+            try:
+                document = _rnf_json(full, path, commit, timeout)
+                schema = document.get("schema") if isinstance(document, dict) else None
+                if isinstance(schema, str) and not schema.startswith("vendor-lock/"):
+                    # Same file name, different contract (e.g. html-import-vendor/1): listed, not parsed.
+                    row["other_lock_schemas"].append({"path": path, "schema": schema})
+                    continue
+                pairs = _rnf_pairs(document, "files")
+            except Error as exc:
+                lock_errors.append({"repository": full, "path": path, "error": exc.code})
+                continue
+            consumed.update((r, s, full + ":" + path) for r, s in pairs)
+    catalog = state["catalog"]
+    catalogued = None if catalog is None else {(t["repository"], t["source"]) for t in catalog}
+    for row in scanned:
+        files = row.pop("files", None)
+        if files is None:
+            continue
+        full, name = row["full_name"], row["name"]
+        key = full.casefold()
+        for path in repo_name_candidates(name):
+            if path not in files:
+                continue
+            url = "https://raw.githubusercontent.com/{}/{}/{}".format(
+                full, urllib.parse.quote(row["default_branch"], safe=""),
+                "/".join(urllib.parse.quote(p, safe="") for p in path.split("/")))
+            hit = {"path": path, "location": "top" if "/" not in path else "src", "blob_sha": files[path],
+                   "raw_url": url, "raw_status": "not_fetched", "raw_blob_sha": None, "raw_blob_match": None,
+                   "catalogued": None if catalogued is None else (key, path) in catalogued,
+                   "imports": None, "needs_bundle": False}
+            data = None
+            if fetch_raw:
+                try:
+                    data = public_github_raw_bytes(full, path, row["default_branch"], timeout=timeout)
+                    hit["raw_status"] = "ok"
+                    hit["raw_blob_sha"] = git_blob_sha(data)
+                    hit["raw_blob_match"] = hit["raw_blob_sha"] == files[path]
+                except Error as exc:
+                    hit["raw_status"] = exc.code
+            if data is not None and path.endswith(".py"):
+                imports = classify_python_imports(data, path, files)
+                hit["imports"] = imports
+                hit["needs_bundle"] = bool(imports["local"] or imports["external"] or imports["relative"])
+            row["found"].append(hit)
+        details = row["details"]
+        if catalogued is not None:
+            missing = [h["path"] for h in row["found"] if not h["catalogued"]]
+            if missing:
+                details["unregistered_source"] = missing
+            mismatch = [t["source"] for t in catalog
+                        if t["repository"] == key and not t["explicit"] and t["source"] not in files]
+            if mismatch:
+                details["catalog_default_mismatch"] = mismatch
+            used = sorted({(s, where) for r, s, where in consumed
+                           if r == key and s.endswith(REPO_NAME_EXTENSIONS) and (key, s) not in catalogued})
+            if used:
+                sources = {}
+                for source, where in used:
+                    sources.setdefault(source, []).append(where)
+                details["consumed_uncatalogued"] = [{"source": s, "consumed_by": w} for s, w in sources.items()]
+        if state["heads"] is not None and key != parent.casefold() and key not in state["heads"]:
+            details["fleet_missing"] = True
+        bundles = [h["path"] for h in row["found"] if h["needs_bundle"]]
+        if bundles:
+            details["needs_bundle"] = bundles
+        row["flags"] = [flag for flag in REPO_NAME_FLAGS if flag in details]
+    errors = [r for r in scanned if "error" in r]
+    complete = not errors and not lock_errors and not state["errors"] and not redacted \
+        and not any(r.get("truncated") for r in scanned)
+    summary = {flag: [r["name"] for r in scanned if flag in r["flags"]] for flag in REPO_NAME_FLAGS}
+    parent_out = {k: state[k] for k in ("repository", "ref", "commit", "errors")}
+    return {"schema": "gh-identity-repo-name-files/1", "write": False, "owner": owner, "parent": parent_out,
+            "extensions": list(REPO_NAME_EXTENSIONS), "repositories": scanned, "count": len(scanned),
+            "redacted": redacted, "lock_errors": lock_errors, "flags": summary, "complete": complete,
+            "observed_at": now()}
+
+
 def _main(argv=None):
  argv=list(sys.argv[1:] if argv is None else argv)
  if not argv:argv=["overview"]
@@ -5052,6 +5266,7 @@ def _main(argv=None):
  x=s.add_parser("subtree-split",help="read-only git subtree split --prefix: print the split commit SHA (no refs changed)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--mainline",help="also check the source is on this ref's first-parent history");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("sync-provenance",help="record or verify which monorepo SHA a subtree sync came from (read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix");x.add_argument("--revision",default="HEAD");x.add_argument("--other-root");x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--direction",choices=("push","pull"));x.add_argument("--squash",action="store_true");x.add_argument("--generated-at");x.add_argument("--output-dir");x.add_argument("--verify",metavar="COMMIT",help="check Subtree-Split trailers of COMMIT in --root");x.add_argument("--monorepo-root",help="with --verify: recompute the split there");x.add_argument("--timeout",type=float,default=600)
+ x=s.add_parser("repo-name-files",help="read-only: files named after each public repository, with raw URL, blob SHA, imports and parent catalog flags");x.add_argument("owner");x.add_argument("--repos",help="comma-separated names (default: all public, non-archived, non-fork)");x.add_argument("--parent",help="parent OWNER/REPO (default OWNER/OWNER)");x.add_argument("--parent-ref",default="main");x.add_argument("--include-forks",action="store_true");x.add_argument("--no-raw",action="store_true",help="skip raw.githubusercontent.com fetches")
  x=s.add_parser("split-preflight",help="read-only checklist before splitting a directory into its own repository");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("vendor-lock-check",help="compare vendor.lock.json (vendor-lock/1) with files on disk; optional vendor-rules/1 (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--rules");x.add_argument("--parent-ref",help="parent-pr.ref.json path (default: templates/ then root; required when given)");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
  x=s.add_parser("vendor-lock-verify-remote",help="check vendor.lock.json entries against upstream repository@commit (read-only)");x.add_argument("--root",default=".");x.add_argument("--lock",default="vendor.lock.json");x.add_argument("--upstream",action="store_true",help="also report the latest upstream commit touching each source");x.add_argument("--first-parent",action="store_true",help="pins must be on the source default branch first-parent history");x.add_argument("--check-parent-ref",action="store_true",help="verify parent-pr.ref.json repository_id and PR merge/head commit");x.add_argument("--parent-ref");x.add_argument("--ci-check",action="store_true",help="CI gate: exit 1 unless ok (with --upstream, also when upstream moved)");x.add_argument("--markdown",action="store_true",help="Markdown table (for GITHUB_STEP_SUMMARY) instead of JSON")
@@ -5140,6 +5355,7 @@ def _main(argv=None):
     if not ns.prefix or not ns.other_root:raise ValueError("--prefix and --other-root required")
     o=sync_provenance(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,direction=ns.direction,squash=ns.squash,generated_at=ns.generated_at,other_only_paths=ns.other_only_path,timeout=ns.timeout)
     if ns.output_dir:write_sync_provenance(o,ns.output_dir)
+  elif ns.cmd=="repo-name-files":o=repo_name_files(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,parent=ns.parent,parent_ref=ns.parent_ref,include_forks=ns.include_forks,fetch_raw=not ns.no_raw,transport=transport)
   elif ns.cmd=="split-preflight":o=split_preflight(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="duplicate-files":
    if ns.min_repos<2:raise ValueError("--min-repos must be at least 2")
@@ -5229,6 +5445,7 @@ def _main(argv=None):
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
+ if ns.cmd=="repo-name-files":return 0 if o["complete"] else 1
  if ns.cmd=="pin-audit":return 0 if o["ok"] else 1
  if ns.cmd=="merge-preview":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-status":return 0 if o["ok"] else 1
@@ -5268,7 +5485,7 @@ for _name in ("_gh","_url","request","pages","repository","repositories","reposi
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
-              "enrollment_progress","repo_identity","merge_preview","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
+              "enrollment_progress","repo_identity","merge_preview","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):
  globals()[_name]=_bounded(globals()[_name])
 # Capture the final bounded function, so injected request replacements are respected.
 _DEFAULT_REQUEST = request

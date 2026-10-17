@@ -954,6 +954,42 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
  "overrides": [{"repository": "OWNER/REPO", "source": "PATH", "destination": "PATH", "reason": "why"}]}
 ```
 
+## Files named after each repository (`repo-name-files`)
+
+```bash
+python gh_identity.py repo-name-files OWNER [--repos a,b] [--parent OWNER/REPO] [--parent-ref main] \
+  [--include-forks] [--no-raw]
+```
+
+Read-only: search, existence checks and fetches only (no bundling, no writes).
+Targets are the owner's public, non-archived, non-fork repositories (same
+listing as `duplicate-files`). For each repository the candidate names are the
+repository name as written, lowercased, with `-`/`.` replaced by `_`, and that
+lowercased, crossed with `.py`, `.js`, `.mjs`, `.sh`, `.dart`; the top level is
+checked first, then `src/<pkg>/`. Existence comes from one recursive tree read
+of the default branch. Each hit reports its `raw.githubusercontent.com` URL at the
+default branch, the fetch status, the tree blob SHA and whether the fetched bytes
+match it. Python hits get a static `ast` import classification (`stdlib` via
+`sys.stdlib_module_names`, `local` when the module exists next to the file, at
+the top level or under `src/`, otherwise `external`).
+
+The parent (`--parent`, default `OWNER/OWNER`) is read at one resolved commit:
+`vendor-catalog.json` (an entry without `source` means `<repo>.py`),
+`vendor-consumers.json` and `child-heads.json`. Consumption also comes from every
+`vendor.lock.json` in every scanned tree, nested ones included; files with the
+same name but another schema are listed in `other_lock_schemas`. Flags per
+repository:
+
+- `unregistered_source`: a hit that has no catalog entry
+- `catalog_default_mismatch`: a catalog entry without `source` whose `<repo>.py` is not in the tree
+- `consumed_uncatalogued`: a `.py/.js/.mjs/.sh/.dart` file of this repository that is locked or registered by a consumer but not catalogued
+- `fleet_missing`: not in `child-heads.json` (the parent itself is exempt)
+- `needs_bundle`: a Python hit with local, relative or external imports
+
+With `--repos`, consumption is only collected from the listed repositories. The
+exit code is 0 only when every tree, lock and parent file was read and nothing was
+truncated or redacted.
+
 ## Duplicate files across repositories (`duplicate-files`)
 
 ```bash
