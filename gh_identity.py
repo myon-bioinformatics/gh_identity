@@ -4236,7 +4236,7 @@ def _duplicate_repo_locks(full, ref, paths, lock_paths, transport, timeout):
         if not isinstance(meta, dict) or meta.get("encoding") != "base64" or not isinstance(meta.get("content"), str):
             raise Error("invalid_vendor_lock_response")
         try:
-            lock = validate_vendor_lock(json.loads(base64.b64decode(meta["content"], validate=True)))
+            lock = validate_vendor_lock(json.loads(base64.b64decode("".join(meta["content"].split()), validate=True)))
         except (ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
             raise Error("invalid_vendor_lock") from exc
         for entry in lock["files"]:
