@@ -371,16 +371,38 @@ def _review_rest(path,transport,timeout,max_items,max_pages):
 
 def _explicit_severity(body):
  # Only standalone labels or labels introducing a finding; never prose keywords.
- labels=[]
- pattern=r"^\s*(?:[-*]\s+|#{1,6}\s+)?(?:\*\*|__)?(Must|Blocking|Should|Non-blocking|Nit)(?:\*\*|__)?(?=\s*(?:[:：—–]|-\s|$))"
- fenced=False
- for line in body.splitlines():
-  if re.match(r"^\s*(```|~~~)",line):fenced=not fenced;continue
-  if fenced:continue
-  match=re.match(pattern,line,re.I)
-  if match:
-   label={"must":"Must","blocking":"Blocking","should":"Should","non-blocking":"Non-blocking","nit":"Nit"}[match[1].lower()]
-   labels.append({"label":label,"source":"explicit_body_label","text":line})
+ label_map={"must":"Must","blocking":"Blocking","should":"Should","non-blocking":"Non-blocking","nit":"Nit"}
+ inline=re.compile(r"^\s*(?:[-*]\s+|#{1,6}\s+)?(?:\*\*|__)?(Must|Blocking|Should|Non-blocking|Nit)(?:\*\*|__)?(?:\s+\d+)?(?=\s*(?:[:：—–]|-\s|$))",re.I)
+ section_head=re.compile(r"^\s*#{1,6}\s+(?:\*\*|__)?(Must|Blocking|Should|Non-blocking|Nit)(?:\*\*|__)?\s*$",re.I)
+ next_section=re.compile(r"^\s*#{1,6}\s+(?:\*\*|__)?(Must|Blocking|Should|Non-blocking|Nit)(?:\*\*|__)?",re.I)
+ list_item=re.compile(r"^\s*(?:\d+\.|[-*])\s+")
+ def filler(line):
+  text=line.strip()
+  if not text:return True
+  if re.fullmatch(r"(?i)(?:なし|none|n/?a|—|-)\.?",text) or text in ("なし。","なし．"):return True
+  return False
+ labels=[];fenced=False;lines=body.splitlines();i=0
+ while i<len(lines):
+  line=lines[i]
+  if re.match(r"^\s*(```|~~~)",line):fenced=not fenced;i+=1;continue
+  if fenced:i+=1;continue
+  sh=section_head.match(line)
+  if sh:
+   section=label_map[sh.group(1).lower()];j=i+1;body_lines=[]
+   while j<len(lines):
+    if next_section.match(lines[j]):break
+    if lines[j].strip():body_lines.append(lines[j])
+    j+=1
+   if body_lines and all(filler(x) for x in body_lines):
+    i=j;continue
+   for bl in body_lines:
+    match=inline.match(bl)
+    if match:labels.append({"label":label_map[match.group(1).lower()],"source":"explicit_body_label","text":bl})
+    elif list_item.match(bl) and not filler(bl):labels.append({"label":section,"source":"explicit_body_label","text":bl})
+   i=j;continue
+  match=inline.match(line)
+  if match:labels.append({"label":label_map[match.group(1).lower()],"source":"explicit_body_label","text":line})
+  i+=1
  return labels
 
 def _review_body(x):
@@ -5727,7 +5749,7 @@ def _main(argv=None):
   transport=argv[i+1]
   if transport not in ("auto","gh","urllib"): print(json.dumps({"status":"error","error":"invalid_argument"}),file=sys.stderr);return 2
   del argv[i:i+2]
- a=argparse.ArgumentParser(epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
+ a=argparse.ArgumentParser(allow_abbrev=False,epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
  x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
  s.add_parser("capabilities")
  s.add_parser("overview",help="best-effort local and GitHub workspace summary (default)")
@@ -5951,16 +5973,16 @@ def _main(argv=None):
  if ns.cmd in ("comment","variable-set","git-switch","git-work","labels"):
   return 0 if o.get("status") in ("planned","already_exists","already_satisfied","verified") else 1
  return 0
-def _argv_positive_wait(argv):
- for index,arg in enumerate(argv):
-  if arg=="--wait":
-   if index+1>=len(argv):return True
-   try:return float(argv[index+1])>0
-   except ValueError:return True
-  if arg.startswith("--wait="):
-   try:return float(arg.split("=",1)[1])>0
-   except ValueError:return True
- return False
+def _fleet_checks_wait_value(argv):
+ if not argv or argv[0]!="fleet-checks":return None
+ p=argparse.ArgumentParser(add_help=False,allow_abbrev=False)
+ p.add_argument("cmd");p.add_argument("roots",nargs="+");p.add_argument("--steps",action="store_true")
+ p.add_argument("--ignore",action="append");p.add_argument("--wait",type=float,default=0)
+ p.add_argument("--interval",type=float,default=30);p.add_argument("--text",action="store_true")
+ p.add_argument("--poll-timeout",type=float,default=30)
+ try:ns,_=p.parse_known_args(argv)
+ except SystemExit:return 0.0
+ return ns.wait
 def main(argv=None):
  args=list(sys.argv[1:] if argv is None else argv);limits={}
  try:
@@ -5975,7 +5997,8 @@ def main(argv=None):
    if set(limits)-{"timeout"}:raise ValueError("wait-checks accepts --timeout only (per poll)")
    return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
   # fleet-checks --wait polls for minutes: each poll gets its own budget, not one shared 30 s scope.
-  if args[:1]==["fleet-checks"] and _argv_positive_wait(args):
+  wait=_fleet_checks_wait_value(args)
+  if wait is not None and wait>0:
    if set(limits)-{"timeout"}:raise ValueError("fleet-checks --wait accepts --timeout only (per poll)")
    return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
   with operation(**limits):return _main(args)

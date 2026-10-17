@@ -1434,8 +1434,11 @@ pushed branch has no `branch.<b>.remote/merge` or fetch refspec, so tools report
 unpushed; it plans the config (as `git-work` does) and applies it only with `--write`.
 `fleet-checks` ignores `copilot-pull-request-reviewer` by default (`--ignore NAME` to
 change), keeps failure/warning annotations and drops runner notices; exit 0 green,
-1 failed, 3 still pending. `fleet-pr` reports an open PR instead of opening a second
-one and writes only with `--write`.
+1 failed, 3 still pending. With `--wait`, each poll runs in its own operation budget
+(the global `--timeout` sets the per-poll limit; other limit flags such as
+`--max-pages` are rejected with exit code 2). Without `--wait`, one shared scope
+applies as for other commands. `fleet-pr` reports an open PR instead of opening a
+second one and writes only with `--write`.
 
 ## Will these PRs merge together? (merge-preview)
 
