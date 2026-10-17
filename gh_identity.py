@@ -2810,6 +2810,25 @@ def _subtree_prefix(prefix):
     return "/".join(parts)
 
 
+@contextlib.contextmanager
+def _subtree_cache_cleanup(root):
+    """git-subtree leaves $GIT_DIR/subtree-cache/<pid> behind; remove only what
+    the wrapped call created so the checkout's .git is left as it was."""
+    git_dir = Path(_git_decode(_git_run(root, ["rev-parse", "--absolute-git-dir"], max_bytes=64 * 1024)[0]).strip())
+    cache = git_dir / "subtree-cache"
+    cache_existed = cache.is_dir()
+    before = set(os.listdir(cache)) if cache_existed else set()
+    try:
+        yield
+    finally:
+        if cache.is_dir() and not cache.is_symlink():
+            for name in set(os.listdir(cache)) - before:
+                shutil.rmtree(cache / name, ignore_errors=True)
+            if not cache_existed:
+                with contextlib.suppress(OSError):
+                    cache.rmdir()
+
+
 def git_subtree_split(root=".", prefix=None, revision="HEAD", *, timeout=600):
     """Read-only `git subtree split --prefix=<dir> <sha>`: return the split commit SHA.
 
@@ -2832,22 +2851,9 @@ def git_subtree_split(root=".", prefix=None, revision="HEAD", *, timeout=600):
     if not _git_subtree_available(root):
         return {**base, "source": source, "sha": None, "reason": "subtree_unavailable",
                 "detail": "git subtree (contrib) is not installed"}
-    # git-subtree leaves $GIT_DIR/subtree-cache/<pid> behind; remove only what
-    # this call created so the checkout's .git is left as it was.
-    git_dir = Path(_git_decode(_git_run(root, ["rev-parse", "--absolute-git-dir"], max_bytes=64 * 1024)[0]).strip())
-    cache = git_dir / "subtree-cache"
-    cache_existed = cache.is_dir()
-    before = set(os.listdir(cache)) if cache_existed else set()
-    try:
+    with _subtree_cache_cleanup(root):
         raw, _, _ = _git_run(root, ["subtree", "split", "-q", "--prefix=" + prefix, source],
                              max_bytes=64 * 1024, timeout=timeout)
-    finally:
-        if cache.is_dir() and not cache.is_symlink():
-            for name in set(os.listdir(cache)) - before:
-                shutil.rmtree(cache / name, ignore_errors=True)
-            if not cache_existed:
-                with contextlib.suppress(OSError):
-                    cache.rmdir()
     sha = _git_decode(raw).strip().splitlines()[-1:] or [""]
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha[0]):
         raise GitInspectionError("unexpected git subtree output")
@@ -3051,6 +3057,133 @@ def _git_blobs(root, specs, max_bytes=64 * 1024 * 1024):
             out[spec] = raw[pos:pos + size]
             pos += size + 1
     return out
+
+
+def _subtree_branch(branch):
+    if (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
+            or ".." in branch or "//" in branch or branch.endswith(("/", ".", ".lock"))
+            or any(part.startswith(".") for part in branch.split("/"))):
+        raise ValueError("invalid branch")
+    return branch
+
+
+_SUBTREE_PROTECTED_BRANCHES = ("main", "master")
+
+
+def subtree_sync(root=".", prefix=None, remote=None, branch=None, *, direction=None, squash=False,
+                 write=False, message=None, timeout=600):
+    """Plan or run `git subtree push|pull` for `prefix` against `remote` `branch`.
+
+    Without write=True nothing changes: the planned git command, the split SHA
+    (push) or remote tip (pull) and the Subtree-Split provenance are returned.
+    push only creates a NEW branch on the remote: main/master, the remote default
+    branch and existing branches are refused. pull merges into the current
+    branch of a clean checkout. After a write the result is verified (pushed
+    branch == split SHA; pulled tip reachable from / recorded in HEAD).
+    All arguments are validated before checking that git subtree is installed.
+    Network git uses the caller's own git credential configuration
+    (gh_identity never reads or passes tokens); remotes with credentials are refused.
+    """
+    prefix = _subtree_prefix(prefix)
+    if remote is None:
+        raise ValueError("remote required")
+    remote = _validate_remote(remote)
+    branch = _subtree_branch(branch)
+    if direction not in ("push", "pull"):
+        raise ValueError("direction must be push or pull")
+    if squash and direction == "push":
+        raise ValueError("--squash applies to pull only")
+    if type(write) is not bool:
+        raise ValueError("write must be a boolean")
+    if message is not None and (not isinstance(message, str) or not message.strip() or "\0" in message):
+        raise ValueError("invalid message")
+    if direction == "push" and branch in _SUBTREE_PROTECTED_BRANCHES:
+        raise ValueError("refusing to push to main/master; use a new branch")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be positive and finite")
+    source = _rev_commit(root, "HEAD")
+    raw, _, code = _git_run(root, ["cat-file", "-t", source + ":" + prefix], max_bytes=4096, ok=(0, 1, 128))
+    if code != 0 or _git_decode(raw).strip() != "tree":
+        raise ValueError("prefix not found at HEAD" + ("; use git subtree add first" if direction == "pull" else ""))
+    if not _git_subtree_available(root):
+        raise Error("subtree_unavailable")
+
+    def net(args, ok=(0,)):
+        return _git_run(root, args, max_bytes=1024 * 1024, ok=ok, timeout=timeout, inherit_auth=True)
+
+    raw, _, code = net(["ls-remote", "--symref", "--", remote, "HEAD", "refs/heads/" + branch], ok=tuple(range(256)))
+    if code != 0:
+        raise Error("git_remote_unavailable")
+    listing = _git_decode(raw)
+    m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", listing, re.M)
+    remote_default = m.group(1) if m else None
+    m = re.search(r"^([0-9a-f]{40})\s+refs/heads/" + re.escape(branch) + r"$", listing, re.M)
+    remote_tip = m.group(1) if m else None
+    base = {"schema": "gh-identity-subtree-sync-run/1", "direction": direction, "prefix": prefix,
+            "remote": remote, "branch": branch, "squash": bool(squash), "write": write,
+            "source": source, "remote_default_branch": remote_default}
+
+    if direction == "push":
+        if branch == remote_default:
+            raise ValueError("refusing to push to the remote default branch; use a new branch")
+        if remote_tip is not None:
+            raise ValueError("remote branch already exists; push creates a new branch only")
+        split = git_subtree_split(root, prefix, source, timeout=timeout)
+        if split["reason"]:
+            raise Error(split["reason"])
+        command = ["git", "subtree", "push", "--prefix=" + prefix, remote, branch]
+        provenance = {"trailer": f"{_SUBTREE_TRAILER}: {source} {split['sha']} {prefix}",
+                      "monorepo_sha": source, "split_sha": split["sha"]}
+        plan = {**base, "split_sha": split["sha"], "command": command, "provenance": provenance}
+        if not write:
+            return {**plan, "state": "planned"}
+        try:
+            with _subtree_cache_cleanup(root):
+                net(["subtree", "push", "--prefix=" + prefix, "--", remote, branch])
+        except GitInspectionError:
+            raise Error("subtree_push_failed") from None
+        raw, _, _ = net(["ls-remote", "--", remote, "refs/heads/" + branch])
+        pushed = (_git_decode(raw).split() or [None])[0]
+        if pushed != split["sha"]:
+            raise Error("post_write_verification_failed")
+        return {**plan, "state": "pushed", "verified": {"remote_branch_sha": pushed, "ok": True}}
+
+    if remote_tip is None:
+        raise ValueError("remote branch not found")
+    raw, _, _ = _git_run(root, ["status", "--porcelain", "--untracked-files=no"], max_bytes=1024 * 1024)
+    if _git_decode(raw).strip():
+        raise ValueError("working tree has uncommitted changes")
+    raw, _, code = _git_run(root, ["symbolic-ref", "-q", "--short", "HEAD"], max_bytes=4096, ok=(0, 1))
+    if code != 0:
+        raise ValueError("HEAD is detached; check out a branch first")
+    local_branch = _git_decode(raw).strip()
+    command = ["git", "subtree", "pull", "--prefix=" + prefix, *(["--squash"] if squash else []),
+               *(["-m", message] if message else []), remote, branch]
+    plan = {**base, "local_branch": local_branch, "remote_tip": remote_tip, "command": command}
+    if not write:
+        return {**plan, "state": "planned"}
+    try:
+        with _subtree_cache_cleanup(root):
+            net(["subtree", "pull", "--prefix=" + prefix, *(["--squash"] if squash else []),
+                 *(["-m", message] if message else []), "--", remote, branch])
+    except GitInspectionError:
+        raise Error("subtree_pull_failed") from None
+    head = _rev_commit(root, "HEAD")
+    if squash:
+        raw, _, _ = _git_run(root, ["log", "-3", "--format=%B", head], max_bytes=256 * 1024)
+        ok = head != source and f"git-subtree-split: {remote_tip}" in _git_decode(raw)
+    else:
+        _, _, code = _git_run(root, ["merge-base", "--is-ancestor", remote_tip, head], max_bytes=4096, ok=(0, 1))
+        ok = code == 0
+    if not ok:
+        raise Error("post_write_verification_failed")
+    existing = verify_sync_provenance(root, remote_tip, monorepo_root=root, timeout=timeout)
+    split = git_subtree_split(root, prefix, head, timeout=timeout)
+    provenance = {"trailer": f"{_SUBTREE_TRAILER}: {head} {split['sha']} {prefix}" if split["sha"] else None,
+                  "monorepo_sha": head, "split_sha": split["sha"],
+                  "existing": {"ok": existing["ok"], "reason": existing["reason"], "trailers": existing["trailers"]}}
+    return {**plan, "state": "pulled", "head": head, "provenance": provenance,
+            "verified": {"remote_tip_in_head": True, "ok": True}}
 
 
 def split_preflight(root=".", prefix=None, revision="HEAD", *, timeout=600, max_listed=200):
@@ -4915,6 +5048,7 @@ def _main(argv=None):
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-preview",help="would these open PRs merge together (alone, in sequence, pairwise)? temporary repository, nothing pushed");x.add_argument("repository");x.add_argument("--pr",type=int,action="append",dest="numbers");x.add_argument("--all-open",action="store_true");x.add_argument("--base");x.add_argument("--no-pairs",action="store_true");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--text",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
+ x=s.add_parser("subtree-sync",help="plan (default) or run git subtree push/pull with provenance; push only to a NEW branch");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--remote",required=True);x.add_argument("--branch",required=True);x.add_argument("--direction",choices=("push","pull"),required=True);x.add_argument("--squash",action="store_true");x.add_argument("--message","-m");x.add_argument("--write",action="store_true",help="actually push/pull and verify; without it only the plan is printed");x.add_argument("--git-timeout",type=float,default=600)
  x=s.add_parser("subtree-split",help="read-only git subtree split --prefix: print the split commit SHA (no refs changed)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("subtree-sync-status",help="compare subtree split of a monorepo with a split-out checkout (local, read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--revision",default="HEAD");x.add_argument("--other-root",required=True);x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--mainline",help="also check the source is on this ref's first-parent history");x.add_argument("--timeout",type=float,default=600)
  x=s.add_parser("sync-provenance",help="record or verify which monorepo SHA a subtree sync came from (read-only)");x.add_argument("--root",default=".");x.add_argument("--prefix");x.add_argument("--revision",default="HEAD");x.add_argument("--other-root");x.add_argument("--other-ref",default="HEAD");x.add_argument("--other-only-path",action="append",default=[],metavar="GLOB");x.add_argument("--direction",choices=("push","pull"));x.add_argument("--squash",action="store_true");x.add_argument("--generated-at");x.add_argument("--output-dir");x.add_argument("--verify",metavar="COMMIT",help="check Subtree-Split trailers of COMMIT in --root");x.add_argument("--monorepo-root",help="with --verify: recompute the split there");x.add_argument("--timeout",type=float,default=600)
@@ -5021,6 +5155,7 @@ def _main(argv=None):
   elif ns.cmd=="vendor-plan":o=vendor_plan(ns.root,ns.candidate,ns.rules,transport=transport)
   elif ns.cmd=="vendor-matrix":o=vendor_matrix(ns.owner,[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,lock_paths=tuple(ns.lock_path) if ns.lock_path else ("vendor.lock.json","tool/python/vendor.lock.json"),heads=load_child_heads(ns.heads) if ns.heads else None,transport=transport)
   elif ns.cmd=="enrollment-progress":o=enrollment_progress(ns.owner,provider=ns.provider,source=ns.source,repos=[x.strip() for x in ns.repos.split(",") if x.strip()] if ns.repos else None,heads=load_child_heads(ns.heads) if ns.heads else None,include_forks=ns.include_forks,transport=transport)
+  elif ns.cmd=="subtree-sync":o=subtree_sync(ns.root,ns.prefix,ns.remote,ns.branch,direction=ns.direction,squash=ns.squash,write=ns.write,message=ns.message,timeout=ns.git_timeout)
   elif ns.cmd=="subtree-split":o=git_subtree_split(ns.root,ns.prefix,ns.revision,timeout=ns.timeout)
   elif ns.cmd=="repo-metadata":
    if not ns.repository:raise ValueError("--repository or GITHUB_REPOSITORY required")

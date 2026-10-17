@@ -862,6 +862,29 @@ Records which monorepo SHA and split SHA a sync came from
 `--monorepo-root` the split is recomputed from the recorded SHA and must match
 (`no_trailer` / `mismatch` otherwise). Nothing is committed.
 
+## Subtree sync, explicit write (`subtree-sync`)
+
+```bash
+python gh_identity.py subtree-sync --prefix DIR --remote URL --branch B --direction push|pull [--squash] [-m MSG] [--write]
+```
+
+Wraps `git subtree push` / `git subtree pull`. Without `--write` it is plan-only:
+it prints the git command, the split SHA (push) or remote tip (pull) and the
+`Subtree-Split: <monorepo_sha> <split_sha> <prefix>` provenance, and changes
+nothing. `--write` runs the command and then verifies it (pushed branch equals the
+split SHA; pulled tip reachable from HEAD, or recorded as `git-subtree-split:` with
+`--squash`). Pull also reports whether the pulled tip carries a valid
+`Subtree-Split:` trailer (recomputed against this checkout).
+
+Push only creates a **new** branch on the remote: `main`/`master`, the remote
+default branch and existing branches are refused. Pull needs a clean checkout on a
+branch and a prefix that was added with `git subtree add`. `--squash` applies to
+pull only. Arguments are validated before checking that `git subtree` is installed;
+when it is missing the error is `subtree_unavailable`. Remotes must be
+`https://`, `file://` or an absolute path without credentials; network git uses your
+own git credential configuration (gh_identity never reads or passes tokens).
+Leftover `.git/subtree-cache` entries created by the call are removed.
+
 ## Split preflight (`split-preflight`)
 
 ```bash
