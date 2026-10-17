@@ -699,6 +699,21 @@ Parent execution location does not imply parent ownership of this implementation
 A parent compatibility adapter can expose the old function names over these APIs
 once its consumer lock explicitly selects this revision.
 
+### Repository orientation (`scripts/repo_overview.py`)
+
+Bounded, human-oriented repository summary (stdlib-only, `python -S`), migrated
+from browser-test-kit (provenance in the file header). It prints about/README
+excerpt, key config files, a file list via `git_ls_files` from this repo's
+`gh_identity.py`, and optional `--stats` / `--churn`. It is not merged into
+`gh_identity.py`.
+
+```bash
+python -S scripts/repo_overview.py --stats --churn 10
+```
+
+The built-in `overview` command remains the JSON workspace summary; `repo_overview.py`
+is the log-friendly orientation format previously shipped from browser-test-kit.
+
 ## Local branch switching (`git-switch`)
 
 ```bash
