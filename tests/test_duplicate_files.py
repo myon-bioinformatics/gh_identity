@@ -195,7 +195,7 @@ def test_all_truncated():
     "vendor.lock.json", "tool/python/vendor.lock.json", "python/vendor.lock.json",
 ])
 def test_all_supported_lock_placements_provide_provenance(placement):
-    trees = TREES[CC] + [blob(placement, b"lock bytes")]
+    trees = [b for b in TREES[CC] if b["path"] != "vendor.lock.json"] + [blob(placement, b"lock bytes")]
     def transport(method, path, **kw):
         if path == f"repos/me/consumer/contents/{placement}?ref={CC}":
             return lock([entry("vendor/tool.py", UP_OLD)])
@@ -284,7 +284,7 @@ def test_no_lock_is_unknown_provenance_not_collection_failure():
 
 
 def test_different_copy_sha_is_reported_separately_from_lock_provenance():
-    trees = TREES[CC] + [blob("python/vendor.lock.json", b"lock")]
+    trees = [b for b in TREES[CC] if b["path"] != "vendor.lock.json"] + [blob("python/vendor.lock.json", b"lock")]
     def transport(method, path, **kw):
         if path == f"repos/me/consumer/contents/python/vendor.lock.json?ref={CC}":
             return lock([entry("vendor/tool.py", UP_NEW)])
