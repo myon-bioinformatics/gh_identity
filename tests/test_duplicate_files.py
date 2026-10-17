@@ -187,3 +187,116 @@ def test_all_truncated():
     assert report['complete'] is False and len(report['errors']) == 3
     assert report['scanned'] == {} and report['groups'] == []
     assert 'INCOMPLETE: 3 repositories failed' in g.render_duplicates_markdown(report)
+
+
+# A repository may use any of these placements independently. The report must
+# identify Flutter's python/vendor.lock.json, not just vendor.lock.json at root.
+@pytest.mark.parametrize("placement", [
+    "vendor.lock.json", "tool/python/vendor.lock.json", "python/vendor.lock.json",
+])
+def test_all_supported_lock_placements_provide_provenance(placement):
+    trees = TREES[CC] + [blob(placement, b"lock bytes")]
+    def transport(method, path, **kw):
+        if path == f"repos/me/consumer/contents/{placement}?ref={CC}":
+            return lock([entry("vendor/tool.py", UP_OLD)])
+        return fake(method, path, **kw)
+    with patch.dict(TREES, {CC: trees}), patch.object(g, "pages", return_value=REPOS), \
+         patch.object(g, "request", side_effect=transport):
+        result = g.duplicate_files("me")
+    row = next(f for f in result["groups"][0]["files"] if f["repository"] == "me/consumer")
+    assert result["complete"] is True and result["errors"] == []
+    assert result["scanned"]["me/consumer"]["lock_paths"] == [placement]
+    assert result["scanned"]["me/consumer"]["lock"] == placement
+    assert row["provenance"]["repository"] == "me/up"
+    assert row["provenance"]["commit"] == OLD
+    assert row["matches_lock"] is True and row["stale"] is True
+
+
+def test_multiple_locks_merge_distinct_destinations_and_identical_repeats():
+    trees_up = TREES[CU] + [blob("extra.py", UP_NEW)]
+    trees_consumer = TREES[CC] + [
+        blob("python/vendor.lock.json", b"p"), blob("tool/python/vendor.lock.json", b"t"),
+        blob("vendor/extra.py", UP_OLD)]
+    locks = {
+        "vendor.lock.json": [entry("vendor/tool.py", UP_OLD)],
+        "tool/python/vendor.lock.json": [entry("vendor/extra.py", UP_OLD, source="extra.py")],
+        "python/vendor.lock.json": [entry("vendor/tool.py", UP_OLD)],
+    }
+    def transport(method, path, **kw):
+        for placement, entries in locks.items():
+            if path == f"repos/me/consumer/contents/{placement}?ref={CC}":
+                return lock(entries)
+        return fake(method, path, **kw)
+    with patch.dict(TREES, {CU: trees_up, CC: trees_consumer}), \
+         patch.object(g, "pages", return_value=REPOS), \
+         patch.object(g, "request", side_effect=transport):
+        result = g.duplicate_files("me")
+    assert result["complete"] is True
+    assert result["scanned"]["me/consumer"]["lock_paths"] == list(locks)
+    rows = {grp["basename"]: grp for grp in result["groups"]}
+    for name in ("tool.py", "extra.py"):
+        found = next(f for f in rows[name]["files"] if f["repository"] == "me/consumer")
+        assert found["provenance"]["source"] == name
+        assert found["stale"] is True
+        assert found["matches_lock"] is True
+    assert rows["extra.py"]["files"][0]["origin"] is False or any(
+        x["origin"] for x in rows["extra.py"]["files"])
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("conflicting_sha", "conflicting_vendor_lock"),
+    ("conflicting_case", "conflicting_vendor_lock"),
+    ("fetch_failure", "http_403"),
+    ("invalid_response", "invalid_vendor_lock_response"),
+    ("malformed_lock", "invalid_vendor_lock"),
+])
+def test_multiple_lock_conflicts_and_failed_fetches_exclude_repository(failure, expected):
+    trees = TREES[CC] + [blob("python/vendor.lock.json", b"lock")]
+    def transport(method, path, **kw):
+        if path == f"repos/me/consumer/contents/vendor.lock.json?ref={CC}":
+            return lock([entry("vendor/tool.py", UP_OLD)])
+        if path == f"repos/me/consumer/contents/python/vendor.lock.json?ref={CC}":
+            if failure == "fetch_failure":
+                raise g.Error("http_403")
+            if failure == "invalid_response":
+                return {"encoding": "none"}
+            if failure == "malformed_lock":
+                return {"encoding": "base64", "content": "not-base64"}
+            if failure == "conflicting_case":
+                return lock([entry("VENDOR/tool.py", UP_NEW)])
+            return lock([entry("vendor/tool.py", UP_NEW)])
+        return fake(method, path, **kw)
+    with patch.dict(TREES, {CC: trees}), patch.object(g, "pages", return_value=REPOS), \
+         patch.object(g, "request", side_effect=transport):
+        result = g.duplicate_files("me")
+    assert result["complete"] is False
+    assert result["errors"] == [{"repository": "me/consumer", "detail": expected}]
+    assert "me/consumer" not in result["scanned"]
+    assert all(f["repository"] != "me/consumer" for group in result["groups"] for f in group["files"])
+    assert "INCOMPLETE" in g.render_duplicates_markdown(result)
+
+
+def test_no_lock_is_unknown_provenance_not_collection_failure():
+    with patch.object(g, "pages", return_value=REPOS), patch.object(g, "request", side_effect=fake):
+        result = g.duplicate_files("me", lock_paths=("python/vendor.lock.json",))
+    assert result["complete"] is True and result["errors"] == []
+    assert result["scanned"]["me/consumer"]["lock_paths"] == []
+    assert result["counts"]["null_provenance_non_origin"] > 0
+
+
+def test_different_copy_sha_is_reported_separately_from_lock_provenance():
+    trees = TREES[CC] + [blob("python/vendor.lock.json", b"lock")]
+    def transport(method, path, **kw):
+        if path == f"repos/me/consumer/contents/python/vendor.lock.json?ref={CC}":
+            return lock([entry("vendor/tool.py", UP_NEW)])
+        return fake(method, path, **kw)
+    with patch.dict(TREES, {CC: trees}), patch.object(g, "pages", return_value=REPOS), \
+         patch.object(g, "request", side_effect=transport):
+        result = g.duplicate_files("me")
+    group = next(grp for grp in result["groups"] if grp["basename"] == "tool.py")
+    row = next(f for f in group["files"] if f["repository"] == "me/consumer")
+    assert row["provenance"] is not None
+    assert row["provenance"]["lock_blob_sha"] == sha(UP_NEW)
+    assert row["matches_lock"] is False and row["stale"] is False
+    assert "modified_after_lock" in group["warnings"]
+    assert "unknown_provenance" in group["warnings"]  # unrelated drifted copy
