@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -369,3 +370,116 @@ def test_churn_delegates_since_and_keeps_top_note_with_history_note(tmp_path: Pa
     assert out.splitlines()[1] == '  1 commit  +1/-0  2026-01-01  a.txt'
     assert out.splitlines()[2] == '[... 1 more files (--churn 1 shows the top 1)]'
     assert 'history truncated' in out.splitlines()[3]
+
+
+def test_about_tolerates_bad_metadata_and_skips_unreadable_readmes(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    (tmp_path / "README.d").mkdir()
+    (tmp_path / "README.bin").write_bytes(b"\0binary")
+    (tmp_path / "README.md").write_text("[![b](x)](y)\n\n# Title\n\nReal text.\n", encoding="utf-8")
+    assert repo_overview.about(tmp_path) == "=== about ===\nREADME: Real text."
+    (tmp_path / "README.md").write_text("![only](badge)\n", encoding="utf-8")
+    assert repo_overview.about(tmp_path) is None
+    real_read_text = Path.read_text
+
+    def broken(self, *args, **kwargs):
+        if self.name == "pyproject.toml":
+            raise PermissionError("denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", broken)
+    assert repo_overview._pyproject_description(tmp_path) is None
+    real_read_bytes = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes",
+                        lambda self: (_ for _ in ()).throw(PermissionError("denied")) if self.name == "README.md"
+                        else real_read_bytes(self))
+    assert repo_overview._readme_paragraph(tmp_path) is None
+
+
+def test_symlinks_leaving_root_are_not_read(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("SECRET\n", encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "README.md").symlink_to(outside / "secret.txt")
+    (root / "Makefile").symlink_to(outside / "secret.txt")
+    (root / "inside.txt").write_text("ok\n", encoding="utf-8")
+    (root / "link-inside.txt").symlink_to(root / "inside.txt")
+    text = repo_overview.overview(root, show_stats=True)
+    assert "SECRET" not in text and "=== Makefile" not in text
+    assert repo_overview.list_files(root) == ["inside.txt", "link-inside.txt"]
+    assert repo_overview.about(root) is None
+
+
+def test_include_glob_must_stay_inside_root(tmp_path: Path, capsys) -> None:
+    for bad in ("../*.md", "/etc/*"):
+        with pytest.raises(ValueError):
+            repo_overview.key_files(tmp_path, (bad,))
+        with pytest.raises(SystemExit) as exit_info:
+            repo_overview.main([str(tmp_path), "--include", bad])
+        assert exit_info.value.code == 2
+    assert "--include must stay inside ROOT" in capsys.readouterr().err
+
+
+def test_since_requires_churn(tmp_path: Path, capsys) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        repo_overview.main([str(tmp_path), "--since", "1 week ago"])
+    assert exit_info.value.code == 2 and "--since needs --churn" in capsys.readouterr().err
+
+
+def test_main_in_process_paths(tmp_path: Path, capsys) -> None:
+    assert repo_overview.main([str(tmp_path / "missing")]) == 2
+    assert "not a directory" in capsys.readouterr().err
+    (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
+    (tmp_path / "big.txt").write_bytes(b"x" * 2048)
+    assert repo_overview.main([str(tmp_path), "--no-files", "--stats", "--include", "Makefile"]) == 0
+    out = capsys.readouterr().out
+    assert "=== files" not in out and "=== Makefile (1 line) ===" in out and out.count("=== Makefile") == 1
+    assert "2 KB" in out
+    for bad in ("0", "x"):
+        with pytest.raises(SystemExit):
+            repo_overview.main([str(tmp_path), "--max-lines", bad])
+    with pytest.raises(argparse.ArgumentTypeError):
+        repo_overview._positive("0")
+
+
+def test_human_bytes_units() -> None:
+    assert repo_overview._human_bytes(5) == "5 B"
+    assert repo_overview._human_bytes(3 * 1024 ** 2) == "3 MB"
+    assert repo_overview._human_bytes(2 * 1024 ** 3) == "2 GB"
+
+
+def test_stats_skips_unreadable_files(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "a.txt").write_text("1\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("1\n2\n", encoding="utf-8")
+    real_read_bytes = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes",
+                        lambda self: (_ for _ in ()).throw(PermissionError("denied")) if self.name == "b.txt"
+                        else real_read_bytes(self))
+    assert repo_overview.stats(tmp_path).splitlines()[1] == "total  1 file  1 line  2 B"
+
+
+def test_positive_accepts_valid_values() -> None:
+    assert repo_overview._positive("3") == 3
+
+
+def _load_copy(directory: Path):
+    copy = directory / "scripts" / "repo_overview.py"
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_bytes(SCRIPT.read_bytes())
+    copy_spec = importlib.util.spec_from_file_location("repo_overview_copy", copy)
+    module = importlib.util.module_from_spec(copy_spec)
+    assert copy_spec.loader
+    copy_spec.loader.exec_module(module)
+    return module
+
+
+def test_loads_vendored_sibling_or_fails_clearly(tmp_path: Path) -> None:
+    with pytest.raises(ImportError, match="gh_identity.py not found"):
+        _load_copy(tmp_path / "none")
+    sibling = tmp_path / "vendored"
+    (sibling / "scripts").mkdir(parents=True)
+    (sibling / "scripts" / "gh_identity.py").write_bytes((ROOT / "gh_identity.py").read_bytes())
+    assert _load_copy(sibling).gh_identity.__file__ == str(sibling / "scripts" / "gh_identity.py")

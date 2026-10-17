@@ -142,3 +142,29 @@ def test_push_tree_gate_called_once_per_write(world, monkeypatch):
     monkeypatch.setattr(g, "_subtree_push_split_tree_gate", gate)
     g.subtree_sync(mono, "sub", str(child), "sync/once", direction="push", write=True)
     assert len(calls) == 1
+
+
+def test_explicit_compare_ref_missing_is_an_error_not_a_fallback(world):
+    calls = []
+
+    def net(args, ok=(0,)):
+        calls.append(args[-1])
+        ref = args[-1]
+        return ((("1" * 40) + "\t" + ref + "\n").encode() if ref == "refs/heads/main" else b"", False, 0)
+
+    with pytest.raises(ValueError, match="remote compare ref release was not found"):
+        g._subtree_push_guards(world["mono"], str(world["child"]), "sub", "2" * 40, "main", net,
+                               compare_ref="release")
+    assert calls == ["refs/heads/release"]
+
+
+def test_default_compare_candidates_are_deduplicated(world):
+    calls = []
+
+    def net(args, ok=(0,)):
+        calls.append(args[-1])
+        return b"", False, 2
+
+    out = g._subtree_push_guards(world["mono"], str(world["child"]), "sub", "2" * 40, "main", net)
+    assert out["checked_in"] == "ls-remote_only" and out["compare_ref"] is None
+    assert calls == ["refs/heads/main", "refs/heads/master", "refs/heads/trunk"]

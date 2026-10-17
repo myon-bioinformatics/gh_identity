@@ -28,7 +28,9 @@ Stdlib only; runs under ``python -S``::
     python -S scripts/repo_overview.py --include 'docs/*.md'
     python -S scripts/repo_overview.py --stats --churn 10 --since '3 months ago'
 
-Exit codes: 0 = OK, 2 = ROOT is not a directory.
+Exit codes: 0 = OK, 2 = ROOT is not a directory or the arguments are invalid
+(``--since`` without ``--churn``, an ``--include`` glob leaving ROOT). Symlinks
+that resolve outside ROOT are neither shown nor counted.
 
 Provenance: browser-test-kit ``scripts/repo_overview.py`` (blob 08cefe25) at
 ``myon-bioinformatics/browser-test-kit`` main 61872b2d (2026-10-17).
@@ -72,6 +74,15 @@ SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv", "
 
 def _skipped(relative: str) -> bool:
     return any(part in SKIP_DIRS for part in Path(relative).parts[:-1])
+
+
+def _inside(root: Path, path: Path) -> bool:
+    """True when ``path`` (symlinks resolved) stays under ``root``."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return True
 
 
 _PYPROJECT_DESCRIPTION_RE = re.compile(r'^\s*description\s*=\s*"([^"]*)"', re.MULTILINE)
@@ -124,9 +135,12 @@ def _readme_paragraphs(text: str) -> list[list[str]]:
 def _readme_paragraph(root: Path, max_chars: int = README_MAX_CHARS) -> str | None:
     text = None
     for path in sorted(root.glob("README*")):
-        if not path.is_file():
+        if not path.is_file() or not _inside(root, path):
             continue
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
         if b"\0" in data[:4096]:
             continue
         text = data.decode("utf-8", "replace")
@@ -170,15 +184,18 @@ def list_files(root: Path) -> list[str]:
             # successful but incomplete Git observation or hide partial output.
             raise RuntimeError("repository file inventory exceeds shared inspector limits")
         files = set(inventory["paths"])
-    return sorted(path for path in files if not _skipped(path) and (root / path).is_file())
+    return sorted(path for path in files
+                  if not _skipped(path) and (root / path).is_file() and _inside(root, root / path))
 
 
 def key_files(root: Path, patterns: tuple[str, ...]) -> list[str]:
     found: list[str] = []
     for pattern in patterns:
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            raise ValueError(f"key-file glob must stay inside ROOT: {pattern}")
         for path in sorted(root.glob(pattern)):
             relative = path.relative_to(root).as_posix()
-            if path.is_file() and relative not in found and not _skipped(relative):
+            if path.is_file() and _inside(root, path) and relative not in found and not _skipped(relative):
                 found.append(relative)
     return found
 
@@ -325,6 +342,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", metavar="WHEN",
                         help="limit --churn to commits after WHEN, e.g. '3 months ago' (needs --churn)")
     args = parser.parse_args(argv)
+    if args.since is not None and not args.churn:
+        parser.error("--since needs --churn")
+    for pattern in args.include:
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            parser.error(f"--include must stay inside ROOT: {pattern}")
     root = Path(args.root)
     if not root.is_dir():
         print(f"error: not a directory: {args.root}", file=sys.stderr)

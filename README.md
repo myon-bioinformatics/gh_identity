@@ -1003,7 +1003,7 @@ lowercased, crossed with `.py`, `.js`, `.mjs`, `.sh`, `.dart`; the top level is
 checked first, then `src/<pkg>/`. Existence comes from one recursive tree read
 of the default branch. Each hit reports its `raw.githubusercontent.com` URL at the
 default branch, the fetch status, the tree blob SHA and whether the fetched bytes
-match it. Python hits get a static `ast` import classification (`stdlib` via
+match it; the bytes themselves are fetched at the commit whose tree was read. Python hits get a static `ast` import classification (`stdlib` via
 `sys.stdlib_module_names`, `local` when the module exists next to the file, at
 the top level or under `src/`, otherwise `external`).
 
@@ -1018,11 +1018,15 @@ repository:
 - `catalog_default_mismatch`: a catalog entry without `source` whose `<repo>.py` is not in the tree
 - `consumed_uncatalogued`: a `.py/.js/.mjs/.sh/.dart` file of this repository that is locked or registered by a consumer but not catalogued
 - `fleet_missing`: not in `child-heads.json` (the parent itself is exempt)
-- `needs_bundle`: a Python hit with local, relative or external imports
+- `needs_bundle`: a Python hit with local, relative or external imports (a Python
+  hit whose bytes were not fetched or did not match the blob reports
+  `needs_bundle: null`, not `false`)
 
 With `--repos`, consumption is only collected from the listed repositories. The
-exit code is 0 only when every tree, lock and parent file was read and nothing was
-truncated or redacted.
+exit code is 0 only when every tree, lock and parent file was read, every raw fetch
+that was attempted succeeded and matched its blob (failures are listed in
+`raw_errors`), and nothing was truncated or redacted. `--no-raw` skips the
+fetches, so it does not affect the exit code.
 
 ## Duplicate files across repositories (`duplicate-files`)
 

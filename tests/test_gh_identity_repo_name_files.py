@@ -148,16 +148,50 @@ def test_full_scan_flags_and_hits():
 def test_no_raw_and_raw_failure():
     out = run(fetch_raw=False, repos=["lib"])
     hit = rows(out)["lib"]["found"][1]
-    assert hit["raw_status"] == "not_fetched" and hit["imports"] is None and hit["needs_bundle"] is False
-    assert out["count"] == 1 and out["complete"] is True
+    assert hit["raw_status"] == "not_fetched" and hit["imports"] is None and hit["needs_bundle"] is None
+    assert rows(out)["lib"]["found"][0]["needs_bundle"] is False
+    assert "needs_bundle" not in rows(out)["lib"]["flags"]
+    assert out["count"] == 1 and out["complete"] is True and out["raw_errors"] == []
     out = run(raw=make_raw(fail=("src/lib/lib.py",)), repos=["lib"])
     hit = rows(out)["lib"]["found"][1]
-    assert hit["raw_status"] == "server_error" and hit["raw_blob_sha"] is None
+    assert hit["raw_status"] == "server_error" and hit["raw_blob_sha"] is None and hit["needs_bundle"] is None
+    assert out["raw_errors"] == [{"repository": "me/lib", "path": "src/lib/lib.py", "error": "server_error"}]
+    assert out["complete"] is False
+
+
+def test_raw_bytes_are_fetched_at_the_tree_commit():
+    refs = []
+    base = make_raw()
+
+    def raw(repository, path, ref, **kwargs):
+        refs.append((repository, ref))
+        return base(repository, path, ref, **kwargs)
+
+    out = run(raw=raw, repos=["lib"])
+    assert ("me/lib", B) in refs and ("me/lib", "dev") not in refs
+    assert rows(out)["lib"]["found"][0]["raw_url"].startswith("https://raw.githubusercontent.com/me/lib/dev/")
+    assert out["complete"] is True
+
+
+def test_blob_mismatch_is_not_classified_and_marks_incomplete():
+    base = make_raw()
+
+    def raw(repository, path, ref, **kwargs):
+        if path == "src/lib/lib.py":
+            return b"import requests\n"
+        return base(repository, path, ref, **kwargs)
+
+    out = run(raw=raw, repos=["lib"])
+    hit = rows(out)["lib"]["found"][1]
+    assert hit["raw_blob_match"] is False and hit["imports"] is None and hit["needs_bundle"] is None
+    assert out["raw_errors"] == [{"repository": "me/lib", "path": "src/lib/lib.py", "error": "blob_mismatch"}]
+    assert out["complete"] is False
 
 
 @pytest.mark.parametrize("name,value", [
     ("vendor-catalog.json", {"tools": "x"}),
     ("vendor-catalog.json", b"\xff"),
+    ("vendor-catalog.json", {"tools": [{"repository": "me/lib", "source": None}]}),
     ("vendor-consumers.json", {"consumers": "x"}),
     ("vendor-consumers.json", {"consumers": [{"entries": [{"repository": 1}]}]}),
     ("vendor-consumers.json", {"consumers": [{"entries": None}]}),

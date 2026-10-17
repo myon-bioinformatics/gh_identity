@@ -3105,9 +3105,10 @@ def _subtree_push_guards(root, remote, prefix, split_sha, remote_default_branch,
     checkout is not modified.
     """
     ref = compare_ref or remote_default_branch
-    for candidate in ([ref] if ref else []) + ["main", "master", "trunk"]:
-        if not candidate:
-            continue
+    # An explicit compare ref is not silently replaced by main/master/trunk.
+    candidates = [compare_ref] if compare_ref else list(dict.fromkeys(
+        c for c in ([ref] if ref else []) + ["main", "master", "trunk"] if c))
+    for candidate in candidates:
         listing_raw, _, code = net(["ls-remote", "--", remote, "refs/heads/" + candidate], ok=tuple(range(256)))
         if code != 0:
             continue
@@ -3123,6 +3124,8 @@ def _subtree_push_guards(root, remote, prefix, split_sha, remote_default_branch,
                 "git push fails without overwriting the existing ref."
             ),
         }
+    if compare_ref:
+        raise ValueError("remote compare ref " + compare_ref + " was not found")
     return {
         "compare_ref": None, "compare_sha": None, "child_only_paths": [],
         "checked_in": "ls-remote_only",
@@ -3361,7 +3364,8 @@ def subtree_sync(root=".", prefix=None, remote=None, branch=None, *, direction=N
     tree-validated split SHA (not `git subtree push`, which re-splits internally).
     Before push, the remote compare ref (default branch unless
     `remote_compare_ref`) must be an ancestor of the split commit and must not
-    contain paths absent from the split tree. push only creates a NEW branch on
+    contain paths absent from the split tree. An explicit `remote_compare_ref`
+    that the remote lacks is an error (no fallback to main/master/trunk). push only creates a NEW branch on
     the remote: main/master, the remote default
     branch and existing branches are refused. pull merges into the current
     branch of a clean checkout. After a write the result is verified (pushed
@@ -5400,7 +5404,9 @@ def _rnf_parent(parent, parent_ref, timeout, transport):
     try:
         doc = _rnf_json(parent, "vendor-catalog.json", commit, timeout)
         tools = doc.get("tools") if isinstance(doc, dict) else None
-        if not isinstance(tools, list) or not all(isinstance(t, dict) and isinstance(t.get("repository"), str) for t in tools):
+        if not isinstance(tools, list) or not all(
+                isinstance(t, dict) and isinstance(t.get("repository"), str)
+                and ("source" not in t or isinstance(t["source"], str)) for t in tools):
             raise Error("invalid_json")
         state["catalog"] = [{"repository": t["repository"].casefold(),
                              "source": t.get("source", t["repository"].split("/")[-1] + ".py"),
@@ -5445,6 +5451,7 @@ def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", includ
     state = _rnf_parent(parent, parent_ref, timeout, transport)
     consumed = set(state["consumed"])
     lock_errors = []
+    raw_errors = []
     scanned = []
     for target in targets:
         name = target["name"]
@@ -5492,16 +5499,21 @@ def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", includ
             hit = {"path": path, "location": "top" if "/" not in path else "src", "blob_sha": files[path],
                    "raw_url": url, "raw_status": "not_fetched", "raw_blob_sha": None, "raw_blob_match": None,
                    "catalogued": None if catalogued is None else (key, path) in catalogued,
-                   "imports": None, "needs_bundle": False}
+                   "imports": None, "needs_bundle": None if path.endswith(".py") else False}
             data = None
             if fetch_raw:
                 try:
-                    data = public_github_raw_bytes(full, path, row["default_branch"], timeout=timeout)
+                    # Fetch at the commit whose tree was read, so bytes and blob SHA describe one state.
+                    data = public_github_raw_bytes(full, path, row["commit"], timeout=timeout)
                     hit["raw_status"] = "ok"
                     hit["raw_blob_sha"] = git_blob_sha(data)
                     hit["raw_blob_match"] = hit["raw_blob_sha"] == files[path]
                 except Error as exc:
                     hit["raw_status"] = exc.code
+                    raw_errors.append({"repository": full, "path": path, "error": exc.code})
+                if hit["raw_blob_match"] is False:
+                    raw_errors.append({"repository": full, "path": path, "error": "blob_mismatch"})
+                    data = None
             if data is not None and path.endswith(".py"):
                 imports = classify_python_imports(data, path, files)
                 hit["imports"] = imports
@@ -5530,13 +5542,13 @@ def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", includ
             details["needs_bundle"] = bundles
         row["flags"] = [flag for flag in REPO_NAME_FLAGS if flag in details]
     errors = [r for r in scanned if "error" in r]
-    complete = not errors and not lock_errors and not state["errors"] and not redacted \
+    complete = not errors and not lock_errors and not raw_errors and not state["errors"] and not redacted \
         and not any(r.get("truncated") for r in scanned)
     summary = {flag: [r["name"] for r in scanned if flag in r["flags"]] for flag in REPO_NAME_FLAGS}
     parent_out = {k: state[k] for k in ("repository", "ref", "commit", "errors")}
     return {"schema": "gh-identity-repo-name-files/1", "write": False, "owner": owner, "parent": parent_out,
             "extensions": list(REPO_NAME_EXTENSIONS), "repositories": scanned, "count": len(scanned),
-            "redacted": redacted, "lock_errors": lock_errors, "flags": summary, "complete": complete,
+            "redacted": redacted, "lock_errors": lock_errors, "raw_errors": raw_errors, "flags": summary, "complete": complete,
             "observed_at": now()}
 
 
