@@ -61,7 +61,7 @@ Verified against the vendored Ironmate generator
 (`flutter_navigation_basic/tool/python/vendor/repository_metadata_generator.py`):
 identical records for a branch checkout and a detached checkout, each with no
 env, `GITHUB_HEAD_REF` and `GITHUB_REF_NAME` (`IRONMATE_GENERATOR_DIR=... pytest
-tests/test_repository_metadata.py`), and on the real Flutter checkout.
+tests/test_gh_identity_repository_metadata.py`), and on the real Flutter checkout.
 
 ## Flutter migration (not done yet)
 
