@@ -699,6 +699,32 @@ Parent execution location does not imply parent ownership of this implementation
 A parent compatibility adapter can expose the old function names over these APIs
 once its consumer lock explicitly selects this revision.
 
+### Auxiliary stdlib scripts (git write, Pages publish, repository orientation)
+
+These single-file tools live under `scripts/` beside the existing check helpers.
+They are stdlib-only (`python -S`), are not merged into `gh_identity.py`, and
+were migrated from browser-test-kit (provenance is recorded in each file header).
+
+- **`scripts/git_commit.py`** — stage an explicit `FILE...` list, commit with an
+  optional message file and trailers, optionally `git push origin HEAD` with
+  network-only retries (never `--force`).
+- **`scripts/publish_check.py`** — verify that a merge reached GitHub Pages and/or
+  static URLs (deployment API, HTTP status, byte hash against `--local-root`, and
+  `--contains` text), with optional `--wait`.
+- **`scripts/repo_overview.py`** — bounded repository orientation: about/README
+  excerpt, key config files, file list (`git_ls_files` via this repo's
+  `gh_identity.py`), plus optional `--stats` and `--churn`.
+
+```bash
+python -S scripts/git_commit.py --message-file /tmp/msg.txt path/to/file.py
+python -S scripts/publish_check.py --site https://OWNER.github.io/ index.html --repo OWNER/OWNER.github.io
+python -S scripts/repo_overview.py --stats --churn 10
+```
+
+The built-in `overview` command remains the JSON workspace summary; `repo_overview.py`
+is the human-oriented, log-friendly orientation format previously shipped from
+browser-test-kit.
+
 ## Local branch switching (`git-switch`)
 
 ```bash
