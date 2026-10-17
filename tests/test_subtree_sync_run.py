@@ -97,7 +97,7 @@ def test_push_plan_changes_nothing(world):
     out = g.subtree_sync(world["mono"], "sub", str(world["child"]), "sync/one", direction="push")
     assert out["state"] == "planned" and out["write"] is False
     assert out["command"] == [
-        "git", "push", str(world["child"]), f"{out['split_sha']}:refs/heads/sync/one",
+        "git", "push", "--", str(world["child"]), f"{out['split_sha']}:refs/heads/sync/one",
     ]
     assert out["provenance"]["trailer"] == f"Subtree-Split: {out['source']} {out['split_sha']} sub"
     assert _refs(world["mono"]) == before_mono and _refs(world["child"]) == before_child

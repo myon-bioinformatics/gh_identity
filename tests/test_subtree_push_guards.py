@@ -68,7 +68,8 @@ def test_push_guard_lists_child_only_paths(monkeypatch, world):
 
 
 @needs_subtree
-def test_history_related_from_subtree_add_trailers(tmp_path):
+@pytest.mark.parametrize("squash", [False, True])
+def test_history_related_from_subtree_add_only_for_actual_child(tmp_path, squash):
     child = tmp_path / "child.git"
     _git(tmp_path, "init", "-q", "--bare", "-b", "trunk", str(child))
     work = tmp_path / "work"
@@ -84,14 +85,23 @@ def test_history_related_from_subtree_add_trailers(tmp_path):
     _git(mono, "config", "user.email", "t@e")
     _git(mono, "config", "user.name", "t")
     _commit(mono, {"top.py": "x = 1\n"}, "mono one")
-    _git(mono, "subtree", "add", "-q", "--prefix=sub", str(child), "trunk")
+    before_add = _git(mono, "rev-parse", "HEAD")
+    _git(mono, "subtree", "add", "-q", "--prefix=sub", *(["--squash"] if squash else []), str(child), "trunk")
+    status = g.subtree_sync_status(mono, "sub", work)
+    assert status["history_related"] and status["trees_match"]
+    assert status["state"] == "in_sync"
     other = tmp_path / "other"
     other.mkdir()
     _git(other, "init", "-q", "-b", "main")
-    _commit(other, {"a.py": "a = 9\n"}, "unrelated same layout wrong")
+    _commit(other, {"a.py": "a = 1\n"}, "unrelated same tree")
     status = g.subtree_sync_status(mono, "sub", other)
-    assert status["history_related"] is True
-    assert g._monorepo_has_subtree_trailers(mono, "sub")
+    assert status["history_related"] is False
+    assert status["trees_match"] and status["state"] == "subtree_add_required"
+    assert status["other_ahead"] == 1 and status["monorepo_ahead"] > 0
+    assert not status["split_in_other"] and not status["other_head_in_split"]
+    child_history = set(g._rev_list(work, _git(work, "rev-parse", "HEAD")))
+    assert g._monorepo_has_subtree_trailers(mono, "sub", "HEAD", child_history)
+    assert not g._monorepo_has_subtree_trailers(mono, "sub", before_add, child_history)
 
 
 @needs_subtree

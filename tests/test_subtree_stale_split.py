@@ -1,7 +1,9 @@
 """Regression: git subtree split can exit 0 with a stale SHA; tree validation must catch it."""
 import subprocess
 import sys
+import contextlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import gh_identity as g
@@ -165,6 +167,144 @@ def test_same_tree_unrelated_history_is_subtree_add_required(mono, tmp_path):
     assert status["trees_match"] and not status["history_related"]
     assert status["state"] == "subtree_add_required"
     assert status["other_ahead"] > 0
+    assert not status["split_in_other"] and not status["other_head_in_split"]
+    assert status["monorepo_ahead"] == len(g._rev_list(root, good))
+    rec = g.sync_provenance(root, "sub", other)
+    assert rec["state"] == "subtree_add_required"
+    assert rec["trees_match"] and rec["history_related"] is False
+
+
+@needs_subtree
+def test_push_revalidates_after_planning_and_never_writes_on_mismatch(world, monkeypatch):
+    """Planning passes; only the check immediately before push sees the mismatch."""
+    mono, child = world["mono"], world["child"]
+    real_check, real_guard, real_run = (g._subtree_split_matches_prefix_tree,
+                                       g._subtree_push_guards, g._git_run)
+    planning_done, checks, pushes = False, [], []
+
+    def guard(*args, **kwargs):
+        nonlocal planning_done
+        result = real_guard(*args, **kwargs)
+        planning_done = True
+        return result
+
+    def check(*args, **kwargs):
+        checks.append(planning_done)
+        result = real_check(*args, **kwargs)
+        return {**result, "trees_match": False} if planning_done else result
+
+    def run(root, args, **kwargs):
+        if args[0] == "push" or args[:2] == ["subtree", "push"]:
+            pushes.append(args)
+        return real_run(root, args, **kwargs)
+
+    monkeypatch.setattr(g, "_subtree_push_guards", guard)
+    monkeypatch.setattr(g, "_subtree_split_matches_prefix_tree", check)
+    monkeypatch.setattr(g, "_git_run", run)
+    before = _git(child, "for-each-ref")
+    with pytest.raises(g.Error) as err:
+        g.subtree_sync(mono, "sub", str(child), "sync/revalidate", direction="push", write=True)
+    assert err.value.code == "stale_subtree_split"
+    assert False in checks and checks[-1] is True
+    assert not pushes
+    assert _git(child, "for-each-ref") == before
+
+
+@needs_subtree
+@pytest.mark.parametrize("command", ["split", "status", "preflight"])
+@pytest.mark.parametrize("fetch_head_exists", [False, True])
+def test_fallback_preserves_checkout_metadata(mono, tmp_path, monkeypatch, command, fetch_head_exists):
+    root, stale_sha = mono
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q", "-b", "main")
+    _commit(other, {"a.py": "v2\n"}, "other")
+    _git(root, "pack-refs", "--all")
+    git_dir = Path(_git(root, "rev-parse", "--absolute-git-dir"))
+    fetch_head = git_dir / "FETCH_HEAD"
+    if fetch_head_exists:
+        fetch_head.write_bytes(b"existing FETCH_HEAD\n")
+    metadata = [git_dir / name for name in ("HEAD", "index", "packed-refs", "FETCH_HEAD", "config")]
+    before = {p: p.read_bytes() if p.exists() else None for p in metadata}
+    refs = _git(root, "for-each-ref")
+    work = {p: p.read_bytes() for p in root.rglob("*") if p.is_file() and git_dir not in p.parents}
+    real = g._git_run
+
+    def run(run_root, args, **kwargs):
+        if args[:2] == ["subtree", "split"]:
+            return (stale_sha + "\n").encode(), False, 0
+        return real(run_root, args, **kwargs)
+
+    monkeypatch.setattr(g, "_git_run", run)
+    calls = {"split": lambda: g.git_subtree_split(root, "sub"),
+             "status": lambda: g.subtree_sync_status(root, "sub", other),
+             "preflight": lambda: g.split_preflight(root, "sub")}
+    result = calls[command]()
+    assert result["reason"] is None
+    assert result["fallback_used"] and result["fallback_elapsed_seconds"] > 0
+    assert result.get("method", result.get("split_method")) == "filter-branch"
+    assert {p: p.read_bytes() if p.exists() else None for p in metadata} == before
+    assert _git(root, "for-each-ref") == refs
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file() and git_dir not in p.parents} == work
+    assert not (git_dir / "refs/original").exists()
+    assert not (git_dir / "subtree-cache").exists()
+
+
+@needs_subtree
+def test_fallback_handles_unreferenced_revision(mono, monkeypatch):
+    root, stale_sha = mono
+    source = _commit(root, {"sub/a.py": "unreferenced\n"}, "dangling source")
+    _git(root, "reset", "--hard", "HEAD~1")
+    real = g._git_run
+
+    def run(run_root, args, **kwargs):
+        if args[:2] == ["subtree", "split"]:
+            return (stale_sha + "\n").encode(), False, 0
+        return real(run_root, args, **kwargs)
+
+    monkeypatch.setattr(g, "_git_run", run)
+    result = g.git_subtree_split(root, "sub", source)
+    assert result["reason"] is None and result["fallback_used"]
+    assert result["source"] == source
+    assert g._subtree_split_matches_prefix_tree(root, source, "sub", result["sha"])["trees_match"]
+
+
+@pytest.mark.parametrize("key", ["GIT_DIR", "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "PATH"])
+def test_extra_env_cannot_override_sanitized_environment(mono, key):
+    with pytest.raises(ValueError, match="unsupported extra_env"):
+        g._git_run(mono[0], ["rev-parse", "HEAD"], extra_env={key: "elsewhere"})
+
+
+def test_split_and_fallback_share_timeout_budget(monkeypatch):
+    now, budgets = [100.0], []
+    monkeypatch.setattr(g, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(g, "_git_subtree_available", lambda root: True)
+    monkeypatch.setattr(g, "_prefix_tree_at", lambda *a: "c" * 40)
+    monkeypatch.setattr(g, "_subtree_cache_cleanup", lambda root: contextlib.nullcontext())
+    monkeypatch.setattr(g, "_subtree_split_matches_prefix_tree",
+                        lambda *a: {"prefix_tree": "c" * 40, "split_tree": "d" * 40, "trees_match": False})
+
+    def run(root, args, **kwargs):
+        if args[0] == "rev-parse":
+            return b"a" * 40, False, 0
+        if args[0] == "cat-file":
+            return b"tree", False, 0
+        assert args[:2] == ["subtree", "split"]
+        budgets.append(kwargs["timeout"])
+        now[0] = 140.0
+        return b"b" * 40, False, 0
+
+    def fallback(root, prefix, source, timeout):
+        budgets.append(timeout)
+        now[0] = 150.0
+        return None
+
+    monkeypatch.setattr(g, "_git_run", run)
+    monkeypatch.setattr(g, "_subtree_split_filter_branch", fallback)
+    result = g.git_subtree_split(".", "sub", timeout=100)
+    assert budgets == [100.0, 60.0]
+    assert result["fallback_used"] and result["fallback_elapsed_seconds"] == 10.0
+    assert result["reason"] == "stale_subtree_split"
 
 
 @pytest.fixture

@@ -826,7 +826,15 @@ repository). No `--write` is needed: `--branch`, `--rejoin`, `--onto` and
 `--annotate` are never passed, so no ref is created or moved and the current
 branch gets no commit (only new objects are added to the object database; the
 `.git/subtree-cache/<pid>` scratch directory git-subtree leaves behind is removed).
-`add` / `pull` / `merge` / `push` are not implemented.
+If a successful `git subtree split` returns a stale SHA, its root tree is rejected
+and a temporary local clone runs `filter-branch --subdirectory-filter` instead.
+The resulting objects are imported with `fetch --no-write-fetch-head`: refs,
+HEAD, index, working tree and `FETCH_HEAD` are preserved. The returned SHA is
+unreferenced and may be pruned by Git GC; publish it or create a ref to retain it.
+`method`, `warning`, `fallback_used` and `fallback_elapsed_seconds` expose recovery
+and its cost. Recovery copies and filters the repository, so it can be expensive;
+split and recovery share the specified timeout budget. No network fetch occurs.
+Use `subtree-sync` below for guarded push/pull.
 `DIR` must be a relative path inside the repository (no absolute path, `..`,
 `.git` or leading `-`); `REV` is resolved to a SHA first. A missing directory is
 `reason: "prefix_not_found"`; if the contrib `git subtree` command is not
@@ -839,12 +847,16 @@ python gh_identity.py subtree-sync-status --root MONOREPO --prefix DIR --other-r
   [--other-ref main] [--revision REV] [--other-only-path GLOB ...]
 ```
 
-Local and read-only (no fetch, no ref changes). `git subtree split` is
-deterministic, so the split commits of `DIR` carry the same SHAs as the history
-of a repository split out of it; both histories are compared as SHA sets in
-their own object databases. `state` is `in_sync`, `monorepo_ahead`,
-`other_ahead`, `diverged` or `unrelated`, with counts and (bounded) commit
-lists. Commits of the other side that only touch `--other-only-path` files
+Local inspection with the same object-only recovery and metadata preservation
+as `subtree-split`. `trees_match` compares content; `history_related` independently
+checks ancestry or an import trailer naming a commit in the compared child's
+history (including squash imports). An old trailer for another child is not
+evidence of a connection. Both checks use the requested revision.
+`state` is `in_sync`, `monorepo_ahead`, `other_ahead`, `diverged`, `unrelated`,
+or `subtree_add_required` (equal trees with unrelated histories). Commit counts,
+bounded lists and SHA membership fields retain their actual values even when
+trees match. `split_method`, `split_warning`, `fallback_used` and
+`fallback_elapsed_seconds` report split recovery. Commits of the other side that only touch `--other-only-path` files
 (e.g. `pyproject.toml`, `uv.lock`) are reported as `other_only_ignored`.
 
 ## Sync provenance (`sync-provenance`)
@@ -856,7 +868,8 @@ python gh_identity.py sync-provenance --root SPLIT_CHECKOUT --verify COMMIT [--m
 ```
 
 Records which monorepo SHA and split SHA a sync came from
-(`gh-identity-sync-provenance/1`) and suggests the commit trailer
+(`gh-identity-sync-provenance/1`), preserves `state`, `trees_match` and
+`history_related`, and suggests the commit trailer
 `Subtree-Split: <monorepo_sha> <split_sha> <prefix>`. `--output-dir` writes
 `sync-provenance.json`. `--verify` reads the trailers of `COMMIT`; with
 `--monorepo-root` the split is recomputed from the recorded SHA and must match
@@ -868,10 +881,16 @@ Records which monorepo SHA and split SHA a sync came from
 python gh_identity.py subtree-sync --prefix DIR --remote URL --branch B --direction push|pull [--squash] [-m MSG] [--write]
 ```
 
-Wraps `git subtree push` / `git subtree pull`. Without `--write` it is plan-only:
+Push sends the validated split SHA directly with
+`git push -- REMOTE SHA:refs/heads/BRANCH`; pull uses `git subtree pull`.
+`git subtree push` is never used because it would recompute an unchecked split.
+Without `--write` it is plan-only:
 it prints the git command, the split SHA (push) or remote tip (pull) and the
 `Subtree-Split: <monorepo_sha> <split_sha> <prefix>` provenance, and changes
-nothing. `--write` runs the command and then verifies it (pushed branch equals the
+no remote refs. Planning may import local objects for split recovery or remote
+objects for ancestry guards, without changing `FETCH_HEAD`. Immediately before
+push, the split tree is checked again; a mismatch aborts before any push.
+`--write` runs the command and then verifies it (pushed branch equals the
 split SHA; pulled tip reachable from HEAD, or recorded as `git-subtree-split:` with
 `--squash`). Pull also reports whether the pulled tip carries a valid
 `Subtree-Split:` trailer (recomputed against this checkout).
