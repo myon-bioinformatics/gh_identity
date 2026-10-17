@@ -5504,11 +5504,12 @@ def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", includ
         for path in repo_name_candidates(name):
             if path not in files:
                 continue
-            url = "https://raw.githubusercontent.com/{}/{}/{}".format(
-                full, urllib.parse.quote(row["default_branch"], safe=""),
-                "/".join(urllib.parse.quote(p, safe="") for p in path.split("/")))
+            quoted = "/".join(urllib.parse.quote(p, safe="") for p in path.split("/"))
+            url, commit_url = ("https://raw.githubusercontent.com/{}/{}/{}".format(
+                full, urllib.parse.quote(ref, safe=""), quoted) for ref in (row["default_branch"], row["commit"]))
+            # raw_url follows the branch; raw_commit_url names the exact commit whose tree and bytes were read.
             hit = {"path": path, "location": "top" if "/" not in path else "src", "blob_sha": files[path],
-                   "raw_url": url, "raw_status": "not_fetched", "raw_blob_sha": None, "raw_blob_match": None,
+                   "raw_url": url, "raw_commit_url": commit_url, "raw_status": "not_fetched", "raw_blob_sha": None, "raw_blob_match": None,
                    "catalogued": None if catalogued is None else (key, path) in catalogued,
                    "imports": None, "needs_bundle": None if path.endswith(".py") else False}
             data = None

@@ -119,6 +119,7 @@ def test_full_scan_flags_and_hits():
     assert [h["path"] for h in tool["found"]] == ["Tool-Kit.sh", "tool_kit.py"]
     sh, py = tool["found"]
     assert sh["raw_url"] == "https://raw.githubusercontent.com/me/Tool-Kit/main/Tool-Kit.sh"
+    assert sh["raw_commit_url"] == "https://raw.githubusercontent.com/me/Tool-Kit/" + A + "/Tool-Kit.sh"
     assert sh["raw_status"] == "ok" and sh["raw_blob_match"] is True and sh["imports"] is None
     assert py["blob_sha"] == sha(TOOL_SRC) and py["catalogued"] is True and py["location"] == "top"
     assert py["imports"]["local"] == ["helper"] and py["imports"]["external"] == ["requests"]
@@ -149,6 +150,7 @@ def test_no_raw_and_raw_failure():
     out = run(fetch_raw=False, repos=["lib"])
     hit = rows(out)["lib"]["found"][1]
     assert hit["raw_status"] == "not_fetched" and hit["imports"] is None and hit["needs_bundle"] is None
+    assert hit["raw_commit_url"] == "https://raw.githubusercontent.com/me/lib/" + B + "/src/lib/lib.py"
     assert rows(out)["lib"]["found"][0]["needs_bundle"] is False
     assert "needs_bundle" not in rows(out)["lib"]["flags"]
     assert out["count"] == 1 and out["complete"] is True and out["raw_errors"] == []
@@ -169,7 +171,12 @@ def test_raw_bytes_are_fetched_at_the_tree_commit():
 
     out = run(raw=raw, repos=["lib"])
     assert ("me/lib", B) in refs and ("me/lib", "dev") not in refs
-    assert rows(out)["lib"]["found"][0]["raw_url"].startswith("https://raw.githubusercontent.com/me/lib/dev/")
+    found = rows(out)["lib"]["found"]
+    assert found[0]["raw_url"].startswith("https://raw.githubusercontent.com/me/lib/dev/")
+    # The commit URL names the same commit the bytes were fetched at, and quotes each path segment.
+    assert [h["raw_commit_url"] for h in found] == [
+        "https://raw.githubusercontent.com/me/lib/" + B + "/lib.js",
+        "https://raw.githubusercontent.com/me/lib/" + B + "/src/lib/lib.py"]
     assert out["complete"] is True
 
 

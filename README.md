@@ -1007,8 +1007,10 @@ repository name as written, lowercased, with `-`/`.` replaced by `_`, and that
 lowercased, crossed with `.py`, `.js`, `.mjs`, `.sh`, `.dart`; the top level is
 checked first, then `src/<pkg>/`. Existence comes from one recursive tree read
 of the default branch. Each hit reports its `raw.githubusercontent.com` URL at the
-default branch, the fetch status, the tree blob SHA and whether the fetched bytes
-match it; the bytes themselves are fetched at the commit whose tree was read. Python hits get a static `ast` import classification (`stdlib` via
+default branch (`raw_url`) and at the commit whose tree was read (`raw_commit_url`),
+the fetch status, the tree blob SHA and whether the fetched bytes match it; the
+bytes themselves are fetched at that commit, so `raw_commit_url` keeps pointing at
+exactly what was checked after the branch moves. Python hits get a static `ast` import classification (`stdlib` via
 `sys.stdlib_module_names`, `local` when the module exists next to the file, at
 the top level or under `src/`, otherwise `external`).
 
