@@ -19,7 +19,7 @@ Stdlib only; runs under ``python -S``::
 
     python -S scripts/git_commit.py --message-file /tmp/msg.txt src/app.py
     python -S scripts/git_commit.py --message-file msg.txt a.py b.py \
-        --trailer "Co-Authored-By: Claude <noreply@anthropic.com>" --push
+        --trailer "Reviewed-by: Jane Doe <jane@example.com>" --push
 
 Exit codes: 0 = committed (and pushed, if asked); 1 = a git command failed
 (add/commit/push); 2 = usage error (missing/empty message, unexpected
