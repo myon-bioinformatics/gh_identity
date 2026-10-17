@@ -552,14 +552,14 @@ round-trip newline drift or establish CSS/JS equivalence for arbitrary pages.
 
 ### Optional internal reproduction when a site cannot be inspected
 
-`scripts/serve_dom_lab.py` provides an optional local Gradio fixture renderer.
+`scripts/gh_identity_serve_dom_lab.py` provides an optional local Gradio fixture renderer.
 Use it to separate local rendering/extraction behavior from an inaccessible site's
 network or access failure; it is not a replacement for live-site evidence or a
 CORS bypass. It does not fetch remote pages and binds only to 127.0.0.1, with public
 sharing disabled. Supply an existing trusted markdown.py:
 
 ```sh
-python scripts/serve_dom_lab.py /path/to/vendor/markdown.py
+python scripts/gh_identity_serve_dom_lab.py /path/to/vendor/markdown.py
 ```
 
 Install Gradio separately in a disposable test environment if needed; it is not
@@ -567,7 +567,7 @@ a GHI runtime dependency. Inspect `#dom-lab-body` in the rendered page and save
 its DOM for offline comparison. For fixture-only generation without Gradio:
 
 ```sh
-python scripts/serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixture.html
+python scripts/gh_identity_serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixture.html
 python gh_identity.py html-content fixture.html --selector '#dom-lab-body'
 ```
 
@@ -576,7 +576,7 @@ Gradio was unavailable. Later, web-ui PR #43 at `8ff5bfb` added and passed a
 local Gradio + Chromium DOM integration test
 ([CI evidence](https://github.com/myon-bioinformatics/web-ui/actions/runs/37887560280)).
 That validates web-ui's shared reproduction path, not this GHI-specific
-`serve_dom_lab.py` server path, which remains unverified.
+`gh_identity_serve_dom_lab.py` server path, which remains unverified.
 The built-in representative fixture does not reproduce an arbitrary site's DOM,
 computed CSS, JavaScript state, authentication, or network restrictions.
 
