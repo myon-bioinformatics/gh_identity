@@ -1479,3 +1479,34 @@ code, or on an unresolved current thread), `attention` 3 (anything listed: confi
 before merging). It reads only. When GraphQL is unavailable (Claude Code sessions),
 review threads come from the session's `pulls/N/ccr/review_threads` REST route;
 anything still unobserved is named in the reasons.
+
+## Trial before acting: merge-trial, git-activity, commit-files
+
+```bash
+python gh_identity.py merge-trial . origin/main --text                  # would origin/main merge into HEAD here?
+python gh_identity.py git-activity . --object e7ef1e6 --text            # object here? git still running? stale locks?
+python gh_identity.py commit-files OWNER/REPO --branch my-branch \
+  --file docs/a.md --file src/x.py=/tmp/x.py --delete old.txt --message "msg" --text   # plan
+python gh_identity.py commit-files OWNER/REPO --branch my-branch ... --expect-head 1a2b3c4 --write
+```
+
+`merge-trial` is the read-only form of `git merge --no-commit --no-ff REF` followed by
+`status` / `diff --diff-filter=U` / `diff --stat`: `git merge-tree --write-tree`
+computes the merge in the object store, so the work tree, index and refs never
+change and there is nothing to abort. It reports `clean`, `conflict` (with paths),
+`already_merged` or `missing_object` (fetch first), plus per-file +/- counts. Exit 0
+clean, 1 conflict, 3 missing object.
+
+`git-activity` answers whether a clone is busy before retrying a fetch or deleting a
+directory: HEAD, `cat-file -t` for each `--object` (or `missing`), lock files left in
+`.git` with their age, and on Linux the running git processes whose working directory
+is inside the clone, with arguments (credentials in URLs masked) and elapsed seconds.
+Exit 0 idle, 3 busy.
+
+`commit-files` makes one commit of several files without a clone, the same
+blobs/tree/commit/ref sequence as a `create_tree` connector call, but planned first:
+each path is listed as `new`, `changed`, `unchanged`, `delete` or `absent` with its
+size and Git blob SHA, and unchanged files are not uploaded. `--write` creates the
+commit on the current head and moves the branch fast-forward only; `--expect-head`
+refuses if the branch moved. Verification re-reads the branch and the new tree and
+compares every blob SHA with the local bytes. At most 100 paths and 10 MiB per file.
