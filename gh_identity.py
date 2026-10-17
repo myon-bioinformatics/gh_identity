@@ -432,7 +432,10 @@ def _explicit_severity(body):
      text=" ".join(" ".join(block).split());im=_INLINE_LABEL.match(block[0])
      lab=_severity_word(im.group(1)) if im else section
      if not _is_nashi_line(block[0]):findings.append({"label":lab,"source":"explicit_body_label","text":text})
-    else:k+=1
+    else:
+     im=_INLINE_LABEL.match(sl)
+     if im:findings.append({"label":_severity_word(im.group(1)),"source":"explicit_body_label","text":sl})
+     k+=1
    continue
   if kind and kind[0]=="other":
    im=_INLINE_LABEL.match(line)

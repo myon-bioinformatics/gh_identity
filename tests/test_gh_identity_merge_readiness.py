@@ -365,3 +365,12 @@ def test_cli_exit_codes(capsys):
     with patch.object(g, "pr", return_value=head(draft=True)), patch.object(g, "review_observations", return_value=obs), \
          patch.object(g, "request", side_effect=api()):
         assert g.main(["merge-readiness", "o/r", "7"]) == 3
+
+def test_inline_explicit_label_inside_heading_remains_visible():
+    text = "## Should\nMust: do not merge without tests"
+    labels = g._explicit_severity(text)
+    assert len(labels) == 1 and labels[0]["label"] == "Must"
+    out = readiness(observations(reviews=[
+        review("gpt", "COMMENTED", "2026-10-11T00:00:00Z", commit=HEAD, text=text)]))
+    assert out["verdict"] == "blocked"
+    assert out["findings"][0]["text"] == "Must: do not merge without tests"
