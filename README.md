@@ -1270,9 +1270,10 @@ component and set `complete=false`; byte/time/global-budget failures raise.
 Raw GraphQL messages are not echoed. CLI exit is 0 for complete, 1 for a returned
 incomplete observation, and 2 for invalid input or a raised API/transport error.
 
-`severity_labels` preserves explicit `Blocking`, `Should`, `Non-blocking`, and
+`severity_labels` preserves explicit `Must`, `Blocking`, `Should`, `Non-blocking`, and
 `Nit` labels at the start of a line, optionally in a bullet, Markdown heading,
-or bold form, followed by a colon or end of line. The exact labelled line and
+or bold form, followed by a colon (`:` or `：`), a dash (`—`, `–`, or ` - `) or end
+of line, so `**Should — re-pin first.**` counts. The exact labelled line and
 `source=explicit_body_label` are retained. Fenced examples, ordinary prose,
 summary counts such as `Blocking 0`, and review submission state do not assign
 severity. Multiple labels are preserved without selecting a merge gate.
@@ -1376,3 +1377,30 @@ conflicts, 2 for errors (JSON on stderr, no result on stdout). If a snapshot can
 be fetched or verification reports `pr_head_sha_mismatch`, rerun to read fresh API
 heads; it never falls back to a moving PR ref. The JSON schema and `write: false`
 contract are unchanged.
+
+## Before merging: what reviewers asked for (merge-readiness, pr-retarget)
+
+```bash
+python gh_identity.py merge-readiness OWNER/REPO 39 --text
+python gh_identity.py pr-retarget OWNER/REPO 71 --base main            # plan
+python gh_identity.py pr-retarget OWNER/REPO 71 --base main --write    # apply, then read back
+```
+
+`merge-readiness` lists, for one PR, the explicit `Must`/`Blocking`/`Should`
+findings in review bodies, conversation and inline comments, the latest
+`CHANGES_REQUESTED` per reviewer, unresolved review threads, and whether the head
+moved after the last human review (with the commit subjects since). Each finding
+says whether it is newer than the head commit (no code change since), whether its
+thread is resolved, and whether the same reviewer approved later. Verdict and exit:
+`clear` 0, `blocked` 1 (a Must/Blocking finding or changes requested with no newer
+code, or on an unresolved current thread), `attention` 3 (anything listed: confirm
+before merging). It reads only. When GraphQL is unavailable (Claude Code sessions),
+review threads come from the session's `pulls/N/ccr/review_threads` REST route;
+anything still unobserved is named in the reasons.
+
+`pr-retarget` changes a PR's base, typically a stacked PR whose parent was merged
+into `main` (a PR merged into its parent's branch after that parent landed never
+reaches `main`). It compares the old base with the new one first: if the old base
+has commits the new base lacks, they would join the diff, so `--write` is refused
+(`refused_unmerged_base`, exit 1) unless `--allow-unmerged`. Exit 0 for `planned`,
+`verified` or `already_satisfied`.
