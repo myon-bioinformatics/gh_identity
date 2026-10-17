@@ -121,7 +121,50 @@ def test_push_write_refuses_stale_split(world, monkeypatch):
     with pytest.raises(g.Error) as err:
         g.subtree_sync(mono, "sub", str(child), "sync/stale-test", direction="push", write=True)
     assert err.value.code == "stale_subtree_split"
-    assert not any(a[:2] == ["subtree", "push"] for a in net_calls)
+    assert not any(a[:1] == ["push"] for a in net_calls)
+
+
+@needs_subtree
+def test_push_uses_validated_split_not_subtree_push(mono, tmp_path, monkeypatch):
+    """`git subtree push` re-splits internally; push the validated split SHA directly."""
+    root, stale_sha = mono
+    child = tmp_path / "child.git"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "trunk", str(child))
+    mono, child = root, child
+    good = g.git_subtree_split(mono, "sub")["sha"]
+    stale = stale_sha
+    real = g._git_run
+    push_specs = []
+
+    def spy(run_root, args, **kw):
+        if args[:2] == ["subtree", "split"]:
+            return (stale + "\n").encode(), False, 0
+        if args[:2] == ["subtree", "push"]:
+            raise AssertionError("git subtree push must not run")
+        if args[:1] == ["push"] and kw.get("inherit_auth"):
+            push_specs.append(args)
+        return real(run_root, args, **kw)
+
+    monkeypatch.setattr(g, "_git_run", spy)
+    out = g.subtree_sync(mono, "sub", str(child), "sync/x", direction="push", write=True)
+    assert out["verified"]["ok"]
+    assert _git(child, "rev-parse", "refs/heads/sync/x") == good
+    assert _git(child, "rev-parse", "refs/heads/sync/x") != stale
+    assert push_specs and push_specs[0][-1] == f"{good}:refs/heads/sync/x"
+
+
+@needs_subtree
+def test_same_tree_unrelated_history_is_subtree_add_required(mono, tmp_path):
+    root, _ = mono
+    good = g.git_subtree_split(root, "sub")["sha"]
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q", "-b", "main")
+    _commit(other, {"a.py": "v2\n"}, "independent history")
+    status = g.subtree_sync_status(root, "sub", other)
+    assert status["trees_match"] and not status["history_related"]
+    assert status["state"] == "subtree_add_required"
+    assert status["other_ahead"] > 0
 
 
 @pytest.fixture

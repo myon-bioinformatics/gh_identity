@@ -96,7 +96,9 @@ def test_push_plan_changes_nothing(world):
     before_mono, before_child = _refs(world["mono"]), _refs(world["child"])
     out = g.subtree_sync(world["mono"], "sub", str(world["child"]), "sync/one", direction="push")
     assert out["state"] == "planned" and out["write"] is False
-    assert out["command"] == ["git", "subtree", "push", "--prefix=sub", str(world["child"]), "sync/one"]
+    assert out["command"] == [
+        "git", "push", str(world["child"]), f"{out['split_sha']}:refs/heads/sync/one",
+    ]
     assert out["provenance"]["trailer"] == f"Subtree-Split: {out['source']} {out['split_sha']} sub"
     assert _refs(world["mono"]) == before_mono and _refs(world["child"]) == before_child
     assert not (Path(_git(world["mono"], "rev-parse", "--absolute-git-dir")) / "subtree-cache").exists()
@@ -174,5 +176,5 @@ def test_cli_plan_prints_command(world):
                         "--direction", "push"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out["state"] == "planned" and out["command"][:3] == ["git", "subtree", "push"]
+    assert out["state"] == "planned" and out["command"][:2] == ["git", "push"]
     assert _refs(world["child"]) == ""
