@@ -199,6 +199,82 @@ def test_empty_blocking_section_is_not_a_finding():
     assert out["verdict"] == "attention" and out["findings"][0]["label"] == "Should"
 
 
+def test_bold_blocking_with_nashi_is_not_a_finding():
+    text = "**Blocking**\nなし。\n\n**Should**\n1. rename"
+    assert [x["label"] for x in g._explicit_severity(text)] == ["Should"]
+    out = readiness(observations(reviews=[review("gpt", "COMMENTED", "2026-10-11T00:00:00Z", commit=HEAD, text=text)]))
+    assert out["verdict"] == "attention"
+
+
+def test_codeblock_inside_section_ignored():
+    text = "## Should\n1. real\n```\n- Blocking: example\n```"
+    assert [x["label"] for x in g._explicit_severity(text)] == ["Should"]
+    out = readiness(observations(reviews=[review("gpt", "COMMENTED", "2026-10-11T00:00:00Z", commit=HEAD, text=text)]))
+    assert out["verdict"] == "attention" and out["verdict"] != "blocked"
+
+
+def test_non_severity_heading_ends_section():
+    text = "## Blocking\nなし。\n## 確認したこと\n- CI は成功"
+    assert g._explicit_severity(text) == []
+    out = readiness(observations(reviews=[review("gpt", "COMMENTED", "2026-10-11T00:00:00Z", commit=HEAD, text=text)]))
+    assert out["verdict"] == "clear"
+
+
+def test_nested_bullets_are_one_finding():
+    text = "## Should\n- parent\n  - child detail"
+    labels = g._explicit_severity(text)
+    assert len(labels) == 1 and labels[0]["label"] == "Should" and "child detail" in labels[0]["text"]
+
+
+def test_section_skips_non_list_prose():
+    text = "## Should\nPlease reconsider\n1. fix it"
+    assert len(g._explicit_severity(text)) == 1 and g._explicit_severity(text)[0]["text"].startswith("1. fix")
+
+
+def test_team_review_markdown_shape():
+    text = ("## Blocking\nなし。\n## Should\n1. rename\n## Nit\n- typo\n"
+            "## 確認したこと\n- CI は成功")
+    assert [x["label"] for x in g._explicit_severity(text)] == ["Should", "Nit"]
+    out = readiness(observations(reviews=[review("gpt", "COMMENTED", "2026-10-11T00:00:00Z", commit=HEAD, text=text)]))
+    assert out["verdict"] == "attention" and len(out["findings"]) == 1 and out["findings"][0]["label"] == "Should"
+
+
+def test_commented_does_not_supersede():
+    obs = observations(reviews=[
+        review("gpt", "COMMENTED", "2026-10-09T00:00:00Z", text="Should: fix", rid=1),
+        review("gpt", "COMMENTED", "2026-10-12T00:00:00Z", commit=HEAD, rid=2),
+    ])
+    out = readiness(obs)
+    assert not out["findings"][0]["superseded_by_approval"]
+
+
+def test_outdated_thread_blocking_finding_is_not_blocker():
+    inline = [{"id": 5, "author": "gpt", "created_at": "2026-10-09T00:00:00Z", "url": "u5", "thread_id": "T1",
+               **body("- Blocking: path")}]
+    threads = [{"id": "T1", "is_resolved": False, "is_outdated": True, "path": "a.py", "line": 3, "url": "u5"}]
+    out = readiness(observations(reviews=[review("gpt", "COMMENTED", "2026-10-09T00:00:00Z", commit=HEAD)],
+                                 inline=inline, threads=threads))
+    assert out["verdict"] == "attention"
+
+
+def test_unresolved_blocking_thread_before_head_still_blocks():
+    inline = [{"id": 5, "author": "gpt", "created_at": "2026-10-09T00:00:00Z", "url": "u5", "thread_id": "T1",
+               **body("- Blocking: path")}]
+    threads = [{"id": "T1", "is_resolved": False, "is_outdated": False, "path": "a.py", "line": 3, "url": "u5"}]
+    out = readiness(observations(reviews=[review("gpt", "COMMENTED", "2026-10-09T00:00:00Z", commit=HEAD)],
+                                 inline=inline, threads=threads))
+    assert out["verdict"] == "blocked"
+    assert not out["findings"][0]["after_head"]
+
+
+def test_head_message_hundred_char_cap():
+    long = "z" * 150
+    obs = observations(reviews=[review("gpt", "COMMENTED", "2026-10-09T00:00:00Z")])
+    compare = {"ahead_by": 1, "commits": [{"commit": {"message": long}}]}
+    out = readiness(obs, {f"repos/o/r/compare/{OLD}...{HEAD}": compare})
+    assert len(out["head_moved_after_review"]["messages"][0]) == 100
+
+
 def test_when_invalid_timestamp():
     assert g._when("not-a-date") is None
     obs = observations(reviews=[review("gpt", "COMMENTED", "not-a-date", commit=HEAD, text="Should: x")])
@@ -206,11 +282,11 @@ def test_when_invalid_timestamp():
     assert not out["findings"][0]["after_head"] and not out["findings"][0]["superseded_by_approval"]
 
 
-def test_picks_strongest_explicit_label_on_one_line():
+def test_paired_label_and_text_per_finding():
     text = "Must: one\nShould: two"
     obs = observations(reviews=[review("gpt", "COMMENTED", "2026-10-11T00:00:00Z", commit=HEAD, text=text)])
     out = readiness(obs)
-    assert out["findings"][0]["label"] == "Must"
+    assert [(f["label"], f["text"]) for f in out["findings"]] == [("Must", "Must: one"), ("Should", "Should: two")]
 
 
 def test_after_head_strictly_after_commit_time():

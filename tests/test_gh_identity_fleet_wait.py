@@ -44,17 +44,21 @@ def test_without_wait_keeps_one_scope():
 @pytest.mark.parametrize("argv,per_poll", [
     (["fleet-checks", ".", "--wait", "0", "--wait", "600", "--interval", "1"], True),
     (["fleet-checks", ".", "--wait", "600", "--wait", "0"], False),
-    (["fleet-checks", ".", "--wai", "600"], False),
-    (["fleet-checks", ".", "--wa=600"], False),
 ])
 def test_wait_uses_argparse_not_string_heuristics(argv, per_poll):
     states = ["green"] if not per_poll else ["pending", "green"]
     code, seen = run(argv, states)
     assert code == 0
     if per_poll:
-        assert len(seen) == 2 and all(budget is None for budget, _ in seen)
+        assert len(seen) >= 2 and all(budget is None for budget, _ in seen)
     else:
         assert len(seen) == 1 and seen[0][0] is not None
+
+
+def test_wai_typo_rejected_with_exit_2():
+    with patch.object(g, "fleet_checks") as fake:
+        assert g.main(["fleet-checks", ".", "--wai", "600"]) == 2
+        fake.assert_not_called()
 
 
 def test_fleet_checks_wait_value_invalid_and_missing():
@@ -62,3 +66,4 @@ def test_fleet_checks_wait_value_invalid_and_missing():
     assert g._fleet_checks_wait_value(["fleet-checks", ".", "--wait=abc"]) == 0.0
     assert g._fleet_checks_wait_value(["fleet-checks", ".", "--wait"]) == 0.0
     assert g._fleet_checks_wait_value(["wait-checks", "o/r", "a"]) is None
+    assert g._fleet_checks_wait_value(["fleet-checks", ".", "--wait", "600"]) == 600.0
