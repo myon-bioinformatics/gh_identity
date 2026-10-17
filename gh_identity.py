@@ -4222,8 +4222,36 @@ def _repo_lock(full, ref, paths, lock_paths, transport, timeout):
     return None, None
 
 
+def _duplicate_repo_locks(full, ref, paths, lock_paths, transport, timeout):
+    """Read every present lock; conflicting destinations or bad reads fail closed.
+
+    Unlike enrollment_progress's single-lock lookup, duplicate-files needs a
+    complete provenance map across supported layouts in each repository.
+    """
+    found, entries, folded = [], {}, {}
+    for lp in dict.fromkeys(lock_paths):
+        if lp not in paths:
+            continue
+        meta = request("GET", f"repos/{full}/contents/{lp}?ref={ref}", transport=transport, timeout=timeout)
+        if not isinstance(meta, dict) or meta.get("encoding") != "base64" or not isinstance(meta.get("content"), str):
+            raise Error("invalid_vendor_lock_response")
+        try:
+            lock = validate_vendor_lock(json.loads(base64.b64decode("".join(meta["content"].split()), validate=True)))
+        except (ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
+            raise Error("invalid_vendor_lock") from exc
+        for entry in lock["files"]:
+            dest = entry["destination"]
+            key = dest.casefold()
+            if key in folded and (folded[key] != dest or entries[dest] != entry):
+                raise Error("conflicting_vendor_lock")
+            folded[key] = dest
+            entries[dest] = entry
+        found.append(lp)
+    return found, entries
+
+
 def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=(), min_repos=2,
-                    lock_paths=("vendor.lock.json", "tool/python/vendor.lock.json"), include_forks=False,
+                    lock_paths=("vendor.lock.json", "tool/python/vendor.lock.json", "python/vendor.lock.json"), include_forks=False,
                     heads=None, transport="auto", timeout=30):
     """Same basename in several repositories of one owner, with vendor-lock provenance.
 
@@ -4245,13 +4273,14 @@ def duplicate_files(owner, repos=None, *, ignore=DUPLICATE_IGNORE, extra_ignore=
                 raise Error("invalid_tree_response")
             if truncated:
                 raise Error("truncated_tree")
-            lp, lock = _repo_lock(full, sha, files, lock_paths, transport, timeout)
+            found_locks, lock_entries = _duplicate_repo_locks(full, sha, files, lock_paths, transport, timeout)
         except (Error, ValueError, json.JSONDecodeError) as e:
             errors.append({"repository": full, "detail": getattr(e, "code", str(e))})
             continue
-        scanned[full] = {"commit": sha, "files": len(files), "truncated": truncated, "lock": lp,
+        scanned[full] = {"commit": sha, "files": len(files), "truncated": truncated,
+                         "lock": found_locks[0] if found_locks else None, "lock_paths": found_locks,
                          "from_heads": full in (heads or {})}
-        locks[full] = {f["destination"]: f for f in (lock or {"files": []})["files"]}
+        locks[full] = lock_entries
         for path, blob in files.items():
             base = path.rsplit("/", 1)[-1]
             if any(fnmatch.fnmatchcase(base, p) or fnmatch.fnmatchcase(path, p) for p in patterns):
