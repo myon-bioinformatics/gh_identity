@@ -123,8 +123,11 @@ def test_push_plan_changes_nothing(world, monkeypatch):
     out = g.subtree_sync(mono, "sub", str(child), "sync/one", direction="push", remote_compare_ref="trunk")
     assert out["state"] == "planned" and out["write"] is False
     assert out["command"] == [
-        "git", "push", "--", str(child), f"{out['split_sha']}:refs/heads/sync/one",
+        "git", "push", "--force-with-lease=refs/heads/sync/one:", "--", str(child),
+        f"{out['split_sha']}:refs/heads/sync/one",
     ]
+    assert out["split"]["method"] == "subtree" and out["split"]["subtree_sha"] is None
+    assert "--force-with-lease=refs/heads/<branch>:" in out["push_guard"]["branch_race_note"]
     assert out["provenance"]["trailer"] == f"Subtree-Split: {out['source']} {out['split_sha']} sub"
     assert out["split"]["fallback_used"] is False
     assert "branch_race_note" in out["push_guard"]

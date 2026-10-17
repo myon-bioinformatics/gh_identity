@@ -3067,7 +3067,7 @@ def _remote_ls_ref_tip(listing, ref):
     return m.group(1) if m else None
 
 
-def _subtree_push_guards_isolated(root, remote, tip, split_sha, timeout):
+def _subtree_push_guards_isolated(root, remote, tip, split_sha, timeout, ref_name="remote ref"):
     """Run ancestor/path guards in a temporary clone (no writes to `root`)."""
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be positive and finite")
@@ -3086,7 +3086,7 @@ def _subtree_push_guards_isolated(root, remote, tip, split_sha, timeout):
         if code != 0:
             raise ValueError("could not fetch remote ref for push guard")
         if not _git_is_ancestor(clone, tip, split_sha):
-            raise ValueError("remote ref tip is not an ancestor of the split commit")
+            raise ValueError("remote ref " + ref_name + " is not an ancestor of the split commit")
         split_tree = _commit_root_tree(clone, split_sha)
         child_tree = _commit_root_tree(clone, tip)
         if not split_tree or not child_tree:
@@ -3095,6 +3095,18 @@ def _subtree_push_guards_isolated(root, remote, tip, split_sha, timeout):
         if only_child:
             raise ValueError("child-only paths not present in split: " + ", ".join(only_child))
         return only_child
+
+
+_SUBTREE_BRANCH_RACE_NOTE = (
+    "Branch existence is checked before push, and the push carries "
+    "--force-with-lease=refs/heads/<branch>: (empty expected value: the branch must not exist), "
+    "so a branch created concurrently makes the push fail even when it would fast-forward."
+)
+
+
+def _subtree_push_lease(branch):
+    """Lease that only lets the push create refs/heads/<branch> (rejected once it exists)."""
+    return "--force-with-lease=refs/heads/" + branch + ":"
 
 
 def _subtree_push_guards(root, remote, prefix, split_sha, remote_default_branch, net, *, compare_ref=None,
@@ -3115,24 +3127,18 @@ def _subtree_push_guards(root, remote, prefix, split_sha, remote_default_branch,
         tip = _remote_ls_ref_tip(_git_decode(listing_raw), "refs/heads/" + candidate)
         if tip is None:
             continue
-        _subtree_push_guards_isolated(root, remote, tip, split_sha, timeout)
+        _subtree_push_guards_isolated(root, remote, tip, split_sha, timeout, ref_name=candidate)
         return {
             "compare_ref": candidate, "compare_sha": tip, "child_only_paths": [],
             "checked_in": "temporary_clone",
-            "branch_race_note": (
-                "Branch existence is checked before push; if the branch is created concurrently, "
-                "git push fails without overwriting the existing ref."
-            ),
+            "branch_race_note": _SUBTREE_BRANCH_RACE_NOTE,
         }
     if compare_ref:
         raise ValueError("remote compare ref " + compare_ref + " was not found")
     return {
         "compare_ref": None, "compare_sha": None, "child_only_paths": [],
         "checked_in": "ls-remote_only",
-        "branch_race_note": (
-            "Branch existence is checked before push; if the branch is created concurrently, "
-            "git push fails without overwriting the existing ref."
-        ),
+        "branch_race_note": _SUBTREE_BRANCH_RACE_NOTE,
     }
 
 
@@ -3358,9 +3364,13 @@ def subtree_sync(root=".", prefix=None, remote=None, branch=None, *, direction=N
 
     Without write=True the checkout is left unchanged (refs, index, work tree,
     FETCH_HEAD): planning uses ls-remote and temporary clones for push guards.
+    The split itself still writes unreferenced commit objects into the object
+    database (as `git subtree split` does); no ref points at them.
     The planned git command, split SHA (push) or remote tip (pull), and
     Subtree-Split provenance are returned.
-    push uses `git push <remote> <split_sha>:refs/heads/<branch>` with a
+    push uses `git push --force-with-lease=refs/heads/<branch>: <remote>
+    <split_sha>:refs/heads/<branch>` (the empty lease requires the branch to be
+    absent, so a concurrently created branch is never fast-forwarded) with a
     tree-validated split SHA (not `git subtree push`, which re-splits internally).
     Before push, the remote compare ref (default branch unless
     `remote_compare_ref`) must be an ancestor of the split commit and must not
@@ -3422,7 +3432,8 @@ def subtree_sync(root=".", prefix=None, remote=None, branch=None, *, direction=N
         if split["reason"]:
             raise Error(split["reason"])
         refspec = split["sha"] + ":refs/heads/" + branch
-        command = ["git", "push", "--", remote, refspec]
+        lease = _subtree_push_lease(branch)
+        command = ["git", "push", lease, "--", remote, refspec]
         provenance = {"trailer": f"{_SUBTREE_TRAILER}: {source} {split['sha']} {prefix}",
                       "monorepo_sha": source, "split_sha": split["sha"]}
         push_guard = _subtree_push_guards(
@@ -3442,7 +3453,7 @@ def subtree_sync(root=".", prefix=None, remote=None, branch=None, *, direction=N
         tree_check = _subtree_push_split_tree_gate(root, source, prefix, split["sha"])
         plan = {**plan, "prefix_tree": tree_check["prefix_tree"], "split_tree": tree_check["split_tree"]}
         try:
-            net(["push", "--", remote, refspec])
+            net(["push", lease, "--", remote, refspec])
         except GitInspectionError:
             raise Error("subtree_push_failed") from None
         raw, _, _ = net(["ls-remote", "--", remote, "refs/heads/" + branch])

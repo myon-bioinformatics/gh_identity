@@ -153,6 +153,9 @@ def test_push_uses_validated_split_not_subtree_push(mono, tmp_path, monkeypatch)
     assert _git(child, "rev-parse", "refs/heads/sync/x") == good
     assert _git(child, "rev-parse", "refs/heads/sync/x") != stale
     assert push_specs and push_specs[0][-1] == f"{good}:refs/heads/sync/x"
+    assert push_specs[0][1] == "--force-with-lease=refs/heads/sync/x:"
+    assert out["split"]["method"] == "filter-branch" and out["split"]["subtree_sha"] == stale
+    assert out["split"]["fallback_used"] is True
 
 
 @needs_subtree

@@ -897,13 +897,18 @@ python gh_identity.py subtree-sync --prefix DIR --remote URL --branch B --direct
 ```
 
 Push sends the validated split SHA directly with
-`git push -- REMOTE SHA:refs/heads/BRANCH`; pull uses `git subtree pull`.
+`git push --force-with-lease=refs/heads/BRANCH: -- REMOTE SHA:refs/heads/BRANCH`.
+The empty lease means BRANCH must still be absent on the remote, so a branch
+created by someone else between the check and the push makes the push fail,
+even when it would be a fast-forward. Pull uses `git subtree pull`.
 `git subtree push` is never used because it would recompute an unchecked split.
 Without `--write` it is plan-only:
 it prints the git command, the split SHA (push) or remote tip (pull) and the
 `Subtree-Split: <monorepo_sha> <split_sha> <prefix>` provenance, and changes
-no remote refs. Planning may import local objects for split recovery or remote
-objects for ancestry guards, without changing `FETCH_HEAD`. Immediately before
+no remote refs. Planning leaves refs, index, work tree and `FETCH_HEAD`
+unchanged; the split still writes unreferenced commit objects (as
+`git subtree split` does), and the ancestry / child-only-path guards fetch the
+remote only inside a temporary clone. Immediately before
 push, the split tree is checked again; a mismatch aborts before any push.
 `--write` runs the command and then verifies it (pushed branch equals the
 split SHA; pulled tip reachable from HEAD, or recorded as `git-subtree-split:` with

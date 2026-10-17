@@ -52,18 +52,105 @@ def test_push_blocked_when_child_trunk_not_ancestor(world):
         g.subtree_sync(mono, "sub", str(child), "sync/new", direction="push", remote_compare_ref="trunk")
 
 
-def test_push_guard_lists_child_only_paths(monkeypatch, world):
+def test_push_guard_wrapper_reports_isolated_errors(monkeypatch, world):
     mono, child = world["mono"], world["child"]
-    split = g.git_subtree_split(mono, "sub")["sha"]
+    seen = []
 
     def isolated(*args, **kwargs):
+        seen.append(kwargs.get("ref_name"))
         raise ValueError("child-only paths not present in split: only-on-child.txt")
 
     monkeypatch.setattr(g, "_subtree_push_guards_isolated", isolated)
     listing = "1111111111111111111111111111111111111111 refs/heads/trunk\n"
     net = lambda args, ok=(0,): (listing.encode(), False, 0)
     with pytest.raises(ValueError, match="child-only paths"):
-        g._subtree_push_guards(mono, str(child), "sub", split, "trunk", net, compare_ref="trunk")
+        g._subtree_push_guards(mono, "/nonexistent", "sub", "2" * 40, "trunk", net, compare_ref="trunk")
+    assert seen == ["trunk"]
+
+
+def _ls_net(root):
+    return lambda args, ok=(0,): g._git_run(root, args, ok=ok, max_bytes=1024 * 1024)
+
+
+@needs_subtree
+def test_real_guard_detects_child_only_paths(world):
+    """The real isolated guard (no mocks): the child trunk has a path the new split dropped."""
+    mono, child = world["mono"], world["child"]
+    _commit(mono, {"sub/extra.txt": "x\n"}, "add extra")
+    first = g.git_subtree_split(mono, "sub")["sha"]
+    _git(mono, "push", "-q", str(child), f"{first}:refs/heads/trunk")
+    _git(mono, "rm", "-q", "sub/extra.txt")
+    _git(mono, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q", "-m", "drop extra")
+    second = g.git_subtree_split(mono, "sub")["sha"]
+    with pytest.raises(ValueError, match="child-only paths not present in split: extra.txt"):
+        g._subtree_push_guards_isolated(mono, str(child), first, second, 60, ref_name="trunk")
+    with pytest.raises(ValueError, match="child-only paths not present in split: extra.txt"):
+        g._subtree_push_guards(mono, str(child), "sub", second, "trunk", _ls_net(mono), compare_ref="trunk")
+    with pytest.raises(ValueError, match="child-only paths"):
+        g.subtree_sync(mono, "sub", str(child), "sync/new", direction="push", remote_compare_ref="trunk")
+
+
+@needs_subtree
+def test_real_guard_passes_and_names_ref_on_ancestry_failure(world):
+    mono, child = world["mono"], world["child"]
+    first = g.git_subtree_split(mono, "sub")["sha"]
+    _git(mono, "push", "-q", str(child), f"{first}:refs/heads/trunk")
+    _commit(mono, {"sub/b.py": "b = 1\n"}, "two")
+    second = g.git_subtree_split(mono, "sub")["sha"]
+    assert g._subtree_push_guards_isolated(mono, str(child), first, second, 60) == []
+    out = g._subtree_push_guards(mono, str(child), "sub", second, "trunk", _ls_net(mono), compare_ref="trunk")
+    assert out["compare_sha"] == first and out["checked_in"] == "temporary_clone"
+    with pytest.raises(ValueError, match="remote ref trunk is not an ancestor"):
+        g._subtree_push_guards_isolated(mono, str(child), second, first, 60, ref_name="trunk")
+
+
+def test_isolated_guard_failure_branches(world, monkeypatch, tmp_path):
+    mono = world["mono"]
+    head = _git(mono, "rev-parse", "HEAD")
+    for bad in (0, -1, float("inf"), float("nan"), True, "1"):
+        with pytest.raises(ValueError, match="timeout"):
+            g._subtree_push_guards_isolated(mono, str(world["child"]), head, head, bad)
+    with pytest.raises(ValueError, match="could not fetch remote ref"):
+        g._subtree_push_guards_isolated(mono, str(tmp_path / "missing.git"), head, head, 60)
+    real = g._git_run
+
+    def no_clone(run_root, args, **kw):
+        if args[:1] == ["clone"]:
+            return b"", False, 128
+        return real(run_root, args, **kw)
+
+    monkeypatch.setattr(g, "_git_run", no_clone)
+    with pytest.raises(ValueError, match="could not clone"):
+        g._subtree_push_guards_isolated(mono, str(world["child"]), head, head, 60)
+    monkeypatch.setattr(g, "_git_run", real)
+    monkeypatch.setattr(g, "_commit_root_tree", lambda root, commit: None)
+    with pytest.raises(ValueError, match="could not resolve trees"):
+        g._subtree_push_guards_isolated(mono, str(mono), head, head, 60)
+
+
+@needs_subtree
+def test_push_refuses_branch_created_concurrently_even_as_fast_forward(world, monkeypatch):
+    """Between the existence check and the push another writer creates the branch at an
+    ancestor of the split; without the empty lease the push would fast-forward it."""
+    mono, child = world["mono"], world["child"]
+    ancestor = g.git_subtree_split(mono, "sub")["sha"]
+    _git(mono, "push", "-q", str(child), f"{ancestor}:refs/heads/trunk")
+    _commit(mono, {"sub/b.py": "b = 1\n"}, "two")
+    real = g._git_run
+    pushes = []
+
+    def racing(run_root, args, **kw):
+        if args[:1] == ["push"] and kw.get("inherit_auth"):
+            pushes.append(list(args))
+            _git(child.parent, "--git-dir", str(child), "update-ref", "refs/heads/sync/race", ancestor)
+        return real(run_root, args, **kw)
+
+    monkeypatch.setattr(g, "_git_run", racing)
+    with pytest.raises(g.Error) as e:
+        g.subtree_sync(mono, "sub", str(child), "sync/race", direction="push", write=True)
+    assert e.value.code == "subtree_push_failed"
+    assert pushes and pushes[0][1] == "--force-with-lease=refs/heads/sync/race:"
+    assert _git(child.parent, "--git-dir", str(child), "rev-parse", "refs/heads/sync/race") == ancestor
 
 
 @needs_subtree
