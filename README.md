@@ -1378,12 +1378,10 @@ be fetched or verification reports `pr_head_sha_mismatch`, rerun to read fresh A
 heads; it never falls back to a moving PR ref. The JSON schema and `write: false`
 contract are unchanged.
 
-## Before merging: what reviewers asked for (merge-readiness, pr-retarget)
+## Before merging: what reviewers asked for (merge-readiness)
 
 ```bash
 python gh_identity.py merge-readiness OWNER/REPO 39 --text
-python gh_identity.py pr-retarget OWNER/REPO 71 --base main            # plan
-python gh_identity.py pr-retarget OWNER/REPO 71 --base main --write    # apply, then read back
 ```
 
 `merge-readiness` lists, for one PR, the explicit `Must`/`Blocking`/`Should`
@@ -1397,10 +1395,3 @@ code, or on an unresolved current thread), `attention` 3 (anything listed: confi
 before merging). It reads only. When GraphQL is unavailable (Claude Code sessions),
 review threads come from the session's `pulls/N/ccr/review_threads` REST route;
 anything still unobserved is named in the reasons.
-
-`pr-retarget` changes a PR's base, typically a stacked PR whose parent was merged
-into `main` (a PR merged into its parent's branch after that parent landed never
-reaches `main`). It compares the old base with the new one first: if the old base
-has commits the new base lacks, they would join the diff, so `--write` is refused
-(`refused_unmerged_base`, exit 1) unless `--allow-unmerged`. Exit 0 for `planned`,
-`verified` or `already_satisfied`.

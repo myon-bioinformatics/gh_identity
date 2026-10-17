@@ -4720,7 +4720,7 @@ def merge_readiness(repository, number, *, max_items=100, max_pages=10, transpor
         try:
             cmp = request("GET", f"repos/{r}/compare/{last_review['commit_id']}...{sha}", transport=transport, timeout=timeout)
             moved = {"author": last_review.get("author"), "reviewed": last_review["commit_id"], "commits": cmp.get("ahead_by"),
-                     "messages": [((c.get("commit") or {}).get("message") or "").splitlines()[0][:100]
+                     "messages": [(((c.get("commit") or {}).get("message") or "").splitlines() or [""])[0][:100]
                                   for c in (cmp.get("commits") or [])][-5:]}
         except Error:
             moved = {"author": last_review.get("author"), "reviewed": last_review["commit_id"], "commits": None, "messages": []}
@@ -4772,51 +4772,6 @@ def render_merge_readiness(o):
         out.append(f"  head moved after {moved['author']}'s review of {moved['reviewed'][:7]}: "
                    + ("; ".join(moved["messages"]) or "?"))
     return "\n".join(out)
-
-
-def pr_retarget(repository, number, base="main", *, write=False, allow_unmerged=False, transport="auto", timeout=30):
-    """Change a PR's base branch (for example a stacked PR -> main after its parent merged).
-
-    Planned unless ``write=True``. Before writing, compares the old base with the new
-    one: commits on the old base that are not in the new base would join the PR's
-    diff, so the write is refused unless ``allow_unmerged`` (a deleted old base is
-    reported as unknown and also needs ``allow_unmerged``). Verifies by reading back.
-    """
-    r = repo(repository)
-    n = _positive_identifier(number, "PR number")
-    if not isinstance(base, str) or not base.strip():
-        raise ValueError("base is required")
-    head = pr(r, n, transport=transport, timeout=timeout)
-    old = head["base_ref"]
-    out = {"schema": "gh-identity-pr-retarget/1", "repository": r, "number": n, "from": old, "to": base,
-           "write": bool(write), "url": head["url"], "observed_at": now()}
-    if head["state"] != "open":
-        return {**out, "status": "not_open"}
-    if old == base:
-        return {**out, "status": "already_satisfied"}
-    try:
-        cmp = request("GET", f"repos/{r}/compare/{urllib.parse.quote(base, safe='')}...{urllib.parse.quote(old, safe='')}",
-                      transport=transport, timeout=timeout)
-        out["old_base_unmerged_commits"] = cmp.get("ahead_by")
-    except Error as error:
-        out["old_base_unmerged_commits"] = None
-        out["compare_error"] = error.code
-    risky = out["old_base_unmerged_commits"] != 0
-    if risky:
-        out["warning"] = (f"{old} has {out['old_base_unmerged_commits']} commit(s) not in {base}; they would join the diff"
-                          if out["old_base_unmerged_commits"] else f"could not compare {old} with {base}")
-    if not write:
-        return {**out, "status": "planned"}
-    if risky and not allow_unmerged:
-        return {**out, "status": "refused_unmerged_base"}
-    request("PATCH", f"repos/{r}/pulls/{n}", {"base": base}, transport=transport, timeout=timeout, mutating=True)
-    after = pr(r, n, transport=transport, timeout=timeout)
-    return {**out, "status": "verified" if after["base_ref"] == base else "verification_mismatch"}
-
-
-def render_pr_retarget(o):
-    extra = f" ({o['warning']})" if o.get("warning") else ""
-    return f"{o['status']} {o['repository']}#{o['number']} base {o['from']} -> {o['to']}{extra}"
 
 
 @contextlib.contextmanager
@@ -5244,7 +5199,6 @@ def _main(argv=None):
  x=s.add_parser("fleet-status",help="branch, upstream +ahead/-behind, changes of several clones (local; --fix-tracking plans upstream config, --write applies)");x.add_argument("roots",nargs="+");x.add_argument("--fix-tracking",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-checks",help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-readiness",help="review findings (Must/Blocking/Should), changes requested, open threads and head moves to confirm before merging; exit 0 clear, 1 blocked, 3 attention");x.add_argument("repository");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
- x=s.add_parser("pr-retarget",help="change a PR's base branch (stacked PR -> main); planned unless --write, refused when the old base has commits not in the new one unless --allow-unmerged");x.add_argument("repository");x.add_argument("number",type=int);x.add_argument("--base",default="main");x.add_argument("--write",action="store_true");x.add_argument("--allow-unmerged",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-preview",help="would these open PRs merge together (alone, in sequence, pairwise)? temporary repository, nothing pushed");x.add_argument("repository");x.add_argument("--pr",type=int,action="append",dest="numbers");x.add_argument("--all-open",action="store_true");x.add_argument("--base");x.add_argument("--no-pairs",action="store_true");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--text",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
@@ -5333,7 +5287,6 @@ def _main(argv=None):
     if o["state"]!="pending" or time.monotonic()+ns.interval>deadline:break
     time.sleep(ns.interval)
   elif ns.cmd=="merge-readiness":o=merge_readiness(ns.repository,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
-  elif ns.cmd=="pr-retarget":o=pr_retarget(ns.repository,ns.number,ns.base,write=ns.write,allow_unmerged=ns.allow_unmerged,transport=transport)
   elif ns.cmd=="fleet-pr":o=fleet_pr(ns.roots,ns.title,Path(ns.body_file).read_text(encoding="utf-8"),base=ns.base,draft=ns.draft,write=ns.write,transport=transport)
   elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout,mainline=ns.mainline)
   elif ns.cmd=="sync-provenance":
@@ -5429,7 +5382,6 @@ def _main(argv=None):
  elif ns.cmd=="fleet-checks" and ns.text:print(render_fleet_checks(o))
  elif ns.cmd=="fleet-pr" and ns.text:print(render_fleet_pr(o))
  elif ns.cmd=="merge-readiness" and ns.text:print(render_merge_readiness(o))
- elif ns.cmd=="pr-retarget" and ns.text:print(render_pr_retarget(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
@@ -5438,7 +5390,6 @@ def _main(argv=None):
  if ns.cmd=="fleet-status":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-checks":return 0 if o["state"]=="green" else 3 if o["state"]=="pending" else 1
  if ns.cmd=="merge-readiness":return {"clear":0,"blocked":1}.get(o["verdict"],3)
- if ns.cmd=="pr-retarget":return 0 if o["status"] in ("planned","verified","already_satisfied") else 1
  if ns.cmd=="fleet-pr":return 0 if o["status"] in ("planned","verified") else 1
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
@@ -5474,7 +5425,7 @@ for _name in ("_gh","_url","request","pages","repository","repositories","reposi
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
-              "enrollment_progress","repo_identity","merge_preview","merge_readiness","pr_retarget","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
+              "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check"):
  globals()[_name]=_bounded(globals()[_name])
 # Capture the final bounded function, so injected request replacements are respected.
 _DEFAULT_REQUEST = request

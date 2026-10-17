@@ -1,4 +1,4 @@
-"""merge-readiness and pr-retarget: offline, with pr / review_observations / request patched."""
+"""merge-readiness: offline, with pr / review_observations / request patched."""
 import json
 from unittest.mock import patch
 
@@ -36,15 +36,15 @@ def review(author, state, at, commit=OLD, text="", rid=1):
 
 def api(extra=None):
     def handler(method, path, payload=None, **_):
-        if path == f"repos/o/r/commits/{HEAD}":
-            return {"commit": {"committer": {"date": "2026-10-10T00:00:00Z"}}}
-        if path == f"repos/o/r/compare/{OLD}...{HEAD}":
-            return {"ahead_by": 2, "commits": [{"commit": {"message": "fix A\n\nbody"}}, {"commit": {"message": "fix B"}}]}
         if extra and path in extra:
             value = extra[path]
             if isinstance(value, Exception):
                 raise value
             return value
+        if path == f"repos/o/r/commits/{HEAD}":
+            return {"commit": {"committer": {"date": "2026-10-10T00:00:00Z"}}}
+        if path == f"repos/o/r/compare/{OLD}...{HEAD}":
+            return {"ahead_by": 2, "commits": [{"commit": {"message": "fix A\n\nbody"}}, {"commit": {"message": "fix B"}}]}
         raise AssertionError(path)
     return handler
 
@@ -139,47 +139,12 @@ def test_compare_failure_is_unknown_move():
     assert out["head_moved_after_review"]["messages"] == [] and "review of ccccccc: ?" in g.render_merge_readiness(out)
 
 
-def retarget(over, compare, *, write=False, allow=False, after="main"):
-    calls = []
-
-    def handler(method, path, payload=None, **_):
-        calls.append((method, path, payload))
-        if method == "GET" and "/compare/" in path:
-            if isinstance(compare, Exception):
-                raise compare
-            return compare
-        if method == "PATCH":
-            return {}
-        raise AssertionError(path)
-    heads = [head(**over), head(**{**over, "base_ref": after})]
-    with patch.object(g, "pr", side_effect=heads), patch.object(g, "request", side_effect=handler):
-        return g.pr_retarget("o/r", 7, "main", write=write, allow_unmerged=allow), calls
-
-
-def test_pr_retarget_plans_refuses_and_writes():
-    out, calls = retarget({"base_ref": "feat/parent"}, {"ahead_by": 0})
-    assert out["status"] == "planned" and out["old_base_unmerged_commits"] == 0 and "warning" not in out
-    assert calls == [("GET", "repos/o/r/compare/main...feat%2Fparent", None)]
-    out, calls = retarget({"base_ref": "feat/parent"}, {"ahead_by": 0}, write=True)
-    assert out["status"] == "verified" and calls[-1] == ("PATCH", "repos/o/r/pulls/7", {"base": "main"})
-    assert g.render_pr_retarget(out) == "verified o/r#7 base feat/parent -> main"
-    out, calls = retarget({"base_ref": "feat/parent"}, {"ahead_by": 3}, write=True)
-    assert out["status"] == "refused_unmerged_base" and all(c[0] == "GET" for c in calls)
-    assert "(feat/parent has 3 commit(s) not in main; they would join the diff)" in g.render_pr_retarget(out)
-    out, _ = retarget({"base_ref": "gone"}, g.Error("not_found"), write=True, allow=True, after="gone")
-    assert out["status"] == "verification_mismatch" and out["compare_error"] == "not_found"
-    assert out["warning"] == "could not compare gone with main"
-
-
-def test_pr_retarget_noops_and_validation():
-    out, calls = retarget({}, {"ahead_by": 0})
-    assert out["status"] == "already_satisfied" and calls == []
-    out, _ = retarget({"state": "closed", "base_ref": "x"}, {"ahead_by": 0})
-    assert out["status"] == "not_open"
-    with pytest.raises(ValueError):
-        g.pr_retarget("o/r", 7, " ")
-    with pytest.raises(ValueError):
-        g.pr_retarget("o/r", 0)
+def test_empty_commit_message_in_head_move():
+    obs = observations(reviews=[review("gpt", "COMMENTED", "2026-10-09T00:00:00Z")])
+    compare = {"ahead_by": 1, "commits": [{"commit": {"message": ""}}, {"commit": {}}]}
+    out = readiness(obs, {f"repos/o/r/compare/{OLD}...{HEAD}": compare})
+    assert out["head_moved_after_review"]["messages"] == ["", ""]
+    assert "review of aaaaaaa: ; " in g.render_merge_readiness(out)
 
 
 @pytest.mark.parametrize("text, labels", [
@@ -202,10 +167,3 @@ def test_cli_exit_codes(capsys):
     with patch.object(g, "pr", return_value=head(draft=True)), patch.object(g, "review_observations", return_value=obs), \
          patch.object(g, "request", side_effect=api()):
         assert g.main(["merge-readiness", "o/r", "7"]) == 3
-    capsys.readouterr()
-    with patch.object(g, "pr", return_value=head(base_ref="feat/p")), \
-         patch.object(g, "request", return_value={"ahead_by": 1}):
-        assert g.main(["pr-retarget", "o/r", "7", "--text"]) == 0
-        assert capsys.readouterr().out.startswith("planned o/r#7 base feat/p -> main")
-        assert g.main(["pr-retarget", "o/r", "7", "--write"]) == 1
-        assert json.loads(capsys.readouterr().out)["status"] == "refused_unmerged_base"
