@@ -239,8 +239,7 @@ def test_multiple_locks_merge_distinct_destinations_and_identical_repeats():
         assert found["provenance"]["source"] == name
         assert found["stale"] is True
         assert found["matches_lock"] is True
-    assert rows["extra.py"]["files"][0]["origin"] is False or any(
-        x["origin"] for x in rows["extra.py"]["files"])
+    assert any(x["origin"] and x["repository"] == "me/up" for x in rows["extra.py"]["files"])
 
 
 @pytest.mark.parametrize("failure,expected", [
