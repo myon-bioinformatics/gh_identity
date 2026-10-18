@@ -1479,3 +1479,26 @@ code, or on an unresolved current thread), `attention` 3 (anything listed: confi
 before merging). It reads only. When GraphQL is unavailable (Claude Code sessions),
 review threads come from the session's `pulls/N/ccr/review_threads` REST route;
 anything still unobserved is named in the reasons.
+
+## Trial before acting: merge-trial, git-activity
+
+```bash
+python gh_identity.py merge-trial . origin/main --text                  # would origin/main merge into HEAD here?
+python gh_identity.py git-activity . --object e7ef1e6 --text            # object here? git still running? stale locks?
+```
+
+`merge-trial` is the read-only form of `git merge --no-commit --no-ff REF` followed by
+`status` / `diff --diff-filter=U` / `diff --stat`: `git merge-tree --write-tree`
+computes the merge in the object store, so the work tree, index and refs never
+change and there is nothing to abort. It reports `clean`, `conflict` (with paths),
+`already_merged` or `missing_object` (fetch first), plus per-file +/- counts. Exit 0
+clean, 1 conflict, 3 missing object.
+
+`git-activity` answers whether a clone is busy before retrying a fetch or deleting a
+directory: HEAD, `cat-file -t` for each `--object` (or `missing`), lock files left in
+`.git` with their age, and on Linux the running git processes whose working directory
+is inside the clone, with arguments (credentials in URLs masked) and elapsed seconds.
+Exit 0 idle, 3 busy.
+
+Multi-file commits through the Git Data API are a write, so they live in the parent
+`gh_ops.py` (`commit-files`), not here.

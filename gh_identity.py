@@ -5190,6 +5190,132 @@ def render_merge_readiness(o):
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Local trials and activity: answer "would it merge / is git still busy here?"
+# without touching the work tree, the index or any ref.
+# ---------------------------------------------------------------------------
+def merge_trial(root, ref, *, base="HEAD", timeout=120):
+    """Would ``ref`` merge into ``base`` in this clone? Read-only (no work-tree, index or ref change).
+
+    The safe form of ``git merge --no-commit --no-ff REF; git status; git diff
+    --name-only --diff-filter=U; git diff --stat HEAD``: ``git merge-tree
+    --write-tree`` (Git 2.38+) computes the merge in the object store only.
+    Reports clean/conflict, conflicted paths and the files the merge would change.
+    """
+    for name, value in (("ref", ref), ("base", base)):
+        if not isinstance(value, str) or not value or value.startswith("-") or any(c in value for c in "\0\n"):
+            raise ValueError(f"{name} must be a revision")
+    out = {"schema": "gh-identity-merge-trial/1", "root": os.fspath(root), "base": base, "ref": ref, "write": False}
+    resolved = {}
+    for name, value in (("base", base), ("ref", ref)):
+        raw, _, code = _git_run(root, ["rev-parse", "--verify", "--quiet", value + "^{commit}"], max_bytes=4096,
+                                ok=(0, 1, 128))
+        resolved[name] = _git_decode(raw).strip() if code == 0 else None
+    out.update(base_sha=resolved["base"], ref_sha=resolved["ref"])
+    if not resolved["base"] or not resolved["ref"]:
+        missing = [n for n in ("base", "ref") if not resolved[n]]
+        return {**out, "status": "missing_object", "missing": missing, "ok": False}
+    raw, _, code = _git_run(root, ["merge-base", resolved["base"], resolved["ref"]], max_bytes=4096, ok=(0, 1))
+    out["merge_base"] = _git_decode(raw).strip() or None if code == 0 else None
+    if out["merge_base"] == resolved["ref"]:
+        return {**out, "status": "already_merged", "conflicts": [], "changed": [], "ok": True}
+    raw, _, code = _git_run(root, ["merge-tree", "--write-tree", "--name-only", "--no-messages",
+                                   resolved["base"], resolved["ref"]], ok=(0, 1), timeout=timeout)
+    lines = [l for l in _git_decode(raw).splitlines() if l]
+    tree, conflicts = (lines[0] if lines else None), lines[1:]
+    changed = []
+    if tree:
+        raw, _, _ = _git_run(root, ["diff", "--numstat", "--no-renames", resolved["base"], tree], max_bytes=4_000_000)
+        for line in _git_decode(raw).splitlines():
+            added, removed, path = (line.split("\t", 2) + ["", "", ""])[:3]
+            changed.append({"path": path, "added": None if added == "-" else int(added),
+                            "removed": None if removed == "-" else int(removed)})
+    return {**out, "status": "clean" if code == 0 else "conflict", "tree": tree, "conflicts": conflicts,
+            "changed": changed, "ok": code == 0}
+
+
+def render_merge_trial(o):
+    head = f"{o['status']} {o['ref']}@{(o.get('ref_sha') or '?')[:7]} into {o['base']}@{(o.get('base_sha') or '?')[:7]}"
+    if o["status"] == "missing_object":
+        return head + " (not in this clone: " + ", ".join(o["missing"]) + "; fetch it first)"
+    rows = [head + f": {len(o['changed'])} file(s) change" + (f", {len(o['conflicts'])} conflicted" if o["conflicts"] else "")]
+    rows += [f"  conflict {p}" for p in o["conflicts"]]
+    rows += [f"  {c['path']} +{c['added'] if c['added'] is not None else 'bin'}/-{c['removed'] if c['removed'] is not None else 'bin'}"
+             for c in o["changed"][:40]]
+    if len(o["changed"]) > 40:
+        rows.append(f"  ... {len(o['changed']) - 40} more")
+    return "\n".join(rows)
+
+
+def git_activity(root, objects=(), *, proc_root="/proc", now_seconds=None):
+    """Is this clone busy, and are these objects here? Read-only.
+
+    The checks behind ``git rev-parse HEAD; git cat-file -t SHA; ps ... | rg 'git
+    fetch'``: HEAD, each object's type (or ``missing``), lock files left in
+    ``.git`` (index.lock, shallow.lock, HEAD.lock, packed-refs.lock) and, on Linux,
+    running git processes whose working directory is inside this clone, with
+    their arguments and elapsed seconds (a fetch that is still unpacking vs one
+    that died).
+    """
+    if isinstance(objects, str):
+        raise TypeError("objects must be a sequence")
+    top = _git_decode(_git_run(root, ["rev-parse", "--show-toplevel"], max_bytes=4096)[0]).strip()
+    gitdir = _git_decode(_git_run(root, ["rev-parse", "--absolute-git-dir"], max_bytes=4096)[0]).strip()
+    raw, _, code = _git_run(root, ["rev-parse", "--verify", "--quiet", "HEAD"], max_bytes=4096, ok=(0, 1, 128))
+    out = {"schema": "gh-identity-git-activity/1", "root": top, "head": _git_decode(raw).strip() if code == 0 else None,
+           "objects": [], "locks": [], "processes": None}
+    for obj in objects:
+        if not isinstance(obj, str) or not re.fullmatch(r"[0-9a-fA-F]{4,64}", obj):
+            raise ValueError("objects must be hex object ids")
+        raw, _, code = _git_run(root, ["cat-file", "-t", obj], max_bytes=4096, ok=(0, 1, 128))
+        out["objects"].append({"id": obj, "type": _git_decode(raw).strip() if code == 0 else "missing"})
+    for name in ("index.lock", "shallow.lock", "HEAD.lock", "packed-refs.lock", "config.lock"):
+        path = os.path.join(gitdir, name)
+        if os.path.exists(path):
+            out["locks"].append({"file": name, "age_seconds": int(time.time() - os.path.getmtime(path))})
+    proc = Path(proc_root)
+    if proc.is_dir() and (proc / "stat").is_file():
+        try:
+            boot = next(float(l.split()[1]) for l in (proc / "stat").read_text().splitlines() if l.startswith("btime "))
+            ticks = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+        except (OSError, StopIteration, ValueError):
+            boot = ticks = None
+        rows, real_top = [], os.path.realpath(top)
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                argv = [a.decode("utf-8", "replace") for a in (entry / "cmdline").read_bytes().split(b"\0") if a]
+                cwd = os.path.realpath(os.readlink(entry / "cwd"))
+            except OSError:
+                continue
+            if not argv or os.path.basename(argv[0]) not in ("git", "git-remote-https", "git-remote-http",
+                                                             "git-index-pack", "git-upload-pack") \
+                    or not (cwd == real_top or cwd.startswith(real_top + os.sep)):
+                continue
+            row = {"pid": int(entry.name), "argv": [re.sub(r"//[^/@\s]+@", "//***@", a) for a in argv[:12]]}
+            if boot is not None:
+                try:
+                    start = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[19]) / ticks + boot
+                    row["elapsed_seconds"] = int((now_seconds if now_seconds is not None else time.time()) - start)
+                except (OSError, IndexError, ValueError):
+                    pass
+            rows.append(row)
+        out["processes"] = sorted(rows, key=lambda r: r["pid"])
+    out["busy"] = bool(out["locks"] or out["processes"])
+    return out
+
+
+def render_git_activity(o):
+    rows = [f"{'busy' if o['busy'] else 'idle'} {o['root']} HEAD {(o['head'] or '(none)')[:12]}"]
+    rows += [f"  object {x['id'][:12]} {x['type']}" for x in o["objects"]]
+    rows += [f"  lock {x['file']} ({x['age_seconds']}s old)" for x in o["locks"]]
+    if o["processes"] is None:
+        rows.append("  processes: not observable on this platform")
+    rows += [f"  pid {p['pid']} {p.get('elapsed_seconds', '?')}s: {' '.join(p['argv'])}" for p in o["processes"] or []]
+    return "\n".join(rows)
+
+
 @contextlib.contextmanager
 def request_stub(handler):
     """Temporarily replace GitHub `request` for tests (stdlib ContextVar)."""
@@ -5842,6 +5968,8 @@ def _cli_parser():
  x=s.add_parser("fleet-checks",allow_abbrev=False,help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
  x=s.add_parser("merge-readiness",help="review findings (Must/Blocking/Should), changes requested, open threads and head moves to confirm before merging; exit 0 clear, 1 blocked, 3 attention");x.add_argument("repository");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
+ x=s.add_parser("merge-trial",help="would REF merge into BASE in this clone? merge-tree only: no work-tree, index or ref change; exit 0 clean, 1 conflict, 3 object missing");x.add_argument("root");x.add_argument("ref");x.add_argument("--base",default="HEAD");x.add_argument("--git-timeout",type=float,default=120);x.add_argument("--text",action="store_true")
+ x=s.add_parser("git-activity",help="HEAD, object presence (cat-file -t), stale .git locks and running git processes in this clone; exit 0 idle, 3 busy");x.add_argument("root");x.add_argument("--object",action="append",default=[],dest="objects",metavar="SHA");x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-preview",help="would these open PRs merge together (alone, in sequence, pairwise)? temporary repository, nothing pushed");x.add_argument("repository");x.add_argument("--pr",type=int,action="append",dest="numbers");x.add_argument("--all-open",action="store_true");x.add_argument("--base");x.add_argument("--no-pairs",action="store_true");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--text",action="store_true")
  x=s.add_parser("local-position",help="cwd, Git top level, checkout HEAD, change counts, GitHub remote (local only)");x.add_argument("--root",default=".")
  x=s.add_parser("subtree-sync",help="plan (default) or run git subtree push/pull with provenance; push only to a NEW branch");x.add_argument("--root",default=".");x.add_argument("--prefix",required=True);x.add_argument("--remote",required=True);x.add_argument("--branch",required=True);x.add_argument("--direction",choices=("push","pull"),required=True);x.add_argument("--squash",action="store_true");x.add_argument("--message","-m");x.add_argument("--remote-compare-ref",help="remote branch to compare before push (default: remote HEAD symref)");x.add_argument("--write",action="store_true",help="actually push/pull and verify; without it only the plan is printed");x.add_argument("--git-timeout",type=float,default=600)
@@ -5928,6 +6056,8 @@ def _main(argv=None):
    else:raise ValueError("branch required")
   elif ns.cmd=="git-work":o=git_work(ns.root,ns.source,ns.branch,upstream=ns.upstream,remote=ns.remote,depth=ns.depth,fetch_timeout=ns.fetch_timeout,write=ns.write)
   elif ns.cmd=="local-position":o=local_position(ns.root)
+  elif ns.cmd=="merge-trial":o=merge_trial(ns.root,ns.ref,base=ns.base,timeout=ns.git_timeout)
+  elif ns.cmd=="git-activity":o=git_activity(ns.root,ns.objects)
   elif ns.cmd=="merge-preview":o=merge_preview(ns.repository,ns.numbers,all_open=ns.all_open,base=ns.base,pairs=not ns.no_pairs,transport=transport,timeout=ns.git_timeout,remote_base=ns.remote_base)
   elif ns.cmd=="fleet-status":o=fleet_status(ns.roots,fix_tracking=ns.fix_tracking,write=ns.write)
   elif ns.cmd=="fleet-checks":
@@ -6029,6 +6159,8 @@ def _main(argv=None):
  elif ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.markdown:print(render_vendor_markdown(o))
  elif ns.cmd=="pin-audit" and ns.text:print(render_pin_audit(o))
  elif ns.cmd=="merge-preview" and ns.text:print(render_merge_preview(o))
+ elif ns.cmd=="merge-trial" and ns.text:print(render_merge_trial(o))
+ elif ns.cmd=="git-activity" and ns.text:print(render_git_activity(o))
  elif ns.cmd=="fleet-status" and ns.text:print(render_fleet_status(o))
  elif ns.cmd=="fleet-checks" and ns.text:print(render_fleet_checks(o))
  elif ns.cmd=="fleet-pr" and ns.text:print(render_fleet_pr(o))
@@ -6038,6 +6170,8 @@ def _main(argv=None):
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
  if ns.cmd=="repo-name-files":return 0 if o["complete"] else 1
  if ns.cmd=="pin-audit":return 0 if o["ok"] else 1
+ if ns.cmd=="merge-trial":return 3 if o["status"]=="missing_object" else 0 if o["ok"] else 1
+ if ns.cmd=="git-activity":return 3 if o["busy"] else 0
  if ns.cmd=="merge-preview":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-status":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-checks":return 0 if o["state"]=="green" else 3 if o["state"]=="pending" else 1
