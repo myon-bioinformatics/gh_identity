@@ -1440,6 +1440,32 @@ change), keeps failure/warning annotations and drops runner notices; exit 0 gree
 applies as for other commands. `fleet-pr` reports an open PR instead of opening a
 second one and writes only with `--write`.
 
+## CI of several PRs, no clone needed (pr-checks)
+
+```bash
+python gh_identity.py pr-checks --owner myon-bioinformatics \
+  myon-bioinformatics#109 Aoi#67 flutter_navigation_basic#209 Ironmate#123 \
+  --delay 120 --wait 1200 --interval 30 --text
+```
+
+```text
+## myon-bioinformatics/Aoi #67 green total=20 2 skipped 18 success
+## myon-bioinformatics/Ironmate #123 failed total=12 1 failure 11 success
+completed failure test (3.12)
+```
+
+Resolves each PR's head SHA once, then polls the check-runs of every unsettled PR
+together until all are settled (at least one check, all completed) or `--wait`
+runs out. Check names matching `--ignore` (default `(?i)copilot`; `--ignore ''`
+keeps all) are dropped before judging. One line per PR, then up to `--show`
+(default 5) checks that are not success/skipped/neutral. `--delay` sleeps before
+the first poll so freshly pushed CI can register. Targets: `OWNER/REPO#N`,
+`OWNER/REPO N [N...]`, or `REPO#N` / `REPO N` with `--owner`. Exit 0 all green,
+1 failed or error, 3 still pending. Every request is its own bounded operation
+(global `--timeout` sets the per-request limit; other limit flags exit 2). Read-only.
+This replaces the shell loop of `gh api .../pulls/N --jq .head.sha` plus
+`.../check-runs` with `select(.name|test("copilot|Copilot")|not)`.
+
 ## Will these PRs merge together? (merge-preview)
 
 ```bash

@@ -4887,6 +4887,96 @@ def render_fleet_checks(o):
     return "\n".join(out)
 
 
+PR_CHECKS_IGNORE = r"(?i)copilot"
+_PR_CHECKS_OK = ("success", "skipped", "neutral")
+
+
+def parse_pr_check_targets(tokens, owner=None):
+    """OWNER/REPO#N, OWNER/REPO N..., or with owner also REPO#N and REPO N."""
+    if owner is not None:
+        owner = repo(f"{owner}/x").split("/")[0]
+        tokens = [t if re.fullmatch(r"[0-9]+", t) or "/" in t.partition("#")[0] else f"{owner}/{t}" for t in tokens]
+    return parse_status_targets(tokens)
+
+
+def _pr_checks_row(r, n, sha, pattern, show, transport, timeout):
+    observed = checks_for_sha(r, sha, transport=transport, timeout=timeout)
+    kept = [c for c in observed["checks"] if not pattern.search(c["name"] or "")]
+    by = dict(sorted(Counter(c["conclusion"] or "-" for c in kept).items()))
+    attention = [c for c in kept if c["status"] != "completed" or c["conclusion"] not in _PR_CHECKS_OK]
+    if not kept or any(c["status"] != "completed" for c in kept):
+        state = "pending"
+    elif attention or not any(c["conclusion"] == "success" for c in kept):
+        state = "failed"
+    else:
+        state = "green"
+    return {"repository": r, "number": n, "head_sha": sha, "state": state, "total": len(kept), "by_conclusion": by,
+            "ignored": len(observed["checks"]) - len(kept),
+            "attention": [{"status": c["status"], "conclusion": c["conclusion"], "name": c["name"]} for c in attention[:show]]}
+
+
+def pr_checks(tokens, *, owner=None, ignore=PR_CHECKS_IGNORE, wait=0, interval=30, delay=0, show=5,
+              transport="auto", timeout=30, sleep=None, clock=None):
+    """Check-runs on each PR's head, polled together until every PR is settled or wait runs out.
+
+    A PR is settled when it has at least one kept check and all kept checks are
+    completed. Head SHAs are resolved once. Each request is its own bounded
+    operation, so waiting may exceed one request's timeout. Read-only.
+    """
+    targets = parse_pr_check_targets(tokens, owner)
+    for name, value, low, high in (("wait", wait, 0, 3600), ("interval", interval, 5, 600), ("delay", delay, 0, 1800)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ValueError(f"{name} must be {low}-{high} seconds")
+    if type(show) is not int or not 0 <= show <= 100:
+        raise ValueError("show must be 0-100")
+    if _BUDGET.get() is not None:
+        raise ValueError("pr_checks runs its own bounded requests; call it outside operation()")
+    pattern = re.compile(ignore) if ignore else re.compile(r"(?!)")
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    if delay:
+        sleep(delay)
+    start = clock()
+    rows, shas = [], {}
+    for r, n in targets:
+        try:
+            shas[(r, n)] = pr(r, n, transport=transport, timeout=timeout)["head_sha"]
+            rows.append({"repository": r, "number": n, "head_sha": shas[(r, n)], "state": "pending"})
+        except (ValueError, Error) as error:
+            rows.append({"repository": r, "number": n, "state": "error", "error": str(getattr(error, "code", "")) or str(error)})
+    polls = 0
+    while True:
+        polls += 1
+        for i, row in enumerate(rows):
+            if row["state"] != "pending":
+                continue
+            try:
+                rows[i] = _pr_checks_row(row["repository"], row["number"], row["head_sha"], pattern, show, transport, timeout)
+            except (ValueError, Error) as error:
+                rows[i] = {**row, "state": "error", "error": str(getattr(error, "code", "")) or str(error)}
+        elapsed = clock() - start
+        if not any(r["state"] == "pending" for r in rows) or elapsed + interval > wait:
+            break
+        sleep(interval)
+    states = {r["state"] for r in rows}
+    state = "error" if "error" in states else "failed" if "failed" in states else "pending" if "pending" in states else "green"
+    return {"schema": "gh-identity-pr-checks/1", "state": state, "rows": rows, "polls": polls,
+            "elapsed_seconds": round(clock() - start, 1), "observed_at": now()}
+
+
+def render_pr_checks(o):
+    out = []
+    for r in o["rows"]:
+        name = f"{r['repository']} #{r['number']}"
+        if r["state"] == "error":
+            out.append(f"## {name} error {r['error']}")
+            continue
+        counts = " ".join(f"{v} {k}" for k, v in r["by_conclusion"].items())
+        out.append(f"## {name} {r['state']} total={r['total']} {counts}".rstrip())
+        out += [f"{c['status']} {c['conclusion'] or '-'} {c['name']}" for c in r["attention"]]
+    return "\n".join(out)
+
+
 def fleet_pr(roots, title, body, *, base="main", draft=False, write=False, transport="auto", timeout=30):
     """Open a PR for each clone's current branch (planned unless write=True); an open PR is reported, not duplicated."""
     if not isinstance(title, str) or not title.strip() or not isinstance(body, str):
@@ -5966,6 +6056,7 @@ def _cli_parser():
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("fleet-status",help="branch, upstream +ahead/-behind, changes of several clones (local; --fix-tracking plans upstream config, --write applies)");x.add_argument("roots",nargs="+");x.add_argument("--fix-tracking",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-checks",allow_abbrev=False,help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
+ x=s.add_parser("pr-checks",help="check-runs on each PR head (OWNER/REPO#N, or REPO#N with --owner); --wait polls all together until settled; exit 0 green, 1 failed/error, 3 pending (read-only)");x.add_argument("targets",nargs="+",metavar="OWNER/REPO#N|OWNER/REPO|N");x.add_argument("--owner");x.add_argument("--ignore",default=PR_CHECKS_IGNORE,metavar="REGEX",help="drop check names matching REGEX (default (?i)copilot; empty keeps all)");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--delay",type=float,default=0,help="sleep before the first poll (CI start-up)");x.add_argument("--show",type=int,default=5,help="attention lines per PR");x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
  x=s.add_parser("merge-readiness",help="review findings (Must/Blocking/Should), changes requested, open threads and head moves to confirm before merging; exit 0 clear, 1 blocked, 3 attention");x.add_argument("repository");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-trial",help="would REF merge into BASE in this clone? merge-tree only: no work-tree, index or ref change; exit 0 clean, 1 conflict, 3 object missing");x.add_argument("root");x.add_argument("ref");x.add_argument("--base",default="HEAD");x.add_argument("--git-timeout",type=float,default=120);x.add_argument("--text",action="store_true")
@@ -6066,6 +6157,7 @@ def _main(argv=None):
     o=fleet_checks(ns.roots,ignore=ignore,steps=ns.steps,transport=transport,timeout=ns.poll_timeout)
     if o["state"]!="pending" or time.monotonic()+ns.interval>deadline:break
     time.sleep(ns.interval)
+  elif ns.cmd=="pr-checks":o=pr_checks(ns.targets,owner=ns.owner,ignore=ns.ignore,wait=ns.wait,interval=ns.interval,delay=ns.delay,show=ns.show,transport=transport,timeout=ns.poll_timeout)
   elif ns.cmd=="merge-readiness":o=merge_readiness(ns.repository,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="fleet-pr":o=fleet_pr(ns.roots,ns.title,Path(ns.body_file).read_text(encoding="utf-8"),base=ns.base,draft=ns.draft,write=ns.write,transport=transport)
   elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout,mainline=ns.mainline)
@@ -6164,6 +6256,7 @@ def _main(argv=None):
  elif ns.cmd=="fleet-status" and ns.text:print(render_fleet_status(o))
  elif ns.cmd=="fleet-checks" and ns.text:print(render_fleet_checks(o))
  elif ns.cmd=="fleet-pr" and ns.text:print(render_fleet_pr(o))
+ elif ns.cmd=="pr-checks" and ns.text:print(render_pr_checks(o))
  elif ns.cmd=="merge-readiness" and ns.text:print(render_merge_readiness(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
@@ -6176,6 +6269,7 @@ def _main(argv=None):
  if ns.cmd=="fleet-status":return 0 if o["ok"] else 1
  if ns.cmd=="fleet-checks":return 0 if o["state"]=="green" else 3 if o["state"]=="pending" else 1
  if ns.cmd=="merge-readiness":return {"clear":0,"blocked":1}.get(o["verdict"],3)
+ if ns.cmd=="pr-checks":return 0 if o["state"]=="green" else 3 if o["state"]=="pending" else 1
  if ns.cmd=="fleet-pr":return 0 if o["status"] in ("planned","verified") else 1
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
@@ -6208,6 +6302,10 @@ def main(argv=None):
   # wait-checks spans many bounded polls; --timeout then bounds each poll.
   if args[:1]==["wait-checks"]:
    if set(limits)-{"timeout"}:raise ValueError("wait-checks accepts --timeout only (per poll)")
+   return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
+  # pr-checks makes many requests (and may wait): each one is bounded on its own.
+  if args[:1]==["pr-checks"]:
+   if set(limits)-{"timeout"}:raise ValueError("pr-checks accepts --timeout only (per request)")
    return _main(args+(["--poll-timeout",str(limits["timeout"])] if "timeout" in limits else []))
   # fleet-checks --wait polls for minutes: each poll gets its own budget, not one shared 30 s scope.
   wait=_fleet_checks_wait_value(args)
