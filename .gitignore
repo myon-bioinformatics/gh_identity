@@ -6,3 +6,12 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+
+# --- common ignores (shared) ---
+.mypy_cache/
+.ruff_cache/
+venv/
+node_modules/
+.DS_Store
+Thumbs.db
+# --- end common ignores ---
