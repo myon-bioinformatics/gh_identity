@@ -1373,7 +1373,7 @@ this read-only slice (the unfinished contract is preserved in Issue #2).
 
 Fixtures in `tests/fixtures/review_observations` are synthetic offline contracts,
 not live captures or validation of particular gh versions. The existing CI tests
-these cases with pytest/JUnit on Python 3.10–3.14 and latest stable (`3.x`).
+these cases with pytest/JUnit on Python 3.11–3.14 and latest stable (`3.x`).
 
 
 ## Read one comment body with short arguments
@@ -1528,3 +1528,22 @@ Exit 0 idle, 3 busy.
 
 Multi-file commits through the Git Data API are a write, so they live in the parent
 `gh_ops.py` (`commit-files`), not here.
+
+## Runtime and development Python policy
+
+The standard-library runtime supports Python 3.10+; this change preserves the
+existing runtime floor. The separate `runtime-compatibility` CI lane executes
+behavior tests with `python -S`, without installing pytest or any third-party
+package. Development/test environments use Python 3.11+ and a committed uv lock:
+
+```sh
+uv sync --locked --python 3.11
+uv run --locked python -m pytest
+python -S -m unittest discover -s tests -p test_gh_identity.py -v
+```
+
+`pyproject.toml` is the canonical development dependency definition; legacy
+requirements files remain for downstream callers. Runtime metadata does not
+raise the source/vendoring floor to the development floor. CI pins setup-python
+v7.0.0 and setup-uv v10.3.0 by full commit SHA, and uses uv 0.13.1. Setup actions
+using Node 24 require runner 2.327.1 or newer (GitHub-hosted runners are used).
