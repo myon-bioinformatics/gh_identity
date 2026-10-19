@@ -1001,6 +1001,34 @@ def set_variable(r,name,value,write=False,transport="auto",timeout=30):
  out["status"]="verified" if out["verified"] else "verification_mismatch"
  return out
 
+def delete_variable(r,name,write=False,transport="auto",timeout=30):
+ r=repo(r);out={"schema":"gh-identity-variable-delete/1","repository":r,"name":name,"status":"planned","mutation_status":"not_attempted","verification_status":"not_attempted"}
+ try:
+  variable(r,name,transport=transport,timeout=timeout)
+ except Error as e:
+  if e.code=="not_found_or_inaccessible":
+   out.update(status="already_satisfied",before=None)
+   return out
+  raise
+ out["before"]=name
+ if not write:return out
+ try:
+  request("DELETE",f"repos/{r}/actions/variables/{urllib.parse.quote(name,safe='')}",None,transport,timeout,True)
+ except Error as e:
+  out.update(status="mutation_uncertain" if e.uncertain else "mutation_failed",mutation_status="uncertain" if e.uncertain else "failed",error=e.code)
+  return out
+ out["mutation_status"]="succeeded"
+ try:
+  variable(r,name,transport=transport,timeout=timeout)
+ except Error as e:
+  if e.code=="not_found_or_inaccessible":
+   out.update(status="verified",verification_status="verified",verified=True)
+   return out
+  out.update(status="verification_failed",verification_status="failed",verification_error=e.code)
+  return out
+ out.update(status="verification_mismatch",verification_status="mismatch",verified=False)
+ return out
+
 def _label_names(values,name):
  out=[]
  for v in values or ():
@@ -6117,6 +6145,7 @@ def _cli_parser():
  x=s.add_parser("step-url");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("step_number",type=int);x.add_argument("--line",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
+ x=s.add_parser("variable-delete");x.add_argument("repo");x.add_argument("name");x.add_argument("--write",action="store_true")
  x=s.add_parser("labels",help="add/remove existing labels on one Issue/PR (planned unless --write)");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--add",action="append",default=[],metavar="LABEL");x.add_argument("--remove",action="append",default=[],metavar="LABEL");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
  _CLI_PARSER=a;return a
@@ -6233,6 +6262,7 @@ def _main(argv=None):
   elif ns.cmd=="step-url":o={"schema":"gh-identity-step-url/1","url":step_url(ns.repo,ns.run_id,ns.job_id,ns.step_number,ns.line)}
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
+  elif ns.cmd=="variable-delete":o=delete_variable(ns.repo,ns.name,ns.write,transport)
   elif ns.cmd=="labels":o=set_labels(ns.repo,ns.number,ns.add,ns.remove,ns.write,transport)
   else:
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
@@ -6279,7 +6309,7 @@ def _main(argv=None):
  if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
  if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
- if ns.cmd in ("comment","variable-set","git-switch","git-work","labels"):
+ if ns.cmd in ("comment","variable-set","variable-delete","git-switch","git-work","labels"):
   return 0 if o.get("status") in ("planned","already_exists","already_satisfied","verified") else 1
  return 0
 def _fleet_checks_wait_value(argv):
@@ -6319,7 +6349,7 @@ def main(argv=None):
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews","inline_comments","review_threads","review_observations",
-              "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
+              "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","delete_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
                "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):
