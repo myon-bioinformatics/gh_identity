@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Search and hash</title>
+  <desc id="desc">White magnifying glass with cat-inspired ears and a central hash on a dark rounded square.</desc>
+<rect width="512" height="512" rx="84" fill="#0d1117"/><g fill="#ffffff">
+  <path d="M127 146 Q118 104 132 78 Q168 81 192 111Z"/>
+  <path d="M299 108 Q327 81 361 78 Q375 105 365 146Z"/>
+  <path d="M337 314 L431 407 Q450 430 428 450 Q410 465 390 446 L302 355Z"/>
+</g>
+<circle cx="244" cy="246" r="142" fill="none" stroke="#ffffff" stroke-width="32"/>
+<g fill="none" stroke="#ffffff" stroke-width="24" stroke-linecap="square">
+  <path d="M222 178 L198 310 M286 178 L262 310 M178 220 H314 M168 270 H304"/>
+</g>
+</svg>

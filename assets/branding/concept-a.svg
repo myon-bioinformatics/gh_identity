@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Fingerprint and Git commit graph</title>
+  <desc id="desc">White fingerprint ridges connect to commit graph nodes on a dark rounded square.</desc>
+<rect width="512" height="512" rx="84" fill="#0d1117"/><g fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M112 150 C155 95 220 67 290 84 L324 84 L400 158 L406 238 L438 272 L378 342 L362 238"/>
+  <path d="M92 238 C132 142 225 102 295 130"/>
+  <path d="M91 310 C116 273 129 218 169 182 C224 135 299 151 333 202 L362 238"/>
+  <path d="M96 350 C153 319 146 247 197 211 C252 173 314 200 324 260 C334 303 329 346 320 374 L336 438"/>
+  <path d="M111 389 C179 352 178 293 201 264 C227 228 277 229 288 273 C299 316 278 381 246 419"/>
+  <path d="M146 414 C211 373 208 321 228 291 C238 277 252 280 252 299 C252 350 219 408 182 440"/>
+  <path d="M210 454 C245 431 279 395 292 361"/>
+</g>
+<g fill="#ffffff"><circle cx="324" cy="84" r="18"/><circle cx="400" cy="158" r="18"/><circle cx="438" cy="272" r="18"/><circle cx="378" cy="342" r="18"/><circle cx="362" cy="238" r="18"/><circle cx="320" cy="374" r="18"/><circle cx="336" cy="438" r="15"/></g>
+</svg>

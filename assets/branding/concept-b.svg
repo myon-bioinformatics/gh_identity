@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">#GHI identity card</title>
+  <desc id="desc">White identity card with a cat-inspired avatar, bold #GHI and three information lines.</desc>
+<rect width="512" height="512" rx="84" fill="#0d1117"/><rect x="60" y="100" width="392" height="312" rx="32" fill="#ffffff"/>
+<rect x="84" y="126" width="128" height="128" rx="18" fill="#0d1117"/>
+<path d="M108 170 L107 143 Q126 146 133 155 Q149 150 163 155 Q174 145 189 143 L188 170 Q199 205 164 217 L164 243 L132 243 L132 226 Q105 230 103 207 Q113 213 132 214 Q98 204 108 170Z" fill="#ffffff"/>
+<g stroke="#0d1117" stroke-width="16" stroke-linecap="round"><path d="M96 288 H416"/><path d="M96 330 H360"/><path d="M96 372 H292"/></g><g fill="#0d1117" transform="translate(230 228) scale(0.0322265625 -0.0322265625)"><path transform="translate(0 0)" d="M911 1470 815 1085H1079L1176 1470H1397L1300 1085H1577V872H1247L1178 598H1462V383H1126L1030 0H809L905 383H641L545 0H322L418 383H139V598H467L537 872H254V1085H592L688 1470ZM1024 872H760L690 598H954Z"/><path transform="translate(1716 0)" d="M1530 111Q1386 41 1231.0 6.0Q1076 -29 911 -29Q538 -29 320.0 179.5Q102 388 102 745Q102 1106 324.0 1313.0Q546 1520 932 1520Q1081 1520 1217.5 1492.0Q1354 1464 1475 1409V1100Q1350 1171 1226.5 1206.0Q1103 1241 979 1241Q749 1241 624.5 1112.5Q500 984 500 745Q500 508 620.0 379.0Q740 250 961 250Q1021 250 1072.5 257.5Q1124 265 1165 281V571H930V829H1530Z"/><path transform="translate(3397 0)" d="M188 1493H573V924H1141V1493H1526V0H1141V633H573V0H188Z"/><path transform="translate(5111 0)" d="M188 1493H573V0H188Z"/></g>
+</svg>

@@ -1,4 +1,6 @@
-# gh_identity
+# <img src="assets/branding/concept-c.svg" width="40" height="40" alt="GHI search icon"> gh_identity (GHI)
+
+![GHI fingerprint and commit graph README hero](assets/branding/readme-hero.svg)
 
 Single-file, stdlib-only Python interface for portable GitHub identity and operations.
 
@@ -9,6 +11,17 @@ Single-file, stdlib-only Python interface for portable GitHub identity and opera
 - Bounded, digest-first output for long GitHub threads
 - Guarded writes with dry-run/verification and mutation-uncertainty handling
 - Designed to absorb the proven GitHub-operation patterns currently spread across browser-test-kit, Ironmate, Flutter, mcp-toolcall-lab and Aoi
+
+## Architecture and visual identity
+
+GHI gives callers one explicit identity and operations interface. It prefers
+authenticated `gh`, with a stdlib `urllib` fallback for supported REST operations.
+
+![GHI architecture: callers use the GHI identity interface, which selects gh or urllib to reach GitHub](assets/branding/architecture.svg)
+
+The three concepts are used provisionally by purpose: **A** for the README hero,
+**B** for architecture and identity cards, and **C** for compact icons. See the
+[comparison board, reusable assets and actual-size favicon previews](docs/branding.md).
 
 ## No-argument workspace overview
 
