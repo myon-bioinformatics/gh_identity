@@ -3,17 +3,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      parent_ref:
-        description: "Parent ref for the shared vendor tool. Empty resolves latest main."
-        required: false
-        default: ""
-        type: string
 jobs:
   changes:
     permissions:
       contents: read
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-change-detection.yml@main
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-change-detection.yml@2192ff22acafdd09e80ac722df91ee937aaedd5e
 
   vendor-locked:
     if: needs.changes.outputs.product_changed == 'true'
@@ -28,56 +22,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # Parent vendor-consumers-compat.yml checks out 1eda992aa6fa31a902e2c06428e53ab17e8fe3c1
-      # as a historical tool and registry fixture (.compat/parent-old). This job fetches
-      # the live vendor tool, so it resolves parent main at runtime instead of that fixture.
-      - name: Resolve parent main and fetch shared vendor tool
-        env:
-          PARENT_REF_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.parent_ref || '' }}
-        run: |
-          set -euo pipefail
-          remote="https://github.com/myon-bioinformatics/myon-bioinformatics.git"
-          override="${PARENT_REF_OVERRIDE:-}"
-          if [[ -n "$override" ]]; then
-            if [[ ! "$override" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-              echo "Rejected parent ref override" >&2
-              exit 1
-            fi
-            requested="$override"
-            source_label="workflow_dispatch override"
-          else
-            requested="main"
-            source_label="refs/heads/main"
-          fi
-          if [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            sha="$(printf '%s' "$requested" | tr '[:upper:]' '[:lower:]')"
-          else
-            sha="$(git ls-remote "$remote" "refs/heads/${requested}" | awk 'NR==1 { print $1 }')"
-            if [[ -z "$sha" ]]; then
-              sha="$(git ls-remote "$remote" "refs/tags/${requested}^{}" | awk 'NR==1 { print $1 }')"
-            fi
-          fi
-          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Could not resolve parent ref to a commit SHA" >&2
-            exit 1
-          fi
-          rm -rf .vendor-sync-tools
-          git init -q .vendor-sync-tools
-          git -C .vendor-sync-tools remote add origin "$remote"
-          git -C .vendor-sync-tools fetch --depth 1 origin "$sha"
-          git -C .vendor-sync-tools checkout -q --detach FETCH_HEAD
-          actual="$(git -C .vendor-sync-tools rev-parse HEAD)"
-          if [[ "$actual" != "$sha" ]]; then
-            echo "Fetched parent commit does not match the resolved SHA" >&2
-            exit 1
-          fi
-          test -f .vendor-sync-tools/vendor_sync.py
-          {
-            echo "### Shared vendor tool"
-            echo ""
-            echo "- Resolved parent SHA: ${sha}"
-            echo "- Source: ${source_label}"
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fetch pinned shared vendor tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: myon-bioinformatics/myon-bioinformatics
+          ref: 2192ff22acafdd09e80ac722df91ee937aaedd5e
+          path: .vendor-sync-tools
+          persist-credentials: false
       - name: Verify and recreate locked vendor snapshot
         shell: bash
         run: |
@@ -142,7 +93,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-junit-identity.yml@main
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-junit-identity.yml@2192ff22acafdd09e80ac722df91ee937aaedd5e
     with:
       expected-reports: '["junit-py3.11/junit.xml","junit-py3.12/junit.xml","junit-py3.13/junit.xml","junit-py3.14/junit.xml","junit-py3.x/junit.xml"]'
       artifact-pattern: junit-*
@@ -154,4 +105,4 @@ jobs:
     if: needs.changes.outputs.workflow_changed == 'true'
     permissions:
       contents: read
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-actionlint.yml@main
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-actionlint.yml@2192ff22acafdd09e80ac722df91ee937aaedd5e
