@@ -23,6 +23,18 @@ The three concepts are used provisionally by purpose: **A** for the README hero,
 **B** for architecture and identity cards, and **C** for compact icons. See the
 [comparison board, reusable assets and actual-size favicon previews](docs/branding.md).
 
+## Read-only workflow concept
+
+![gh_identity concept: inspect GitHub and local checkout state, assess merge readiness, and return bounded JSON with unavailable fields kept as null](docs/images/concept-overview.png)
+
+The supplied diagram focuses on the read-only inspection workflow. Its `gh`-wrapper description is not the full current scope: GHI also has a stdlib `urllib` fallback for supported REST operations and explicitly requested, guarded writes. A readiness report is an observation, not a merge action. See the architecture and command documentation for current behavior.
+
+### Challenges, responsibilities and intended outcomes
+
+![gh_identity complementary concept: observe GitHub state, inspect merge readiness and guard writes to produce bounded JSON for CI or review](docs/images/concept-overview-v2.png)
+
+This additional supplied panel organizes the read-only workflow by challenges, responsibilities and intended outcomes. The `gh`-focused illustration complements rather than replaces the broader interface described above: the `urllib` fallback and explicit guarded-write commands remain available. Merge-readiness is still an observation, not a merge action.
+
 ## No-argument workspace overview
 
 Run `python gh_identity.py` (or `python gh_identity.py overview`) to print a best-effort, read-only JSON summary. It includes Python/Git/gh versions, local checkout summary (HEAD/branch, working-tree change counts, GitHub repository identity), and bounded samples of recent PRs, open issues and workflow runs when a GitHub origin can be identified. Missing or inaccessible sections are `null`, not zero. Suggested commands are static examples, not automated actions. Local paths (`cwd`, Git top level, relative directory), raw remote URLs, commit subjects and local error details are omitted. Use the explicit `local-position` command when local placement details are needed. No operating-system metadata is collected. No repository or authentication is required to obtain the local portion.
@@ -33,7 +45,7 @@ The `capabilities` command includes `git_version` and `gh_version` by default, i
 
 ## Python compatibility
 
-Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. CI checks 3.10–3.14 and `3.x` (the latest stable Python 3 available to setup-python), with `check-latest` enabled. The moving job follows new stable releases without adding a hard-coded upper bound. Passing CI verifies the tested versions; it does not guarantee untested future releases.
+Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. The runtime CI lane checks 3.10–3.14 and `3.x`, and the pytest lane checks 3.11–3.14 and `3.x` (the latest stable Python 3 available to setup-python; that lane enables `check-latest`). The moving job follows new stable releases without adding a hard-coded upper bound. Passing CI verifies the tested versions; it does not guarantee untested future releases.
 
 ## Quick start
 
@@ -87,7 +99,7 @@ not successful empty content. `pr()` retains its compact state/head/base API.
 ### Git history versus GitHub discussion data
 
 Git stores commit messages, trees and blobs, so local show/log/diff/blame can
-reuse the established git_inspector APIs being consolidated in PR #23.
+reuse the established git_inspector APIs consolidated in merged PR #23.
 PR/Issue descriptions and discussions are GitHub records, read via gh/API;
 cloning does not obtain those descriptions. `clone --depth 1` truncates history:
 older blame and comparisons need the relevant objects/history fetched first.
@@ -97,8 +109,8 @@ complete. This content API introduces no subprocess Git or HTML parser.
 Code patches, PR changed-file pagination, remote comparisons and review/comment
 bodies are separate from descriptions and are not returned here. A REST commit
 response's optional files/patch data is deliberately not presented as a complete
-diff. These broader read contracts remain tracked in #20; local Git inspection
-continues in #23. See [GitHub Issues REST](https://docs.github.com/en/rest/issues/issues#get-an-issue),
+diff. These broader read contracts remain unfinished and were tracked in Issue
+#20, which is now closed; local Git inspection landed in merged PR #23. See [GitHub Issues REST](https://docs.github.com/en/rest/issues/issues#get-an-issue),
 [GitHub Commits REST](https://docs.github.com/en/rest/commits/commits#get-a-commit),
 and [Git shallow-clone behavior](https://git-scm.com/docs/git-clone).
 
@@ -121,7 +133,7 @@ It resolves the ref once, then reads tree metadata at that commit and the
 returned subtree SHAs. The output includes commit/tree SHA, full relative paths,
 kind, Git mode and object SHA. It never fetches file bodies, follows symlinks or
 submodules, or invokes clone, diff or blame. No local `.git` is required.
-This feature is independent of the local history inspection work in PR #23.
+This feature is independent of the local history inspection work in merged PR #23.
 
 Depth 1 means root entries, depth 2 adds their direct children. Directory rows
 include `expanded` to distinguish visited directories from depth boundaries.
@@ -287,8 +299,7 @@ The API/CLI does not automatically write raw logs, signed URLs or secret hashes
 to files or JUnit evidence. Offline regressions use synthetic log fixtures;
 routine JUnit results contain test outcomes and compact identity. Live GitHub
 verification is an explicit separate operation. This addition implements only
-Issue #20's job-log slice; its other API and contract-validation work remains
-unfinished.
+Issue #20's job-log slice (Issue #20 is now closed; this section covers only the job-log part).
 
 ## Issue / PR labels (`labels`)
 
@@ -321,7 +332,7 @@ handled by the CLI return 2. Always inspect the receipt: a nonzero exit does
 not mean a write did not happen, and must not trigger a blind retry.
 
 This covers existing comment and variable-set operations only. Variable deletion,
-workflow dispatch and guarded PR merge remain separate unfinished work in Issue #2.
+workflow dispatch and guarded PR merge remain separate unfinished work; they were tracked in Issue #2, which is now closed.
 
 ## Read observation validation
 
@@ -656,7 +667,7 @@ chat transcript extraction nor whole-site support.
 Browser launch/DOM acquisition now belongs to browser-test-kit PR #54:
 https://github.com/myon-bioinformatics/browser-test-kit/pull/54
 
-From that checkout:
+From a browser-test-kit checkout:
 
 ```sh
 python examples/capture_browser_dom.py https://chatgpt.com/ --selector h1 --output chatgpt-dom.json
@@ -952,7 +963,9 @@ overall `ok`. Imports are parsed with `ast`, never executed.
 
 ## Vendored files (`vendor-lock-check`, `vendor-lock-verify-remote`, `vendor-plan`, `vendor-matrix`)
 
-All read-only; nothing is placed, updated or committed.
+All read-only; nothing is placed, updated or committed. `vendor-rules.json`,
+`parent-pr.ref.json` and the other parent-repository files named below are
+parent inputs, read from the parent checkout or API; they are not stored in this repository.
 
 ```bash
 python gh_identity.py vendor-lock-check [--root .] [--lock vendor.lock.json] [--rules vendor-rules.json]
@@ -1382,7 +1395,7 @@ This is an observation diff, not a new patch-fetch API. Calls do not promise a
 transactional snapshot of a concurrently changing PR; inline commit identities
 remain separate from thread node IDs. None of the other Issue #20 checkboxes is
 completed by this feature. Guarded workflow dispatch/other writes remain outside
-this read-only slice (the unfinished contract is preserved in Issue #2).
+this read-only slice (those writes were tracked in Issue #2, which is now closed).
 
 Fixtures in `tests/fixtures/review_observations` are synthetic offline contracts,
 not live captures or validation of particular gh versions. The existing CI tests
@@ -1555,8 +1568,45 @@ uv run --locked python -m pytest
 python -S -m unittest discover -s tests -p test_gh_identity.py -v
 ```
 
-`pyproject.toml` is the canonical development dependency definition; legacy
-requirements files remain for downstream callers. Runtime metadata does not
+`pyproject.toml` is the canonical development dependency definition. The runtime
+has no third-party dependencies, and `tests/requirements.txt` lists only the
+test-only tools. Runtime metadata does not
 raise the source/vendoring floor to the development floor. CI uses setup-python
 v7 and setup-uv v10.3.0, and uses uv 0.13.3. Setup actions
 using Node 24 require runner 2.327.1 or newer (GitHub-hosted runners are used).
+
+## Edit PR metadata and supply comment files
+
+```sh
+python -S gh_identity.py pr-edit OWNER/REPO 149 --title "Consolidated change" --append-body-file scope.md
+python -S gh_identity.py pr-edit OWNER/REPO 149 --title "Consolidated change" --append-body-file scope.md --write
+python -S gh_identity.py comment OWNER/REPO 150 --body-file note.md --operation-key consolidate-149-150 --write
+python -S gh_identity.py pr-edit OWNER/REPO 150 --state closed --write
+```
+
+`pr_edit(r, n, *, title=None, base=None, state=None, body=None,
+append_body=None, write=False, transport="auto", timeout=30)` uses the existing
+bounded gh-first/urllib transport. `--body-file` replaces the body exactly;
+`--append-body-file` keeps existing text and appends an exact block once. That
+block is already present only when it is the whole body or a section bounded by
+the start, the end, or a blank line; a shorter overlap is still appended. They
+are mutually exclusive; UTF-8, internal CRLF and replacement trailing newlines
+are preserved. An empty replacement body clears the body; an empty append is
+invalid. Existing title/base/state fields are only sent when requested.
+
+No write occurs without `--write`, and an already-satisfied edit returns
+`already_satisfied` without a PATCH. An append re-reads the snapshot before PATCH
+and returns `stale` on observed changes. GitHub does not provide an atomic
+compare-and-swap here, so concurrent edits can still race after that last read.
+A successful PATCH is followed by exact field verification; receipts separate
+mutation failure/uncertainty from successful mutation with failed or mismatched
+readback. CLI exit is 0 for planned/already-satisfied/verified, 1 for returned
+failure/uncertainty/stale receipts, and 2 for invalid input or a raised read error.
+
+`comment --body-file` reuses existing mention handling, operation-key deduplication
+and post/readback verification. The positional body remains supported; supply
+exactly one of positional body and `--body-file`. File inputs need not be escaped
+as JSON or shell strings. The parent-owned `gh_ops.py fleet-apply` coordinates
+several repositories, grouped file commits, existing-PR reuse, explicit source
+merges and verified source closures. Standalone pushes remain in parent
+`gh_ops.py git-push`; no consumer vendor pins are changed by these primitives.
