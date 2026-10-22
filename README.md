@@ -320,7 +320,7 @@ handled by the CLI return 2. Always inspect the receipt: a nonzero exit does
 not mean a write did not happen, and must not trigger a blind retry.
 
 This covers existing comment and variable-set operations only. Variable deletion,
-workflow dispatch and guarded PR merge remain separate unfinished work in Issue #2.
+workflow dispatch and guarded PR merge remain separate unfinished work; they were tracked in Issue #2, which is now closed.
 
 ## Read observation validation
 
