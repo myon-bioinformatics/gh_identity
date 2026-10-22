@@ -216,7 +216,8 @@ def test_push_revalidates_after_planning_and_never_writes_on_mismatch(world, mon
 @needs_subtree
 @pytest.mark.parametrize("command", ["split", "status", "preflight"])
 @pytest.mark.parametrize("fetch_head_exists", [False, True])
-def test_fallback_preserves_checkout_metadata(mono, tmp_path, monkeypatch, command, fetch_head_exists):
+@pytest.mark.parametrize("root_form", ["absolute", "relative", "current"])
+def test_fallback_preserves_checkout_metadata(mono, tmp_path, monkeypatch, command, fetch_head_exists, root_form):
     root, stale_sha = mono
     other = tmp_path / "other"
     other.mkdir()
@@ -239,13 +240,22 @@ def test_fallback_preserves_checkout_metadata(mono, tmp_path, monkeypatch, comma
         return real(run_root, args, **kwargs)
 
     monkeypatch.setattr(g, "_git_run", run)
-    calls = {"split": lambda: g.git_subtree_split(root, "sub"),
-             "status": lambda: g.subtree_sync_status(root, "sub", other),
-             "preflight": lambda: g.split_preflight(root, "sub")}
+    root_arg = root
+    if root_form == "relative":
+        monkeypatch.chdir(root.parent)
+        root_arg = Path(root.name)
+    elif root_form == "current":
+        monkeypatch.chdir(root)
+        root_arg = Path(".")
+    calls = {"split": lambda: g.git_subtree_split(root_arg, "sub"),
+             "status": lambda: g.subtree_sync_status(root_arg, "sub", other),
+             "preflight": lambda: g.split_preflight(root_arg, "sub")}
     result = calls[command]()
     assert result["reason"] is None
     assert result["fallback_used"] and result["fallback_elapsed_seconds"] > 0
     assert result.get("method", result.get("split_method")) == "filter-branch"
+    split_sha = result.get("sha", result.get("split_sha"))
+    assert g._subtree_split_matches_prefix_tree(root, result["source"], "sub", split_sha)["trees_match"]
     assert {p: p.read_bytes() if p.exists() else None for p in metadata} == before
     assert _git(root, "for-each-ref") == refs
     assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file() and git_dir not in p.parents} == work

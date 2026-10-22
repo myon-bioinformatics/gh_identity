@@ -2919,7 +2919,9 @@ def _subtree_split_filter_branch(root, prefix, source, timeout):
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be positive and finite")
     deadline = time.monotonic() + timeout
-    origin = str(_git_root(root))
+    # Clone/fetch run with different -C directories; keep the source rooted
+    # at the caller's repository even when --root is relative.
+    origin = str(_git_root(root).resolve())
     with tempfile.TemporaryDirectory(prefix="ghi-subtree-fb-") as directory:
         clone = os.path.join(directory, "repo")
         remaining = max(0.001, deadline - time.monotonic())
