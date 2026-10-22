@@ -1049,89 +1049,6 @@ def set_labels(r,n,add=(),remove=(),write=False,transport="auto",timeout=30):
  out.update(after=after,verified=ok,verification_status="verified" if ok else "mismatch",status="verified" if ok else "verification_mismatch")
  return out
 
-def _skip_one_break(text,index,step):
- """Move across one CR, LF, or CRLF from a break character."""
- if step<0:
-  if text[index]=="\n":
-   index-=1
-   if index>=0 and text[index]=="\r":index-=1
-  else:index-=1
-  return index
- if text[index]=="\r":
-  index+=1
-  if index<len(text) and text[index]=="\n":index+=1
- else:index+=1
- return index
-
-def _block_boundary(text,index,before):
- """True at a body edge or a blank line bordering this section."""
- if before:
-  if index==0:return True
-  if text[index-1] not in "\r\n":return False
-  prev=_skip_one_break(text,index-1,-1)
-  return prev<0 or text[prev] in "\r\n"
- if index==len(text):return True
- if text[index] not in "\r\n":return False
- nxt=_skip_one_break(text,index,1)
- return nxt>=len(text) or text[nxt] in "\r\n"
-
-def _block_already_appended(body,block):
- """True when the exact block is the whole body or a blank-line section.
-
- A shorter overlap, including a match inside a longer line, does not count.
- """
- start=0
- while True:
-  found=body.find(block,start)
-  if found<0:return False
-  if _block_boundary(body,found,True) and _block_boundary(body,found+len(block),False):return True
-  start=found+1
-
-def pr_edit(r,n,*,title=None,base=None,state=None,body=None,append_body=None,write=False,transport="auto",timeout=30):
- """Plan/edit PR fields, optionally appending one exact text block.
-
- The block is already present only when it equals the body or is bounded by
- the start, the end, or a blank line.
- """
- r=repo(r);n=_positive_identifier(n,"number")
- fields={k:v for k,v in (("title",title),("base",base),("state",state),("body",body)) if v is not None}
- if body is not None and append_body is not None:raise ValueError("body and append_body are mutually exclusive")
- if not fields and append_body is None:raise ValueError("give at least one PR field")
- if state is not None and state not in ("open","closed"):raise ValueError("invalid PR state")
- if any(v is not None and (not isinstance(v,str) or not v.strip()) for v in (title,base)):raise ValueError("empty title or base")
- if body is not None and not isinstance(body,str):raise ValueError("invalid body")
- if append_body is not None and (not isinstance(append_body,str) or not append_body.strip()):raise ValueError("empty append body")
- path=f"repos/{r}/pulls/{n}"
- def snapshot(d):
-  if not isinstance(d,dict) or type(d.get("number")) is not int or d["number"]!=n:raise Error("invalid_pr_response")
-  if not isinstance(d.get("body"), (str,type(None))):raise Error("invalid_pr_response")
-  return {"title":d.get("title"),"base":(d.get("base") or {}).get("ref"),"state":d.get("state"),"body":d.get("body") or ""}
- before=request("GET",path,transport=transport,timeout=timeout);current=snapshot(before)
- if append_body is not None:
-  block=append_body.strip("\r\n");old=current["body"]
-  fields["body"]=old if _block_already_appended(old,block) else (old.rstrip()+"\n\n" if old.strip() else "")+block
- out={"schema":"gh-identity-pr-edit/1","repository":r,"number":n,
-      "fields":{k:{"from":current[k],"to":v} for k,v in fields.items()},
-      "mutation_status":"not_attempted","verification_status":"not_attempted"}
- if all(current[k]==v for k,v in fields.items()):return {**out,"status":"already_satisfied"}
- if not write:return {**out,"status":"planned"}
- if append_body is not None:
-  fresh=request("GET",path,transport=transport,timeout=timeout)
-  if snapshot(fresh)!=current or (fresh.get("head") or {}).get("sha")!=(before.get("head") or {}).get("sha"):
-   return {**out,"status":"stale","error":"pr_changed_before_append"}
- try:request("PATCH",path,fields,transport,timeout,True)
- except Error as e:
-  return {**out,"status":"mutation_uncertain" if e.uncertain else "mutation_failed",
-          "mutation_status":"uncertain" if e.uncertain else "failed","error":e.code}
- out["mutation_status"]="succeeded"
- try:after=snapshot(request("GET",path,transport=transport,timeout=timeout))
- except Error as e:
-  return {**out,"status":"verification_failed","verification_status":"failed","verification_error":e.code}
- verified=all(after[k]==v for k,v in fields.items())
- return {**out,"status":"verified" if verified else "verification_mismatch","verified":verified,
-         "verification_status":"verified" if verified else "mismatch"}
-
-
 def post_comment(r,n,body,write=False,marker=None,transport="auto",timeout=30,sanitize_mentions=False):
  r=repo(r)
  if not body.strip():raise ValueError("empty body")
@@ -6201,9 +6118,6 @@ def _cli_parser():
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
  x=s.add_parser("labels",help="add/remove existing labels on one Issue/PR (planned unless --write)");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--add",action="append",default=[],metavar="LABEL");x.add_argument("--remove",action="append",default=[],metavar="LABEL");x.add_argument("--write",action="store_true")
- x=s.add_parser("pr-edit",help="edit PR title/base/state/body (planned unless --write)");x.add_argument("repo");x.add_argument("number",type=int)
- x.add_argument("--title");x.add_argument("--base");x.add_argument("--state",choices=("open","closed"))
- group=x.add_mutually_exclusive_group();group.add_argument("--body-file");group.add_argument("--append-body-file");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body",nargs="?");x.add_argument("--body-file");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
  _CLI_PARSER=a;return a
 def _main(argv=None):
@@ -6320,12 +6234,6 @@ def _main(argv=None):
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
   elif ns.cmd=="labels":o=set_labels(ns.repo,ns.number,ns.add,ns.remove,ns.write,transport)
-  elif ns.cmd=="pr-edit":
-   def read_body(path):
-    if path is None:return None
-    with open(path,encoding="utf-8",newline="") as stream:return stream.read()
-   o=pr_edit(ns.repo,ns.number,title=ns.title,base=ns.base,state=ns.state,body=read_body(ns.body_file),
-             append_body=read_body(ns.append_body_file),write=ns.write,transport=transport)
   else:
    if (ns.body is None)==(ns.body_file is None):raise ValueError("give body or --body-file")
    if ns.body_file:
@@ -6374,7 +6282,7 @@ def _main(argv=None):
  if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
  if ns.cmd=="observe-pr":return 0 if o["checks"]["state"]=="green" and not o["stale"] else 1
- if ns.cmd in ("comment","variable-set","git-switch","git-work","labels","pr-edit"):
+ if ns.cmd in ("comment","variable-set","git-switch","git-work","labels"):
   return 0 if o.get("status") in ("planned","already_exists","already_satisfied","verified") else 1
  return 0
 def _fleet_checks_wait_value(argv):
@@ -6414,7 +6322,7 @@ def main(argv=None):
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews","inline_comments","review_threads","review_observations",
-              "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment","pr_edit",
+              "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
                "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):

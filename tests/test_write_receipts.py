@@ -92,3 +92,26 @@ def test_variable_cli_verification_failure_is_nonzero(readback, status):
 def test_cli_receipt_exit_contract(command, api, status, expected):
     with patch.object(g, api, return_value={'status': status}), contextlib.redirect_stdout(io.StringIO()):
         assert g.main(command) == expected
+
+
+def test_comment_body_file_uses_existing_dedup_and_verification(tmp_path):
+    path = tmp_path / 'note.md'
+    body = 'Merged into #149.\nClosing source PR.\n'
+    path.write_text(body, encoding='utf-8')
+    marker = '<!-- gh-identity:consolidate-149-150 -->'
+    observed = {'id': 7, 'body': marker + '\n' + body,
+        'issue_url': g.API + '/repos/o/r/issues/150',
+        'html_url': 'https://github.com/o/r/pull/150#issuecomment-7'}
+    with patch.object(g, 'pages', return_value=[]), patch.object(g, 'request', side_effect=[{'id': 7}, observed]):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            assert g.main(['comment', 'o/r', '150', '--body-file', str(path),
+                           '--operation-key', 'consolidate-149-150', '--write']) == 0
+    assert json.loads(out.getvalue())['status'] == 'verified'
+
+
+def test_comment_body_missing_or_conflicting_exits_two():
+    for args in ([], ['text', '--body-file', 'x.md']):
+        with patch.object(g, 'request') as request:
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert g.main(['comment', 'o/r', '149', *args]) == 2
+        request.assert_not_called()

@@ -1575,38 +1575,21 @@ raise the source/vendoring floor to the development floor. CI uses setup-python
 v7 and setup-uv v10.3.0, and uses uv 0.13.3. Setup actions
 using Node 24 require runner 2.327.1 or newer (GitHub-hosted runners are used).
 
-## Edit PR metadata and supply comment files
+## Comment files
 
 ```sh
-python -S gh_identity.py pr-edit OWNER/REPO 149 --title "Consolidated change" --append-body-file scope.md
-python -S gh_identity.py pr-edit OWNER/REPO 149 --title "Consolidated change" --append-body-file scope.md --write
 python -S gh_identity.py comment OWNER/REPO 150 --body-file note.md --operation-key consolidate-149-150 --write
-python -S gh_identity.py pr-edit OWNER/REPO 150 --state closed --write
 ```
-
-`pr_edit(r, n, *, title=None, base=None, state=None, body=None,
-append_body=None, write=False, transport="auto", timeout=30)` uses the existing
-bounded gh-first/urllib transport. `--body-file` replaces the body exactly;
-`--append-body-file` keeps existing text and appends an exact block once. That
-block is already present only when it is the whole body or a section bounded by
-the start, the end, or a blank line; a shorter overlap is still appended. They
-are mutually exclusive; UTF-8, internal CRLF and replacement trailing newlines
-are preserved. An empty replacement body clears the body; an empty append is
-invalid. Existing title/base/state fields are only sent when requested.
-
-No write occurs without `--write`, and an already-satisfied edit returns
-`already_satisfied` without a PATCH. An append re-reads the snapshot before PATCH
-and returns `stale` on observed changes. GitHub does not provide an atomic
-compare-and-swap here, so concurrent edits can still race after that last read.
-A successful PATCH is followed by exact field verification; receipts separate
-mutation failure/uncertainty from successful mutation with failed or mismatched
-readback. CLI exit is 0 for planned/already-satisfied/verified, 1 for returned
-failure/uncertainty/stale receipts, and 2 for invalid input or a raised read error.
 
 `comment --body-file` reuses existing mention handling, operation-key deduplication
 and post/readback verification. The positional body remains supported; supply
 exactly one of positional body and `--body-file`. File inputs need not be escaped
-as JSON or shell strings. The parent-owned `gh_ops.py fleet-apply` coordinates
-several repositories, grouped file commits, existing-PR reuse, explicit source
-merges and verified source closures. Standalone pushes remain in parent
-`gh_ops.py git-push`; no consumer vendor pins are changed by these primitives.
+as JSON or shell strings.
+
+PR title, base, state and body changes, including an exact `--body-file`
+replacement and a one-time `--append-body-file` block, are a write. They live in
+the parent repository `myon-bioinformatics/myon-bioinformatics` file `gh_ops.py`,
+command `pr-edit` (parent pull request 138). The parent-owned `gh_ops.py fleet-apply`
+coordinates several repositories, grouped file commits, existing-PR reuse,
+explicit source merges and verified source closures. Standalone pushes remain in
+parent `gh_ops.py git-push`.
