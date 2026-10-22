@@ -1587,7 +1587,9 @@ python -S gh_identity.py pr-edit OWNER/REPO 150 --state closed --write
 `pr_edit(r, n, *, title=None, base=None, state=None, body=None,
 append_body=None, write=False, transport="auto", timeout=30)` uses the existing
 bounded gh-first/urllib transport. `--body-file` replaces the body exactly;
-`--append-body-file` keeps existing text and appends an exact block once. They
+`--append-body-file` keeps existing text and appends an exact block once. That
+block is already present only when it is the whole body or a section bounded by
+the start, the end, or a blank line; a shorter overlap is still appended. They
 are mutually exclusive; UTF-8, internal CRLF and replacement trailing newlines
 are preserved. An empty replacement body clears the body; an empty append is
 invalid. Existing title/base/state fields are only sent when requested.

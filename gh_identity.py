@@ -1049,8 +1049,50 @@ def set_labels(r,n,add=(),remove=(),write=False,transport="auto",timeout=30):
  out.update(after=after,verified=ok,verification_status="verified" if ok else "mismatch",status="verified" if ok else "verification_mismatch")
  return out
 
+def _skip_one_break(text,index,step):
+ """Move across one CR, LF, or CRLF from a break character."""
+ if step<0:
+  if text[index]=="\n":
+   index-=1
+   if index>=0 and text[index]=="\r":index-=1
+  else:index-=1
+  return index
+ if text[index]=="\r":
+  index+=1
+  if index<len(text) and text[index]=="\n":index+=1
+ else:index+=1
+ return index
+
+def _block_boundary(text,index,before):
+ """True at a body edge or a blank line bordering this section."""
+ if before:
+  if index==0:return True
+  if text[index-1] not in "\r\n":return False
+  prev=_skip_one_break(text,index-1,-1)
+  return prev<0 or text[prev] in "\r\n"
+ if index==len(text):return True
+ if text[index] not in "\r\n":return False
+ nxt=_skip_one_break(text,index,1)
+ return nxt>=len(text) or text[nxt] in "\r\n"
+
+def _block_already_appended(body,block):
+ """True when the exact block is the whole body or a blank-line section.
+
+ A shorter overlap, including a match inside a longer line, does not count.
+ """
+ start=0
+ while True:
+  found=body.find(block,start)
+  if found<0:return False
+  if _block_boundary(body,found,True) and _block_boundary(body,found+len(block),False):return True
+  start=found+1
+
 def pr_edit(r,n,*,title=None,base=None,state=None,body=None,append_body=None,write=False,transport="auto",timeout=30):
- """Plan/edit PR fields, optionally appending an exact text block once."""
+ """Plan/edit PR fields, optionally appending one exact text block.
+
+ The block is already present only when it equals the body or is bounded by
+ the start, the end, or a blank line.
+ """
  r=repo(r);n=_positive_identifier(n,"number")
  fields={k:v for k,v in (("title",title),("base",base),("state",state),("body",body)) if v is not None}
  if body is not None and append_body is not None:raise ValueError("body and append_body are mutually exclusive")
@@ -1067,7 +1109,7 @@ def pr_edit(r,n,*,title=None,base=None,state=None,body=None,append_body=None,wri
  before=request("GET",path,transport=transport,timeout=timeout);current=snapshot(before)
  if append_body is not None:
   block=append_body.strip("\r\n");old=current["body"]
-  fields["body"]=old if block in old else (old.rstrip()+"\n\n" if old.strip() else "")+block
+  fields["body"]=old if _block_already_appended(old,block) else (old.rstrip()+"\n\n" if old.strip() else "")+block
  out={"schema":"gh-identity-pr-edit/1","repository":r,"number":n,
       "fields":{k:{"from":current[k],"to":v} for k,v in fields.items()},
       "mutation_status":"not_attempted","verification_status":"not_attempted"}

@@ -31,6 +31,29 @@ def test_append_dry_run_and_null_body(old):
     assert request.call_count == 1
 
 
+def test_substring_of_block_is_not_already_appended():
+    cases = [
+        ('foobar', 'foo', False),
+        ('prefix\nfoo', 'foo', False),
+        ('foobar\n\nfoo', 'foo', True),
+        ('notes\n\nalpha paragraph\n\nunchanged', 'alpha paragraph\n\nbeta paragraph', False),
+        ('notes\n\nalpha paragraph\n\nbeta paragraph\n\nlater', 'alpha paragraph\n\nbeta paragraph', True),
+        ('alpha paragraph\n\nbeta paragraph', 'alpha paragraph\n\nbeta paragraph', True),
+        ('lead\r\n\r\nfoo\r\n\r\ntrail', 'foo', True),
+    ]
+    for body, block, present in cases:
+        current = {**BEFORE, 'body': body}
+        with patch.object(g, 'request', return_value=current) as request:
+            result = g.pr_edit('o/r', 149, append_body=block)
+        assert request.call_count == 1
+        if present:
+            assert result['status'] == 'already_satisfied'
+            assert result['fields']['body']['to'] == body
+        else:
+            assert result['status'] == 'planned'
+            assert result['fields']['body']['to'] == body.rstrip() + '\n\n' + block
+
+
 def test_retry_does_not_duplicate_or_modify_existing_body():
     old = {**AFTER, 'body': AFTER['body'] + '\n\nLater note'}
     with patch.object(g, 'request', return_value=old) as request:
