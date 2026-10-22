@@ -29,6 +29,12 @@ The three concepts are used provisionally by purpose: **A** for the README hero,
 
 The supplied diagram focuses on the read-only inspection workflow. Its `gh`-wrapper description is not the full current scope: GHI also has a stdlib `urllib` fallback for supported REST operations and explicitly requested, guarded writes. A readiness report is an observation, not a merge action. See the architecture and command documentation for current behavior.
 
+### Challenges, responsibilities and intended outcomes
+
+![gh_identity complementary concept: observe GitHub state, inspect merge readiness and guard writes to produce bounded JSON for CI or review](docs/images/concept-overview-v2.png)
+
+This additional supplied panel organizes the read-only workflow by challenges, responsibilities and intended outcomes. The `gh`-focused illustration complements rather than replaces the broader interface described above: the `urllib` fallback and explicit guarded-write commands remain available. Merge-readiness is still an observation, not a merge action.
+
 ## No-argument workspace overview
 
 Run `python gh_identity.py` (or `python gh_identity.py overview`) to print a best-effort, read-only JSON summary. It includes Python/Git/gh versions, local checkout summary (HEAD/branch, working-tree change counts, GitHub repository identity), and bounded samples of recent PRs, open issues and workflow runs when a GitHub origin can be identified. Missing or inaccessible sections are `null`, not zero. Suggested commands are static examples, not automated actions. Local paths (`cwd`, Git top level, relative directory), raw remote URLs, commit subjects and local error details are omitted. Use the explicit `local-position` command when local placement details are needed. No operating-system metadata is collected. No repository or authentication is required to obtain the local portion.
