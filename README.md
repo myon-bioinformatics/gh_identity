@@ -45,7 +45,7 @@ The `capabilities` command includes `git_version` and `gh_version` by default, i
 
 ## Python compatibility
 
-Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. CI checks 3.10–3.14 and `3.x` (the latest stable Python 3 available to setup-python), with `check-latest` enabled. The moving job follows new stable releases without adding a hard-coded upper bound. Passing CI verifies the tested versions; it does not guarantee untested future releases.
+Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. The runtime CI lane checks 3.10–3.14 and `3.x`, and the pytest lane checks 3.11–3.14 and `3.x` (the latest stable Python 3 available to setup-python; that lane enables `check-latest`). The moving job follows new stable releases without adding a hard-coded upper bound. Passing CI verifies the tested versions; it does not guarantee untested future releases.
 
 ## Quick start
 
@@ -99,7 +99,7 @@ not successful empty content. `pr()` retains its compact state/head/base API.
 ### Git history versus GitHub discussion data
 
 Git stores commit messages, trees and blobs, so local show/log/diff/blame can
-reuse the established git_inspector APIs being consolidated in PR #23.
+reuse the established git_inspector APIs consolidated in merged PR #23.
 PR/Issue descriptions and discussions are GitHub records, read via gh/API;
 cloning does not obtain those descriptions. `clone --depth 1` truncates history:
 older blame and comparisons need the relevant objects/history fetched first.
@@ -109,8 +109,8 @@ complete. This content API introduces no subprocess Git or HTML parser.
 Code patches, PR changed-file pagination, remote comparisons and review/comment
 bodies are separate from descriptions and are not returned here. A REST commit
 response's optional files/patch data is deliberately not presented as a complete
-diff. These broader read contracts remain tracked in #20; local Git inspection
-continues in #23. See [GitHub Issues REST](https://docs.github.com/en/rest/issues/issues#get-an-issue),
+diff. These broader read contracts remain unfinished and were tracked in Issue
+#20, which is now closed; local Git inspection landed in merged PR #23. See [GitHub Issues REST](https://docs.github.com/en/rest/issues/issues#get-an-issue),
 [GitHub Commits REST](https://docs.github.com/en/rest/commits/commits#get-a-commit),
 and [Git shallow-clone behavior](https://git-scm.com/docs/git-clone).
 
@@ -133,7 +133,7 @@ It resolves the ref once, then reads tree metadata at that commit and the
 returned subtree SHAs. The output includes commit/tree SHA, full relative paths,
 kind, Git mode and object SHA. It never fetches file bodies, follows symlinks or
 submodules, or invokes clone, diff or blame. No local `.git` is required.
-This feature is independent of the local history inspection work in PR #23.
+This feature is independent of the local history inspection work in merged PR #23.
 
 Depth 1 means root entries, depth 2 adds their direct children. Directory rows
 include `expanded` to distinguish visited directories from depth boundaries.
@@ -667,7 +667,7 @@ chat transcript extraction nor whole-site support.
 Browser launch/DOM acquisition now belongs to browser-test-kit PR #54:
 https://github.com/myon-bioinformatics/browser-test-kit/pull/54
 
-From that checkout:
+From a browser-test-kit checkout:
 
 ```sh
 python examples/capture_browser_dom.py https://chatgpt.com/ --selector h1 --output chatgpt-dom.json
@@ -963,7 +963,9 @@ overall `ok`. Imports are parsed with `ast`, never executed.
 
 ## Vendored files (`vendor-lock-check`, `vendor-lock-verify-remote`, `vendor-plan`, `vendor-matrix`)
 
-All read-only; nothing is placed, updated or committed.
+All read-only; nothing is placed, updated or committed. `vendor-rules.json`,
+`parent-pr.ref.json` and the other parent-repository files named below are
+parent inputs, read from the parent checkout or API; they are not stored in this repository.
 
 ```bash
 python gh_identity.py vendor-lock-check [--root .] [--lock vendor.lock.json] [--rules vendor-rules.json]
@@ -1566,8 +1568,9 @@ uv run --locked python -m pytest
 python -S -m unittest discover -s tests -p test_gh_identity.py -v
 ```
 
-`pyproject.toml` is the canonical development dependency definition; legacy
-requirements files remain for downstream callers. Runtime metadata does not
+`pyproject.toml` is the canonical development dependency definition. The runtime
+has no third-party dependencies, and `tests/requirements.txt` lists only the
+test-only tools. Runtime metadata does not
 raise the source/vendoring floor to the development floor. CI uses setup-python
 v7 and setup-uv v10.3.0, and uses uv 0.13.3. Setup actions
 using Node 24 require runner 2.327.1 or newer (GitHub-hosted runners are used).
