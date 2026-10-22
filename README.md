@@ -287,8 +287,7 @@ The API/CLI does not automatically write raw logs, signed URLs or secret hashes
 to files or JUnit evidence. Offline regressions use synthetic log fixtures;
 routine JUnit results contain test outcomes and compact identity. Live GitHub
 verification is an explicit separate operation. This addition implements only
-Issue #20's job-log slice; its other API and contract-validation work remains
-unfinished.
+Issue #20's job-log slice (Issue #20 is now closed; this section covers only the job-log part).
 
 ## Issue / PR labels (`labels`)
 
@@ -1382,7 +1381,7 @@ This is an observation diff, not a new patch-fetch API. Calls do not promise a
 transactional snapshot of a concurrently changing PR; inline commit identities
 remain separate from thread node IDs. None of the other Issue #20 checkboxes is
 completed by this feature. Guarded workflow dispatch/other writes remain outside
-this read-only slice (the unfinished contract is preserved in Issue #2).
+this read-only slice (those writes were tracked in Issue #2, which is now closed).
 
 Fixtures in `tests/fixtures/review_observations` are synthetic offline contracts,
 not live captures or validation of particular gh versions. The existing CI tests
