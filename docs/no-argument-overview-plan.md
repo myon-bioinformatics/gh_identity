@@ -1,75 +1,77 @@
-# 引数なし実行で現在地点を出す — 実装案
+# Showing the current position on a no-argument run — implementation plan
 
-状態: 提案。今回のPRは仕様の整理のみで、CLIの動作変更はまだ含まない。
-基準main: `16df861e8f44ea8c9da69416af1272e6bc1afb5a`（2026-10-11）。
+Status: proposal. This PR only organizes the spec; it does not yet change CLI behavior.
+Base main: `16df861e8f44ea8c9da69416af1272e6bc1afb5a` (2026-10-11).
 
-## 目的と入口
+## Goal and entry point
 
-最初の一回を `python gh_identity.py` にするだけで、作業者とAIが
-「どのrepoのどの位置にいて、GitHub側はどこまで進み、直近で何が言われたか」
-を短い標準出力で把握できるようにする。毎回help、Git、ghを何度も呼んで
-情報をつなぎ直す手間と、全文ログ・差分を読むトークンを減らす。
+Just by making the first call `python gh_identity.py`, the operator and the AI should
+grasp, from short standard output, "which repo and which position we are at, how far
+GitHub has progressed, and what was said most recently". This cuts the effort of calling
+help, Git, and gh over and over to stitch information back together, and the tokens spent
+reading full logs and diffs.
 
-現行 `_main()` はsubcommand必須のため、引数なしではusageとexit 2になる。
-既存の個別コマンドは保持し、subcommand省略時だけoverviewへ分岐する。
-`--help` は従来どおり機能一覧を表示して終了し、APIを呼ばない。
-予算/transport指定だけの場合もoverviewとする。内部worker分岐は維持する。
+The current `_main()` requires a subcommand, so a no-argument run prints usage and exits 2.
+Existing individual commands are kept; only an omitted subcommand branches to overview.
+`--help` still prints the feature list and exits, without calling the API.
+A run with only budget/transport options is also treated as overview. The internal worker branch is kept.
 
-- `python gh_identity.py`: cwdから読み取り、短いテキストをstdoutへ。
-- `python gh_identity.py overview`: 同じ処理を明示して実行する入口。
-- `python gh_identity.py --json`: 同じ観測の構造化JSON。
-- `python gh_identity.py overview --offline`: ローカル観測だけ。
-- `python gh_identity.py overview --repo OWNER/REPO`: Git外/remote曖昧時の明示指定。
+- `python gh_identity.py`: reads from cwd and writes short text to stdout.
+- `python gh_identity.py overview`: an explicit entry point for the same processing.
+- `python gh_identity.py --json`: structured JSON of the same observation.
+- `python gh_identity.py overview --offline`: local observation only.
+- `python gh_identity.py overview --repo OWNER/REPO`: explicit choice outside Git or when the remote is ambiguous.
 
-overview（引数なしを含む）だけtextが既定で、既存subcommandはJSONのままとする。
-README/SPECにこの差を明記する。argparseの共通parentで --json を定義し、
-トップレベルとoverview parserの両方へ適用する。default=argparse.SUPPRESSとして
-子parserの既定値が親の指定を上書きしないようにし、両位置と重複指定をfixture化する。
+Only overview (including the no-argument run) defaults to text; existing subcommands stay JSON.
+README/SPEC state this difference explicitly. `--json` is defined in a shared argparse parent
+and applied to both the top-level and overview parsers. With default=argparse.SUPPRESS,
+the child parser's default does not override the parent's value; both positions and
+duplicate use are covered by fixtures.
 
-テキストとJSONは同じPython API `overview(...)` の結果を描画する。
-既存subcommandのJSON出力やゲート用終了コードを勝手に変更しない。
+Text and JSON render the result of the same Python API `overview(...)`.
+The JSON output and gate exit codes of existing subcommands are not changed.
 
-## 既定で出す情報
+## Information shown by default
 
-| 表示 | 内容 | 避ける誤認 |
+| Item | Content | Misreading avoided |
 |---|---|---|
-| 観測 | UTCの観測時刻、online/offline、complete/partial | 古いキャッシュを今のGitHubと混同しない |
-| 作業場所 | cwd、repo、選択根拠、branchまたはdetached、local HEAD | スクリプトの配置先を作業repoにしない |
-| ローカル変更 | staged/unstaged/untrackedの件数、取得上限 | dirtyだけで中身を読ませず、差分全文を出さない |
-| ローカル最新commit | HEADの短いSHA、件名、日時 | commit日時をfetch日時にしない |
-| upstream | upstream ref、手元の追跡refに対するahead/behind | GitHubの最新状態と称さない |
-| GitHub基準 | repositoryのdefault branchとその最新SHA/commit件名 | default branchがmainとは限らない |
-| 基準との比較 | local SHAとGitHub基準SHAの一致、比較可能ならahead/behind | SHAが違うだけで「rebase必要」と断定しない |
-| 現在のPR | 現branchに対応するopen PRの番号/件名/URL/head/base/draft | ブランチ名だけでforkの別PRを選ばない |
-| 直近のPR | 最新作成open PR 1件、最新更新open PR 1件、ほか最大3件 | created順とupdated順を混ぜた「最新」にしない |
-| 直近のIssue | 最新更新Issueをopen/closed両方から選び、番号・件名・state・updated_at・URL、ほか最大2件 | Issue更新をPR更新で代用せず、closedを未完了と称さない |
-| Issueの最新コメント | 注目Issueの著者・created_at/updated_at・全文・元URL | Issue本体のupdated_atを最新コメント日時と混同しない |
-| 直近コメント | 注目PRの最新一般コメントの著者/日時/全文/URL | review、inline、threadを一般コメントに混ぜない |
-| レビュー | 最新review submission、観測した未解決thread件数と完全性 | CHANGES_REQUESTEDを重大度に変換しない |
-| 同一headのCI | checksの状態/内訳、必要ならrunの状態とURL | 0 checksをgreenにせず、別SHAの成功を使わない |
-| 続きを見る入口 | 実際のrepo/番号/SHAを入れた個別コマンドを最大3本 | 毎回help全文や全機能を並べない |
+| Observation | UTC observation time, online/offline, complete/partial | Don't confuse an old cache with current GitHub |
+| Workspace | cwd, repo, reason for the choice, branch or detached, local HEAD | Don't treat the script's location as the working repo |
+| Local changes | Counts of staged/unstaged/untracked, fetch limit | Don't make readers open contents just because it's dirty; no full diffs |
+| Latest local commit | Short HEAD SHA, subject, date | Don't present the commit date as the fetch date |
+| upstream | upstream ref, ahead/behind against the local tracking ref | Don't call it GitHub's latest state |
+| GitHub baseline | The repository's default branch and its latest SHA/commit subject | The default branch is not always main |
+| Comparison with baseline | Whether local SHA and GitHub baseline SHA match; ahead/behind when comparable | Don't conclude "rebase needed" from a different SHA alone |
+| Current PR | Number/title/URL/head/base/draft of the open PR for the current branch | Don't pick a fork's different PR by branch name alone |
+| Recent PRs | 1 most recently created open PR, 1 most recently updated open PR, up to 3 others | Don't mix created and updated order into one "latest" |
+| Recent Issues | Most recently updated Issue chosen from both open and closed, with number, title, state, updated_at, URL; up to 2 others | Don't substitute PR updates for Issue updates; don't call closed ones unfinished |
+| Latest Issue comment | Author, created_at/updated_at, full text, and source URL for the focus Issue | Don't confuse the Issue's updated_at with the latest comment time |
+| Latest comment | Author/time/full text/URL of the focus PR's latest general comment | Don't mix reviews, inline comments, or threads into general comments |
+| Reviews | Latest review submission, observed unresolved thread count and completeness | Don't translate CHANGES_REQUESTED into severity |
+| CI on the same head | Check status/breakdown, plus run status and URL when needed | Don't treat 0 checks as green; don't use a success from another SHA |
+| Where to look next | Up to 3 individual commands filled with the actual repo/number/SHA | Don't list full help or every feature each time |
 
-「注目PR」は一意に特定できた現在branchのopen PRを優先し、なければ
-最新更新open PRとする。両者が異なる場合、双方の最新一般コメントを
-最大1件ずつ表示する。最新作成PRは別枠で示す。
-同じPRが複数枠に出る場合は表示を統合し、選択理由を複数記録する。
-現在branchに複数の候補がある場合は候補を示し、一意と捏造しない。
-closed/merged PRを含む履歴の全探索は追加コマンドに譲り、既定で走らせない。
+The "focus PR" is the current branch's open PR when it can be identified uniquely, otherwise
+the most recently updated open PR. If the two differ, up to one latest general comment is
+shown for each. The most recently created PR is shown separately.
+When the same PR appears in several slots, the display is merged and every selection reason is recorded.
+When the current branch has several candidates, the candidates are shown instead of inventing a unique one.
+A full history search including closed/merged PRs is left to additional commands and is not run by default.
 
-IssueはPRとは独立して、updated_at降順でopen/closedを含む直近最大3件を
-表示する。閉じられたIssueの直近更新も観測し、stateを明示する。
-RESTのIssue一覧に含まれるPRは除外し、同じPRをIssue枠に重複表示しない。
-「注目Issue」は最新更新Issueとし、その最新一般コメントを最大1件表示する。
-注目Issueの本文も全文で添え、コメント無しでもIssue側の方針・残件が見えるようにする。
-Issueの本文更新・close/reopen・ラベル等でupdated_atが変わっていても、
-「最新コメントが付いた」「残件が完了した」とは推測しない。
-最新コメントはcreated_atによる最新投稿とupdated_at（編集日時）を分ける。
-現在PRとIssueの関連は明示的な参照・GitHubの関連情報が観測できた場合だけ示し、
-番号や題名の類似から勝手に関連付けない。PRが無くてもIssue枠を出す。
+Issues are independent of PRs: up to 3 recent ones, open and closed, are shown in descending
+updated_at order. Recent updates to closed Issues are observed too, with the state stated explicitly.
+PRs included in the REST Issue list are excluded so the same PR is not repeated in the Issue slot.
+The "focus Issue" is the most recently updated Issue, and up to one of its latest general comments is shown.
+The focus Issue's body is also included in full, so the Issue's direction and remaining work are visible even without comments.
+Even if updated_at changed because of a body edit, close/reopen, labels, etc., it is not
+assumed that "a new comment was posted" or "the remaining work is done".
+The latest comment separates the newest post by created_at from updated_at (edit time).
+A link between the current PR and an Issue is shown only when an explicit reference or GitHub's
+relation data is observed; similar numbers or titles are not linked arbitrarily. The Issue slot is shown even with no PR.
 
-## 既定出力のイメージ
+## Sample default output
 
-以下は架空のrepo・SHA・件数を使った表示例で、実際の観測結果ではない。
+The following uses a fictional repo, SHAs, and counts; it is not a real observation.
 
 ```text
 GHI overview | observed_at=2026-10-11T06:00:00Z | partial
@@ -85,13 +87,13 @@ current PR: #42 Add boundary check | open, draft=false | head=aaaaaaa
 latest-created open PR: #43 Add example | created_at=2026-10-11T05:40:00Z
 latest-updated open PR: #42 | updated_at=2026-10-11T05:55:00Z
 latest conversation (#42): reviewer, 2026-10-11T05:55:00Z
-  「境界ケースは確認済みです。READMEの例も更新してください。」
+  "Boundary cases are confirmed. Please update the README example too."
   https://github.com/example/demo/pull/42#issuecomment-123
 latest-updated Issue: #40 Confirm rollout | open | updated_at=2026-10-11T05:58:00Z
-  body: 「残件はIssueで追跡します。新しい確認結果を追加しました。」
+  body: "Remaining work is tracked in the Issue. Added new verification results."
   https://github.com/example/demo/issues/40
 latest Issue comment (#40): maintainer | created_at=2026-10-11T05:58:00Z
-  「追加検証が必要な項目をIssue本文に記録しました。」
+  "Recorded the items needing extra verification in the Issue body."
   https://github.com/example/demo/issues/40#issuecomment-124
 reviews (#42): COMMENTED | unresolved threads=unknown (permission denied)
 checks @ aaaaaaa: pending | success=5 in_progress=1
@@ -100,158 +102,159 @@ next: python gh_identity.py observe-pr example/demo 42
 next: python gh_identity.py review-observations example/demo 42
 ```
 
-標準出力は概要metadataを目安30行でまとめ、選択した最新コメントの本文は
-引数なしで全文を出す。PR最大2件と注目Issue1件の最新一般コメントが対象。
-注目Issueの本文も全文で出し、方針がコメントではなく本文にある場合も拾う。
-ほかのIssue/PRは件名・state・日時・URLまでとし、履歴全件は展開しない。
-metadataの目安をコメント本文へ適用せず、本文に240文字/8 KiB等の表示上限を
-設けない。全文を読むための追加オプションや二回目の呼び出しを要求しない。
-本文をAI要約・先頭抜粋・重要行抽出に置換しない。from/to等のヘッダも保持する。
-stdoutの表示では本文の区切り、種類/id、著者、created_at/updated_at、元URL、
-原文のchars/body_sha256を併記し、全文の範囲を明示する。
-本文の改行・段落・空白を保つ。危険な端末制御文字は可逆なエスケープ表現にして
-示し、元の本文を黙って削除しない。textの規則は先に「\ → \\」、
-続いてLF/TAB以外のC0（CRを含む）・DEL・C1を「\xNN」（2桁小文字hex）へ
-変換する。LF/TABはそのまま保持する。literalな「\x1b」と実際のESCを区別し、
-逆変換fixtureで原文に戻ることを検証する。JSONではbodyに完全な原文を保持する。
-秘密入りremote URL、トークン、生のAPIエラーメッセージを出力しない。
-取得自体のbyte/time予算は維持するが、取得途中の本文を「全文」として出さない。
-本文が予算を超える場合はその対象を取得不足と明示し、原因・id・元URLを出す。
-これは正常時に抜粋へ置換する仕様ではなく、完全取得できなかった失敗状態である。
-CIで実行するとstdoutの本文全文がActions等のログに保存される。private repoでも
-同じ挙動であることをREADME/SPECに明記する。ユーザー指定の全文表示は維持し、
-CI検証はsynthetic fixtureを使ってprivateな実本文をログへ出さない。
+Standard output keeps summary metadata to roughly 30 lines, and the body of each selected
+latest comment is printed in full with no arguments. This covers the latest general comments
+of up to 2 PRs and 1 focus Issue.
+The focus Issue's body is also printed in full, catching direction recorded in the body rather than a comment.
+Other Issues/PRs show only title, state, time, and URL; full history is not expanded.
+The metadata guideline is not applied to comment bodies, and bodies get no display limit such
+as 240 characters / 8 KiB. No extra option or second call is required to read the full text.
+Bodies are not replaced by AI summaries, leading excerpts, or extracted key lines. Headers such as from/to are kept.
+In stdout, each body is shown with its delimiter, kind/id, author, created_at/updated_at, source URL,
+and the original's chars/body_sha256, making the full-text range explicit.
+Newlines, paragraphs, and whitespace in the body are kept. Dangerous terminal control characters
+are shown in a reversible escaped form instead of being silently removed. The text rule is first
+"\ → \\", then C0 other than LF/TAB (including CR), DEL, and C1 become "\xNN" (2-digit lowercase hex).
+LF/TAB are kept as-is. A literal "\x1b" is distinguished from a real ESC, and a reverse-conversion
+fixture checks that the original is restored. JSON keeps the complete original in body.
+Remote URLs containing secrets, tokens, and raw API error messages are never printed.
+Byte/time budgets for fetching are kept, but a partially fetched body is never presented as "full text".
+When a body exceeds the budget, that item is marked as not fully fetched, with the cause, id, and source URL.
+This is a failure state of incomplete fetching, not a rule to replace bodies with excerpts in normal operation.
+When run in CI, full bodies on stdout are saved in Actions logs, etc. README/SPEC state that this is
+the same for private repos. The user-requested full-text display is kept, and CI verification uses
+synthetic fixtures so private real bodies are not written to logs.
 
-## repoとrefの決定
+## Deciding repo and ref
 
-1. 明示 `--repo` があれば利用する。cwd由来repoとの相違も示す。
-2. cwdのGit root・branch/upstreamから対象remoteを選択する。
-3. upstreamがなければ、GitHub repoとして一意に特定できるremoteを利用する。
-   複数候補が残るなら候補のみを出し、`--repo` による選択を案内する。
-4. Git外では検証可能なCIの `GITHUB_REPOSITORY` を候補とする。
-   local HEADとCIの `GITHUB_SHA` は別の観測として記録し、黙って置換しない。
-5. repoが判定できなくてもローカル情報・判定できない理由はstdoutへ出す。
-   非Gitディレクトリから全アカウントrepo探索を始めない。
+1. Use an explicit `--repo` if given. Also show any difference from the cwd-derived repo.
+2. Choose the target remote from cwd's Git root and branch/upstream.
+3. With no upstream, use a remote that uniquely identifies a GitHub repo.
+   If several candidates remain, show only the candidates and point to `--repo`.
+4. Outside Git, a verifiable CI `GITHUB_REPOSITORY` is a candidate.
+   Local HEAD and CI's `GITHUB_SHA` are recorded as separate observations, never silently swapped.
+5. Even when the repo cannot be determined, local information and the reason go to stdout.
+   A search across all account repos is never started from a non-Git directory.
 
-URLから取得するのは検証したOWNER/REPOのみ。remoteの資格情報を表示しない。
-ローカルrefとGitHubのdefault branchは別フィールドで保持する。
-GitHubから得たSHAのobjectが手元になければahead/behindはunknown。
-自動fetchで埋めず、必要なら利用者が次の操作を選べるようにする。
+Only the verified OWNER/REPO is taken from a URL. Remote credentials are never shown.
+Local refs and GitHub's default branch are kept in separate fields.
+If the object for a SHA from GitHub is not present locally, ahead/behind is unknown.
+It is not filled in by an automatic fetch; the user can choose the next step if needed.
 
-## 取得、上限と状態
+## Fetching, limits, and state
 
-- 既存 `repository` / `resolve_ref` / `pull_requests` / `issues` / `issue` / `comments` /
-  `reviews` / `review_observations` / `checks_for_sha` / `head-runs` 系を再利用。
-  呼び出し間で同じPR・head・metadataを再取得しないための共有観測を持つ。
-- ローカル観測は既存のbounded Git inspection経路を再利用する。
-  現行 `local_identity` の独自subprocess経路をコピーして新parserを増やさない。
-  足りないroot/remote/ref比較は共通の検証済みwrapperに追加する。
-- 更新順候補は `issues?state=all&sort=updated&direction=desc&per_page=100`
-  を最大2ページ読み、`pull_request` キーでPR/Issueを分離する。同じ応答を共有し、
-  open PRとopen/closed Issueの候補を別々に選ぶ。最新作成open PRは
-  `pulls?state=open&sort=created&direction=desc` の1ページで取得する。
-  既存の正規化を再利用する薄い候補取得を追加し、同じAPIを別用途で重複取得しない。
-- 2ページがPRばかりでIssueが見つからなくても「Issueなし」としない。
-  `selection_status=not_found_within_window`、`latest=null`、
-  `pages_fetched=N`、`exhausted=false`、`next_page` を保持し、
-  textは「最新Issue: 未観測（Nページ内に見つからず）」とする。
-  全ページの終端を確認して初めて `selection_status=none` を許容する。
-  権限不足/timeoutは別の `selection_status=error`。候補の表示上限と
-  最新候補の選択/一覧の完全性を別フィールドにする。
-- 最新一般コメントは `issues/{n}/comments?per_page=1&page=1` の
-  response Linkを読み、`rel="last"` があればその末尾ページを1回取得する。
-  静止した一覧なら1対象につき最大2回（0/1件なら通常1回）で本文全文を取れる。
-  全履歴の `comments(last=1)` は使わず、無効なdirection指定にも依存しない。
-  注目Issue本文は更新順候補のbodyを再利用し、余分なIssue GETを避ける。
-- 末尾ページ方式は同時投稿/削除がある一覧の原子的な最新保証ではない。
-  最後の応答にさらにnextがあれば `latest_observed` として不完全性を示し、
-  空になった末尾、矛盾したLink、同時更新を観測した場合も完了と称さない。
-  自動再探索で予算を超えない。page番号を永続的な件数と扱わない。
-- gh/urllib共通transportでresponse headersをboundedに取り出せる拡張が必要。
-  現行JSON-only transportからLinkが読めると仮定しない。
-  rel=lastはHTTPS/api.github.com・同じrepo/number/path・per_page=1・正のpageを
-  検証し、任意URLを追わない。API認証を外部URLへ転送しない。
-- 最新review submissionもbounded末尾取得を使い、最大2回を予約する。
-  一般コメント/review/inline/threadの種類は保持し、任意本文から重要度を推測しない。
-- APIで保証されたcreated順/updated順とIDを記録する。同時刻の安定化は
-  観測内に限り、ページ外を含む全順序を保証しない。
-- 操作全体の初期予算を20秒・HTTP要求20回・受信2 MiBへ変更する。
-  HTTP要求は失敗/transport fallbackも数え、個々のAPIで予算をリセットしない。
-  基本取得の設計上限は下表の19回で、残り1回を予備とする。
-  rate limit/timeout/追加paginationが必要ならその項目をpartial/unknownで止める。
+- Reuse the existing `repository` / `resolve_ref` / `pull_requests` / `issues` / `issue` / `comments` /
+  `reviews` / `review_observations` / `checks_for_sha` / `head-runs` family.
+  Keep a shared observation so the same PR, head, and metadata are not refetched between calls.
+- Local observation reuses the existing bounded Git inspection path.
+  Don't copy the current `local_identity` custom subprocess path or add new parsers.
+  Missing root/remote/ref comparisons are added to the shared, verified wrapper.
+- Update-order candidates read up to 2 pages of `issues?state=all&sort=updated&direction=desc&per_page=100`
+  and separate PRs from Issues by the `pull_request` key. The same response is shared to pick
+  open PR candidates and open/closed Issue candidates separately. The most recently created open PR
+  is fetched with one page of `pulls?state=open&sort=created&direction=desc`.
+  A thin candidate fetch reusing existing normalization is added, so the same API is not fetched twice for different uses.
+- If both pages are all PRs and no Issue is found, don't report "no Issues".
+  Keep `selection_status=not_found_within_window`, `latest=null`,
+  `pages_fetched=N`, `exhausted=false`, and `next_page`;
+  text says "latest Issue: not observed (not found within N pages)".
+  `selection_status=none` is allowed only after the end of all pages is confirmed.
+  Permission errors/timeouts are a separate `selection_status=error`. The candidate display limit
+  and the completeness of latest-candidate selection/listing are separate fields.
+- For the latest general comment, read the response Link of `issues/{n}/comments?per_page=1&page=1`,
+  and if `rel="last"` exists, fetch that last page once.
+  For a static list this gets the full body in at most 2 calls per item (normally 1 for 0/1 comments).
+  Full-history `comments(last=1)` is not used, and no invalid direction parameter is relied on.
+  The focus Issue body reuses the body from update-order candidates, avoiding an extra Issue GET.
+- The last-page approach does not atomically guarantee the latest item when posts/deletions happen concurrently.
+  If the last response has yet another next, mark incompleteness as `latest_observed`;
+  an empty last page, inconsistent Link, or observed concurrent updates are also not called complete.
+  Automatic re-search must not exceed the budget. Page numbers are not treated as permanent counts.
+- The shared gh/urllib transport needs an extension to extract response headers in a bounded way.
+  Don't assume Link can be read from the current JSON-only transport.
+  rel=last is validated for HTTPS/api.github.com, the same repo/number/path, per_page=1, and a positive page;
+  arbitrary URLs are not followed. API auth is never forwarded to external URLs.
+- The latest review submission also uses bounded last-page fetching, reserving up to 2 calls.
+  The kind (general comment/review/inline/thread) is kept, and importance is not guessed from free text.
+- Record the created/updated order and IDs guaranteed by the API. Tie-breaking for equal timestamps
+  applies only within the observation; a total order including items outside the pages is not guaranteed.
+- Change the initial budget for the whole operation to 20 seconds, 20 HTTP requests, and 2 MiB received.
+  HTTP requests include failures/transport fallbacks, and the budget is not reset per API.
+  The designed ceiling for basic fetching is the 19 calls in the table below, with 1 spare.
+  If rate limits/timeouts/extra pagination are needed, stop that item as partial/unknown.
 
-| 取得 | 最大HTTP要求 | 共有/上限 |
+| Fetch | Max HTTP requests | Sharing/limit |
 |---|---:|---|
-| repository/default branch名 | 1 | 共有metadata |
-| default branchの最新commit | 1 | SHA/件名を同時取得 |
-| 現branchのopen PR候補 | 1 | head repo/ref照合、曖昧なら候補 |
-| 最新作成open PR | 1 | 1ページ |
-| 最新更新PR/Issueの混在候補 | 2 | 最大2ページを両用途で共有 |
-| 注目PRの不足metadata | 1 | current PR取得/候補で揃えば0回 |
-| 最新一般コメント（PR最大2＋Issue1） | 6 | 各対象最大2回、同一PRは統合 |
-| 注目PRの最新review submission | 2 | 末尾取得、状態/IDを保持 |
-| 注目PR同一headのchecks | 1 | 1ページ、不足はincomplete |
-| 注目PRのthread概要 | 1 | 1ページ/20件、返信の追加取得なし |
-| コメント対象PRのhead再確認 | 2 | 各1回、staleを検出 |
-| 合計 | 19 | 操作上限20回、予備1回 |
+| repository/default branch name | 1 | Shared metadata |
+| Latest commit on the default branch | 1 | SHA/subject fetched together |
+| Open PR candidates for the current branch | 1 | Match head repo/ref; candidates if ambiguous |
+| Most recently created open PR | 1 | 1 page |
+| Mixed most-recently-updated PR/Issue candidates | 2 | Up to 2 pages shared for both uses |
+| Missing metadata for the focus PR | 1 | 0 if current PR fetch/candidates cover it |
+| Latest general comments (up to 2 PRs + 1 Issue) | 6 | Up to 2 per item; the same PR is merged |
+| Latest review submission of the focus PR | 2 | Last-page fetch, keeping state/ID |
+| Checks on the focus PR's same head | 1 | 1 page; incomplete if more |
+| Thread summary of the focus PR | 1 | 1 page/20 items; no extra reply fetches |
+| Head recheck of PRs with comments | 2 | 1 each, to detect staleness |
+| Total | 19 | Operation limit 20, 1 spare |
 
-- PR候補とIssue候補は各最大3件。thread詳細をoverviewでfan-outしない。
-  `checks_for_sha` 等の現行関数が全ページを読む場合はoverview向けのbounded
-  呼出し口を追加し、一覧の全体を完全取得したと誤記しない。run/log/artifact取得は
-  既定overviewで追加実行せず、既存コマンドを次の入口として示す。
-- GraphQLが403等で使えない場合は1回で打ち切り、再試行やRESTからの解決状態推測を
-  行わない。`unknown (graphql unavailable)` と元のエラー分類を保持する。
-  permission/rate limit/proxyを識別できない応答からプロキシ原因と断定しない。
-- まずlocal→default branch→PR/Issue選択→双方の本文全文→head再確認→CI→review→thread
-  の順で優先する。追加paginationやfallbackで余裕が減った場合はreview/threadを
-  未観測にして本文を優先し、通常時の全文表示を省略オプションへ変更しない。
-- ネットワーク/APIが失敗しても取得済みlocal/remoteの観測を保持して出力する。
-  401、403、404、timeout、missing、truncated、未実行を区別し、0件に置換しない。
-- PR選択/CI/コメントを読む間のhead変更は、注目PRの最後のhead再確認で
-  `stale=true` とする。詳細観測が予算不足なら未確認と記録する。
-  overviewを自動merge/rebaseのゲートにせず、個別の厳密確認は既存CLIで行う。
-- 終了コード案: 0=選んだonline/offlineモードの主要観測完了、
-  1=概要は出したが一部unknown/partial、2=入力不正または概要自体を作れない。
-  CI failed/pendingやdirtyは「観測された状態」であり、overview自体の失敗とは別。
+- Up to 3 PR candidates and 3 Issue candidates each. Thread details are not fanned out in overview.
+  Where current functions such as `checks_for_sha` read all pages, add a bounded call path for
+  overview, and never misreport a list as fully fetched. Run/log/artifact fetches are not run in
+  the default overview; existing commands are shown as the next entry points.
+- If GraphQL is unavailable (403, etc.), stop after one attempt, with no retry and no guessing of
+  resolution state from REST. Keep `unknown (graphql unavailable)` and the original error class.
+  Don't conclude a proxy cause from a response that can't be identified as permission/rate limit/proxy.
+- Prioritize in this order: local → default branch → PR/Issue selection → full bodies of both →
+  head recheck → CI → review → thread. If extra pagination or fallbacks reduce headroom, leave
+  review/thread unobserved and prioritize bodies; normal full-text display is not turned into an opt-out.
+- If the network/API fails, keep and print the local/remote observations already obtained.
+  Distinguish 401, 403, 404, timeout, missing, truncated, and not-run, and don't replace them with 0 items.
+- A head change while reading PR selection/CI/comments is marked `stale=true` by the final head
+  recheck of the focus PR. If detailed observation runs out of budget, record it as unconfirmed.
+  overview is not a gate for automatic merge/rebase; strict per-item checks are done with the existing CLI.
+- Proposed exit codes: 0 = main observations complete for the chosen online/offline mode,
+  1 = summary printed but partly unknown/partial, 2 = invalid input or the summary itself could not be built.
+  CI failed/pending or a dirty tree is an "observed state", separate from a failure of overview itself.
 
-既定入口は読み取り専用。fetch/pull/rebase/reset/checkout/dispatch/comment/merge
-を実行しない。利用者はoverview後に既存Git/ghや書き込みAPIを自由に選べる。
-`--help`や「必ずこれを使う」という強制ではなく、最初に読むと便利な入口にする。
+The default entry point is read-only. It never runs fetch/pull/rebase/reset/checkout/dispatch/comment/merge.
+After overview, users are free to choose existing Git/gh or write APIs.
+It is meant as a handy first read, not something enforced via `--help` or "always use this".
 
-## 受入条件と実装の切り分け
+## Acceptance criteria and implementation split
 
-- 引数なし/cwdのrepo、subdirectory、非Git、detached HEAD、unborn HEAD、
-  dirty、Git無し、upstream無し、複数remote、fork、CI環境不一致をfixture化。
-- default branchがmain以外、remote SHAのlocal object無し、ローカルtracking refの
-  古さが不明な場合を区別。SHA相違だけからbehind数やrebase必要性を創作しない。
-- PR無し、branch一致が複数、最新作成と最新更新が別PR、同日時、コメント無し、
-  100件超のコメント、ページ上限、権限不足、部分結果、途中head変更を検証。
-- PR無しでIssueだけある、closed Issueが最新更新、Issue本文だけの更新、
-  古いコメントの編集、Issueコメント無し、PR混在ページ、Issue検索/一覧の
-  上限到達、2ページ全部PR、終端確認済み0件、末尾コメントの追加/削除を検証。
-  未観測と0件を区別し、PR/Issueのリンクを創作しない。
-- 長文の結論が末尾、先頭がfrom/to等のヘッダ、日本語/絵文字/改行、短い本文、
-  空本文をfixtureに含める。引数なしで末尾まで原文が保持され、240文字や8 KiBで
-  切られないこと、chars/hash/source identityと取得上限の失敗表示を検証する。
-- stdoutのmetadata件数上限と本文全文の保持、秘密入りremote/端末制御文字の除去、stderr分離、
-  text/JSONの観測一致、バックスラッシュ/実ESC/CR/LF/TABの逆変換、
-  --jsonの両配置、GraphQL失敗時の再試行ゼロ、終了コード、既存CLI互換性を検証。
-- fake transport/Git fixtureで、help/offline時の外部APIゼロ、全実行のmutationゼロ、
-  全体のrequest/byte/time上限、19回の最大構成・20回を超えないfallback、
-  本文優先の打ち切り、重複取得抑制を検証する。
-- README先頭の第一例を `python gh_identity.py` にする。SPECへ契約を追加し、
-  pytest/JUnitとPython 3.10〜3.14＋最新stable CIで確認する。
-- 実装は①boundedな概要API・引数なし分岐・renderer、②最新コメントの効率取得、
-  ③fixture/docs/CIの順。既存のレビュー観測/dispatchの残作業は混ぜて完了にしない。
+- Fixtures for: no arguments / repo at cwd, subdirectory, non-Git, detached HEAD, unborn HEAD,
+  dirty, no Git, no upstream, multiple remotes, fork, and CI environment mismatch.
+- Distinguish a default branch other than main, a remote SHA with no local object, and an unknown
+  age of the local tracking ref. Don't invent behind counts or rebase needs from a SHA mismatch alone.
+- Verify no PR, multiple branch matches, different latest-created and latest-updated PRs, equal times,
+  no comments, over 100 comments, page limits, permission errors, partial results, and head changes mid-run.
+- Verify Issues only with no PR, a closed Issue as most recently updated, body-only Issue updates,
+  edits to old comments, no Issue comments, pages mixed with PRs, hitting Issue search/list limits,
+  both pages all PRs, confirmed-end 0 items, and comments added/removed at the end.
+  Distinguish unobserved from 0 items, and never invent PR/Issue links.
+- Fixtures include long bodies with the conclusion at the end, bodies starting with from/to headers,
+  Japanese/emoji/newlines, short bodies, and empty bodies. Verify that with no arguments the original
+  is kept to the end and not cut at 240 characters or 8 KiB, plus chars/hash/source identity and the failure display for fetch limits.
+- Verify the stdout metadata line limit with full bodies kept, removal of secret-bearing remotes/terminal
+  control characters, stderr separation, matching text/JSON observations, reverse conversion of
+  backslash/real ESC/CR/LF/TAB, both `--json` positions, zero retries on GraphQL failure, exit codes, and existing CLI compatibility.
+- With a fake transport/Git fixture, verify zero external API calls for help/offline, zero mutations
+  in every run, overall request/byte/time limits, the 19-call maximum configuration and fallbacks
+  that never exceed 20, body-first cutoffs, and suppression of duplicate fetches.
+- Make the first example at the top of README `python gh_identity.py`. Add the contract to SPEC and
+  confirm with pytest/JUnit on Python 3.10–3.14 plus the latest stable CI.
+- Implement in this order: (1) bounded overview API, no-argument branch, and renderer; (2) efficient
+  latest-comment fetching; (3) fixtures/docs/CI. Remaining review-observation/dispatch work is not mixed in and marked done.
 
-このPRの段階では提案の記録のみ。実装/実データでの取得件数・時間・出力サイズの
-検証が済むまでは、引数なしoverviewが利用可能になったとは記載しない。
+At this PR's stage, this is only a record of the proposal. Until implementation and real-data
+verification of fetch counts, time, and output size are done, the no-argument overview is not described as available.
 
-## レビュー反映記録（2026-10-11）
+## Review follow-up record (2026-10-11)
 
-review 5482275860のS1/S2/N1〜N4を仕様へ反映。HTTP予算は内訳19回＋予備1回、
-混在Issue窓の未観測、末尾コメントとLink対応、可逆escape、overviewだけtext、
-GraphQL再試行禁止、CIへの全文記録を明文化。実装/動作検証は後続のまま。
+Applied S1/S2/N1–N4 from review 5482275860 to the spec. Made explicit: the HTTP budget of 19 calls
+plus 1 spare, unobserved state for the mixed Issue window, last-page comments with Link handling,
+reversible escaping, text only for overview, no GraphQL retries, and full-text logging in CI. Implementation and behavior checks remain follow-ups.
 
-API根拠: [Issue comments](https://docs.github.com/en/rest/issues/comments)、
-[pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)。
+API references: [Issue comments](https://docs.github.com/en/rest/issues/comments),
+[pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api).
