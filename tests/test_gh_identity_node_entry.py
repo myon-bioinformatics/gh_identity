@@ -87,7 +87,7 @@ def test_missing_interpreter_is_launcher_failure(tmp_path):
     env = _env()
     env[ENV_VAR] = str(tmp_path / "no-such-python")
     p = subprocess.run([NODE, str(ROOT / f"{TOOL}.cjs"), "--help"], env=env,
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert p.returncode == 2
     assert p.stdout == ""
 
@@ -106,3 +106,20 @@ def test_mutated_entry_breaks_parity(tmp_path, old, new):
     assert old in text
     (tmp_path / f"{TOOL}.cjs").write_text(text.replace(old, new), encoding="utf-8")
     assert any(_parity(tmp_path, c["args"])[0] != _parity(ROOT, c["args"])[1] for c in CASES)
+
+
+@needs_node
+@pytest.mark.parametrize("code", [0, 1, 3, 7])
+def test_entry_forwards_stdin_argv_and_exit_code(tmp_path, code):
+    (tmp_path / "vendor").mkdir()
+    shutil.copy(ROOT / "vendor" / "py_launch.cjs", tmp_path / "vendor" / "py_launch.cjs")
+    shutil.copy(ROOT / f"{TOOL}.cjs", tmp_path / f"{TOOL}.cjs")
+    (tmp_path / f"{TOOL}.py").write_text(
+        "import json, sys\n"
+        "sys.stdout.write(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read(),"
+        " 'nosite': sys.flags.no_site}))\n"
+        f"sys.exit({code})\n", encoding="utf-8")
+    p = subprocess.run([NODE, str(tmp_path / f"{TOOL}.cjs"), "a b", "--x=ü"], env=_env(),
+                       input="こんにちは\n", capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert p.returncode == code
+    assert json.loads(p.stdout) == {"argv": ["a b", "--x=ü"], "stdin": "こんにちは\n", "nosite": 1}
