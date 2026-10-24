@@ -127,10 +127,14 @@ def test_entry_forwards_stdin_argv_and_exit_code(tmp_path, code):
     shutil.copy(ROOT / f"{TOOL}.cjs", tmp_path / f"{TOOL}.cjs")
     (tmp_path / f"{TOOL}.py").write_text(
         "import json, sys\n"
-        "sys.stdout.write(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read(),"
+        "sys.stdout.write(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.buffer.read().decode('utf-8'),"
         " 'nosite': sys.flags.no_site}))\n"
         f"sys.exit({code})\n", encoding="utf-8")
-    p = subprocess.run([NODE, str(tmp_path / f"{TOOL}.cjs"), "a b", "--x=ü"], env=_env(),
+    # A non-UTF-8 child locale must not make this Unicode-stdin fixture fail.
+    # Decode stdin explicitly in the stub without changing the production launcher.
+    env = _env()
+    env["PYTHONIOENCODING"] = "cp1252"
+    p = subprocess.run([NODE, str(tmp_path / f"{TOOL}.cjs"), "a b", "--x=ü"], env=env,
                        input="こんにちは\n", capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert p.returncode == code
     assert json.loads(p.stdout) == {"argv": ["a b", "--x=ü"], "stdin": "こんにちは\n", "nosite": 1}
