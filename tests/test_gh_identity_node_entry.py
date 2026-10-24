@@ -134,3 +134,74 @@ def test_entry_forwards_stdin_argv_and_exit_code(tmp_path, code):
                        input="こんにちは\n", capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert p.returncode == code
     assert json.loads(p.stdout) == {"argv": ["a b", "--x=ü"], "stdin": "こんにちは\n", "nosite": 1}
+
+
+@needs_node
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal forwarding contract")
+@pytest.mark.parametrize("json_errors", [False, True], ids=["text", "json"])
+def test_entry_forwards_repeated_signals_until_child_exits(tmp_path, json_errors):
+    """Exercise the real entry and vendored launcher, with ack-driven signals."""
+    import selectors
+    import signal
+
+    (tmp_path / "vendor").mkdir()
+    shutil.copy(ROOT / "vendor" / "py_launch.cjs", tmp_path / "vendor" / "py_launch.cjs")
+    shutil.copy(ROOT / f"{TOOL}.cjs", tmp_path / f"{TOOL}.cjs")
+    (tmp_path / f"{TOOL}.py").write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGINT, lambda *_: print('ACK', flush=True))\n"
+        "print('READY', flush=True)\n"
+        "while True: time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    env = _env()
+    env["PY_LAUNCH_ERROR_FORMAT"] = "json" if json_errors else ""
+    child = subprocess.Popen(
+        [NODE, str(tmp_path / f"{TOOL}.cjs")],
+        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            for expected, next_signal in [
+                (b"READY\n", signal.SIGINT),
+                (b"ACK\n", signal.SIGINT),
+                (b"ACK\n", signal.SIGTERM),
+            ]:
+                assert selector.select(timeout=5), "child did not acknowledge forwarded signal"
+                assert child.stdout.readline() == expected
+                child.send_signal(next_signal)
+        stdout, stderr = child.communicate(timeout=5)
+        assert child.returncode == 2
+        assert stdout == b""
+        if json_errors:
+            error = json.loads(stderr)
+            assert error["code"] == "ESIGNAL"
+            assert error["exit_code"] == 2
+            assert "SIGTERM" in error["message"]
+        else:
+            assert b"terminated by signal SIGTERM" in stderr
+    finally:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.communicate(timeout=5)
+
+
+@needs_node
+def test_entry_no_site_also_protects_interpreter_probe(tmp_path):
+    marker = tmp_path / "site-hook-ran"
+    (tmp_path / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    env = _env()
+    env["PYTHONPATH"] = str(tmp_path)
+    result = subprocess.run(
+        [NODE, str(ROOT / f"{TOOL}.cjs"), "--help"], env=env,
+        capture_output=True, timeout=15,
+    )
+    assert result.returncode == 0
+    assert not marker.exists(), "noSite must cover interpreter discovery too"
