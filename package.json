@@ -1,0 +1,7 @@
+{
+  "name": "gh-identity",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  }
+}
