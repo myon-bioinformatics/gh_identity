@@ -20,7 +20,7 @@ jobs:
         env:
           UV_PYTHON_PREFERENCE: ${{ matrix.python == '3.x' && 'only-managed' || 'managed' }}
         with:
-          version: "0.13.3"
+          version: "latest"
           python-version: "${{ matrix.python == '3.x' && '3' || matrix.python }}"
           activate-environment: true
           enable-cache: false
