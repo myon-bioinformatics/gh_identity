@@ -45,7 +45,7 @@ The `capabilities` command includes `git_version` and `gh_version` by default, i
 
 ## Python compatibility
 
-Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. The runtime CI lane checks 3.10–3.14 and `3.x`, and the pytest lane checks 3.11–3.14 and `3.x` (the latest stable Python 3 that uv provides; the workflows map the `3.x` label to uv's `3`). The moving job follows new stable releases without adding a hard-coded upper bound. Passing CI verifies the tested versions; it does not guarantee untested future releases.
+Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. The runtime CI lane checks 3.10–3.14 and `3.x`, and the pytest lane checks 3.11–3.14 and `3.x` (the newest stable Python 3 distribution known to the pinned uv release; the workflows map the `3.x` label to uv's `3` and require a managed interpreter before creating the environment, so an older system Python cannot satisfy that lane). The moving job has no hard-coded Python upper bound, but newer Python releases require the pinned uv release to know about their distributions; this is not a guarantee of the newest upstream patch. Passing CI verifies the tested versions; it does not guarantee untested future releases.
 
 ## Quick start
 
