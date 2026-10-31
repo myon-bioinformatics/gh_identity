@@ -1572,7 +1572,7 @@ python -S -m unittest discover -s tests -p test_gh_identity.py -v
 has no third-party dependencies, and `tests/requirements.txt` lists only the
 test-only tools. Runtime metadata does not
 raise the source/vendoring floor to the development floor. CI gets Python from setup-uv
-v10.3.3 (`actions/setup-python` is not used) and uses uv 0.13.3. Setup actions
+v10.3.3 (`actions/setup-python` is not used) and uses the latest uv. Setup actions
 using Node 24 require runner 2.327.1 or newer (GitHub-hosted runners are used).
 
 ## Comment files
