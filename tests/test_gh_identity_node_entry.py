@@ -81,7 +81,7 @@ def test_entry_uses_shared_launcher_only():
     assert "child_process" not in text
     assert f'"{TOOL}.py"' in text
     pkg = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
-    assert pkg["engines"]["node"] == ">=24"
+    assert pkg["engines"]["node"] == ">=26"
 
 
 @needs_node
