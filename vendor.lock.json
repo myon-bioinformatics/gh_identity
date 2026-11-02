@@ -12,12 +12,12 @@
     },
     {
       "repository": "myon-bioinformatics/myon-bioinformatics",
-      "ref": "1116d5c4f55d25af4d21cfe9b3c88f49d3a476fa",
-      "commit": "1116d5c4f55d25af4d21cfe9b3c88f49d3a476fa",
+      "ref": "1f6f1e345f640827703e2872151a73b4cbdfd382",
+      "commit": "1f6f1e345f640827703e2872151a73b4cbdfd382",
       "source": "py_launch.cjs",
       "destination": "vendor/py_launch.cjs",
-      "blob_sha": "006817bc813187fa45abc3e8954fde27a2b73caa",
-      "sha256": "a78fe656cde285a83501b9b19d97b9ebde6f9637919b3adb95c50eb254154536"
+      "blob_sha": "4a35b158b4a4cbd3a5d672ded1337a138a44bbd2",
+      "sha256": "f900e2662e7065a087897f4b927815d34a81f0e9ca811c0412151b38a218a501"
     }
   ]
 }
