@@ -1594,7 +1594,7 @@ coordinates several repositories, grouped file commits, existing-PR reuse,
 explicit source merges and verified source closures. Standalone pushes remain in
 parent `gh_ops.py git-push`.
 
-## Node entry (Node 24+)
+## Node entry (Node 26+)
 
 `node gh_identity.cjs <args>` runs `gh_identity.py` through the vendored shared launcher
 `vendor/py_launch.cjs` (pinned in `vendor.lock.json`). Arguments, stdin/stdout/stderr and the
