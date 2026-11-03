@@ -1600,3 +1600,9 @@ parent `gh_ops.py git-push`.
 `vendor/py_launch.cjs` (pinned in `vendor.lock.json`). Arguments, stdin/stdout/stderr and the
 exit code are passed through unchanged; Python runs with `-S`. Set `GH_IDENTITY_PYTHON` to pick
 the interpreter. Launcher failures (no Python 3.9+, spawn error, signal) exit 2.
+
+## Focused test discovery
+
+See [standard-library discovery commands](docs/unittest-discovery.md) for
+validated `python -S -m unittest discover` recipes, filename/name filtering,
+and the boundary with the full pytest suite.
