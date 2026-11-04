@@ -208,8 +208,10 @@ whole observation. Offline fixtures use synthetic values and cover exact
 identity, caps/timeouts, redaction, BOM/ANSI, redirects, authentication and
 incomplete responses. Live GitHub checks are separate and opt-in.
 
-The existing CI matrix targets Python 3.10, 3.11, 3.12, 3.13 and 3.14, plus
-moving `3.x` with `check-latest`. Passing a given PR's CI is evidence for that
+The runtime and development CI matrices target Python 3.11, 3.12, 3.13 and 3.14,
+plus moving `3.x`, mapped to uv's `3` with a managed interpreter required before
+environment creation. `project.requires-python` in `pyproject.toml` declares the
+Python 3.11+ source/runtime support floor. Passing a given PR's CI is evidence for that
 exact head and tested interpreters, not a promise about an untested future
 release. This job-log addition addresses only its slice of Issue #20. Other
 pending read APIs and contract-validation items remain open; this implementation

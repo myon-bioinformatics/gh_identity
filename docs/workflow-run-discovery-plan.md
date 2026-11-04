@@ -13,7 +13,7 @@ Provide a callable, small Python function within `gh_identity.py`, plus a thin C
 - [ ] A hard aggregate cap cannot be bypassed by merely splitting requests into smaller pages; on size limit, reduce page size **only where API supports it**, or return a truthful partial result. Avoid duplicated results or gaps between resumed requests and document potential drift when underlying run history changes.
 - [ ] Preserve both authenticated gh and anonymous public urllib transport behavior and bounded payload handling
 - [ ] Offline regression fixtures for workflow ID/path, filters, history, reruns, pagination/size caps, resume, malformed data, backoff and exhaustion
-- [ ] README/SPEC API/CLI examples and output/exit contracts; same-head Python 3.10–3.14 plus 3.x CI
+- [ ] README/SPEC API/CLI examples and output/exit contracts; same-head Python 3.11–3.14 plus 3.x CI
 
 ## Explicit boundaries
 Keep job log, workflow steps and other Issue #20 items independent. Avoid speculative complete-run reconstruction or unbounded automatic recovery. Keep PR as Draft until code, offline regressions, docs and same-head CI are complete. Do not merge without validation.

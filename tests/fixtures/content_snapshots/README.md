@@ -6,7 +6,7 @@ and exact resource identity are in manifest.json. These are historical snapshots
 Issue and PR descriptions may subsequently change. They do not contain comment
 threads, review threads, HTML pages, or a guarantee of complete commit diffs.
 
-Run from the repository root on POSIX with Python 3.10+:
+Run from the repository root on POSIX with Python 3.11+:
 
 ```sh
 python scripts/check_content_snapshots.py tests/fixtures/content_snapshots
