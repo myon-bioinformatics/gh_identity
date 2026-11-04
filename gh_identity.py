@@ -4844,7 +4844,8 @@ def fleet_checks(roots, *, ignore=FLEET_IGNORE, steps=False, transport="auto", t
                 raise ValueError("origin is not a GitHub remote")
             sha = checkout_head(root)["sha"]
             observed = checks_for_sha(full, sha, transport=transport, timeout=timeout)
-            kept = [c for c in observed["checks"] if c["name"] not in set(ignore)]
+            ignored = set(ignore)
+            kept = [c for c in observed["checks"] if c["name"] not in ignored]
             summary = summarize_checks(kept, len(kept)) if kept else {"state": "pending", "checks": []}
             failed = [c for c in kept if c["status"] == "completed"
                       and c["conclusion"] not in ("success", "skipped", "neutral")]
