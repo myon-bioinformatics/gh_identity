@@ -1,8 +1,9 @@
 # Focused standard-library test discovery
 
-Run from this repository root with Python 3.11 or newer. These commands use
-Python’s built-in test runner; no pip, uv sync, pytest or browser installation
-is needed for the listed checks. `-S` keeps site-packages out of the interpreter.
+Run from this repository root with Python 3.10 or newer. These commands use
+Python’s built-in test runner; the listed checks need no third-party package
+or browser installation. `-S` disables automatic `site` initialization and its
+usual site-packages path additions; it is not a complete isolation boundary.
 
 ```sh
 python -S -m unittest discover -s tests -p test_gh_identity.py -v
@@ -10,7 +11,8 @@ python -S -m unittest discover -s tests -p test_gh_identity.py -v
 
 Validated on Linux / CPython 3.12.14: **66 tests, exit 0** (2026-11-03).
 
-To narrow the first command to a test name, use the built-in `-k` filter:
+To narrow the first command to a test name, use the built-in `-k` filter
+(available since Python 3.7, including all versions supported here):
 
 ```sh
 python -S -m unittest discover -s tests -p test_gh_identity.py -v -k test_repo_validation
