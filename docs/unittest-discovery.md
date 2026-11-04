@@ -1,6 +1,6 @@
 # Focused standard-library test discovery
 
-Run from this repository root with Python 3.10 or newer. These commands use
+Run from this repository root with Python 3.11 or newer. These commands use
 Python’s built-in test runner; the listed checks need no third-party package
 or browser installation. `-S` disables automatic `site` initialization and its
 usual site-packages path additions; it is not a complete isolation boundary.

@@ -45,7 +45,7 @@ The `capabilities` command includes `git_version` and `gh_version` by default, i
 
 ## Python compatibility
 
-Python 3.10 and newer is the compatibility target; there is no runtime upper-version gate. The runtime CI lane checks 3.10–3.14 and `3.x`, and the pytest lane checks 3.11–3.14 and `3.x` (the newest stable Python 3 distribution known to the pinned uv release; the workflows map the `3.x` label to uv's `3` and require a managed interpreter before creating the environment, so an older system Python cannot satisfy that lane). The moving job has no hard-coded Python upper bound, but newer Python releases require the pinned uv release to know about their distributions; this is not a guarantee of the newest upstream patch. Passing CI verifies the tested versions; it does not guarantee untested future releases.
+Python 3.11 and newer is the compatibility target, declared by `project.requires-python` in `pyproject.toml`; there is no runtime upper-version gate. Both the runtime and pytest CI lanes check 3.11–3.14 and `3.x` (the newest stable Python 3 distribution known to the selected uv release; the workflows map the `3.x` label to uv's `3` and require a managed interpreter before creating the environment, so an older system Python cannot satisfy that lane). The moving job has no hard-coded Python upper bound, but newer Python releases require uv to know about their distributions; this is not a guarantee of the newest upstream patch. Passing CI verifies the tested versions; it does not guarantee untested future releases.
 
 ## Quick start
 
@@ -1557,8 +1557,10 @@ Multi-file commits through the Git Data API are a write, so they live in the par
 
 ## Runtime and development Python policy
 
-The standard-library runtime supports Python 3.10+; this change preserves the
-existing runtime floor. The separate `runtime-compatibility` CI lane executes
+The standard-library runtime, including standalone and vendored copies, supports
+Python 3.11+. This is the supported/tested floor, not a claim that older
+interpreters cannot execute any part of the module. The separate
+`runtime-compatibility` CI lane executes
 behavior tests with `python -S`, without installing pytest or any third-party
 package. Development/test environments use Python 3.11+ and a committed uv lock:
 
@@ -1568,10 +1570,13 @@ uv run --locked python -m pytest
 python -S -m unittest discover -s tests -p test_gh_identity.py -v
 ```
 
-`pyproject.toml` is the canonical development dependency definition. The runtime
-has no third-party dependencies, and `tests/requirements.txt` lists only the
-test-only tools. Runtime metadata does not
-raise the source/vendoring floor to the development floor. CI gets Python from setup-uv
+`pyproject.toml` is the canonical Python requirement and development dependency
+definition: `project.requires-python = ">=3.11"` applies to source runtime support
+as well as development. The runtime has no third-party dependencies, and
+`tests/requirements.txt` lists only the test-only tools. A copied `.py` file does
+not read this project metadata; consumers must select Python 3.11+ themselves.
+This policy does not update consumers' vendored files or interpreter settings.
+CI gets Python from setup-uv
 v10.3.3 (`actions/setup-python` is not used) and uses the latest uv. Setup actions
 using Node 24 require runner 2.327.1 or newer (GitHub-hosted runners are used).
 
@@ -1599,7 +1604,11 @@ parent `gh_ops.py git-push`.
 `node gh_identity.cjs <args>` runs `gh_identity.py` through the vendored shared launcher
 `vendor/py_launch.cjs` (pinned in `vendor.lock.json`). Arguments, stdin/stdout/stderr and the
 exit code are passed through unchanged; Python runs with `-S`. Set `GH_IDENTITY_PYTHON` to pick
-the interpreter. Launcher failures (no Python 3.9+, spawn error, signal) exit 2.
+the interpreter, which must be Python 3.11+ for supported use. The pinned shared
+launcher still probes for Python 3.9+; that discovery threshold is not this tool's
+support policy and does not read `pyproject.toml`. Launcher failures (no Python
+meeting that probe, spawn error, signal) exit 2. The launcher and its vendor pin
+are unchanged by this repository's Python policy.
 
 ## Focused test discovery
 

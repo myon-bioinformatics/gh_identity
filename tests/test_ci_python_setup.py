@@ -1,6 +1,8 @@
-"""Protect the moving stable lane without changing fixed-minor interpreter policy."""
+"""Keep declared Python support, runtime CI, and contributor CI aligned."""
 from pathlib import Path
+import json
 import re
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,27 @@ def job_text(path, name):
 
 
 class TestCIPythonSetup(unittest.TestCase):
+    def test_python_support_metadata_and_ci_agree(self):
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+        self.assertEqual(project["project"]["requires-python"], ">=3.11")
+        self.assertEqual(lock["requires-python"], project["project"]["requires-python"])
+        self.assertEqual(project["project"]["dependencies"], [])
+        self.assertFalse(project["tool"]["uv"]["package"])
+        self.assertEqual(project["tool"]["uv"]["dependency-groups"]["dev"]["requires-python"], ">=3.11")
+        expected = ["3.11", "3.12", "3.13", "3.14", "3.x"]
+        for path, job, selector in (
+            (".github/workflows/ci.yml", "test", "python-version"),
+            (".github/workflows/runtime-compatibility.yml", "runtime", "python"),
+        ):
+            with self.subTest(workflow=path):
+                body = job_text(path, job)
+                match = re.search(r"(?m)^        " + re.escape(selector) + r": (\[[^\n]+\])$", body)
+                self.assertIsNotNone(match, "Missing Python version matrix")
+                self.assertEqual(json.loads(match.group(1)), expected)
+        runtime = job_text(".github/workflows/runtime-compatibility.yml", "runtime")
+        self.assertIn("python -S -m unittest discover -s tests -p test_gh_identity.py -v", runtime)
+
     def assert_latest_setup(self, path, job_name, selector):
         job = job_text(path, job_name)
         steps = re.split(r"(?m)^      - ", job)
