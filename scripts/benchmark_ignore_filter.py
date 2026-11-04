@@ -24,7 +24,8 @@ def main():
             start=time.perf_counter_ns()
             result=(baseline if name=='baseline' else indexed)(checks,ignore)
             elapsed=time.perf_counter_ns()-start
-            assert result==expected
+            if not (result==expected):
+                raise SystemExit('benchmark_ignore_filter: result mismatch')
             if repeat:samples[name].append(elapsed)
     print(json.dumps({'python':sys.version,'checks':5000,'ignored_names':1000,'samples_ns':samples,
                      'median_ns':{k:statistics.median(v) for k,v in samples.items()}},indent=2))
