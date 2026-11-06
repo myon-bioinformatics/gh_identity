@@ -10,7 +10,7 @@ Single-file, stdlib-only Python interface for portable GitHub identity and opera
 - Keeps repository / PR / SHA / review / comment / workflow / run identity explicit
 - Bounded, digest-first output for long GitHub threads
 - Guarded writes with dry-run/verification and mutation-uncertainty handling
-- Designed to absorb the proven GitHub-operation patterns currently spread across browser-test-kit, Ironmate, Flutter, mcp-toolcall-lab and Aoi
+- Designed to absorb the proven GitHub-operation patterns currently spread across BrowserTestKit, Ironmate, Flutter, mcp-toolcall-lab and Aoi
 
 ## Architecture and visual identity
 
@@ -537,21 +537,21 @@ That result applies to the recorded converter pin; it is not a claim about every
 newer markdown revision. A canonical converter fix is being validated separately;
 rerun the same probe with the exact adopted file before changing this baseline.
 
-For optional cross-project wrapper checks, supply an existing trusted web-ui module:
+For optional cross-project wrapper checks, supply an existing trusted PySaiyanWeBoo module:
 
 ```sh
 python scripts/check_html_roundtrip.py /path/to/vendor/markdown.py \
   --web-ui-module /path/to/web_ui.py
 ```
 
-This reuses web-ui's `render_document`, `shared_stylesheets`, and `shared_scripts`
+This reuses PySaiyanWeBoo's `render_document`, `shared_stylesheets`, and `shared_scripts`
 to wrap each fragment with inline CSS, shared CSS references and opt-in module
 script references. GHI extraction before/after wrapping must match exactly.
 It prints module SHA-256 identities, requires no vendor changes, and performs no
-network requests. CSS rendering and JS execution are not tested. With web-ui PR
+network requests. CSS rendering and JS execution are not tested. With PySaiyanWeBoo PR
 #43 at `9ee0232494cb124ed24b79ef87980630bc550e31`, all six wrapper cases matched;
 the independent Markdown code-newline failure still correctly yields exit 1.
-This optional composition keeps rendering in web-ui, conversion in markdown,
+This optional composition keeps rendering in PySaiyanWeBoo, conversion in markdown,
 and extraction in GHI; consumers can use the same runner with their adopted files.
 
 Page-family regressions now model Wiki plus sidebar, file code plus controls,
@@ -596,10 +596,10 @@ python gh_identity.py html-content fixture.html --selector '#dom-lab-body'
 ```
 
 At the initial capture, only the export/extraction path was exercised because
-Gradio was unavailable. Later, web-ui PR #43 at `8ff5bfb` added and passed a
+Gradio was unavailable. Later, PySaiyanWeBoo PR #43 at `8ff5bfb` added and passed a
 local Gradio + Chromium DOM integration test
-([CI evidence](https://github.com/myon-bioinformatics/web-ui/actions/runs/37887560280)).
-That validates web-ui's shared reproduction path, not this GHI-specific
+([CI evidence](https://github.com/myon-bioinformatics/PySaiyanWeBoo/actions/runs/37887560280)).
+That validates PySaiyanWeBoo's shared reproduction path, not this GHI-specific
 `gh_identity_serve_dom_lab.py` server path, which remains unverified.
 The built-in representative fixture does not reproduce an arbitrary site's DOM,
 computed CSS, JavaScript state, authentication, or network restrictions.
@@ -664,10 +664,10 @@ chat transcript extraction nor whole-site support.
 
 ### Browser capture ownership
 
-Browser launch/DOM acquisition now belongs to browser-test-kit PR #54:
-https://github.com/myon-bioinformatics/browser-test-kit/pull/54
+Browser launch/DOM acquisition now belongs to BrowserTestKit PR #54:
+https://github.com/myon-bioinformatics/BrowserTestKit/pull/54
 
-From a browser-test-kit checkout:
+From a BrowserTestKit checkout:
 
 ```sh
 python examples/capture_browser_dom.py https://chatgpt.com/ --selector h1 --output chatgpt-dom.json
@@ -692,7 +692,7 @@ not become extra declarations. This limited rule follows the
 
 This is still structural body extraction, not browser `innerText`: `aria-hidden`
 remains excluded for API compatibility even when CSS would display its text.
-Image alt text remains included, and controls remain opt-in. browser-test-kit's
+Image alt text remains included, and controls remain opt-in. BrowserTestKit's
 page-text/capture path has a different visible-text comparison contract; do not
 use equality between these APIs as proof of browser visibility. Use a recorded
 browser `innerText` observation when that is the required reference.
@@ -726,7 +726,7 @@ once its consumer lock explicitly selects this revision.
 ### Repository orientation (`scripts/repo_overview.py`)
 
 Bounded, human-oriented repository summary (stdlib-only, `python -S`), migrated
-from browser-test-kit (provenance in the file header). It prints about/README
+from BrowserTestKit (provenance in the file header). It prints about/README
 excerpt, key config files, a file list via `git_ls_files` from this repo's
 `gh_identity.py`, and optional `--stats` / `--churn`. It is not merged into
 `gh_identity.py`.
@@ -736,7 +736,7 @@ python -S scripts/repo_overview.py --stats --churn 10
 ```
 
 The built-in `overview` command remains the JSON workspace summary; `repo_overview.py`
-is the log-friendly orientation format previously shipped from browser-test-kit.
+is the log-friendly orientation format previously shipped from BrowserTestKit.
 
 ## Local branch switching (`git-switch`)
 
