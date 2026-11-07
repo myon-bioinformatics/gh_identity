@@ -1,7 +1,5 @@
 """subtree-sync: plan-only by default, push to a new branch only, pull with verification (offline)."""
-import json
-import subprocess
-import sys
+import json, subprocess, sys
 from pathlib import Path
 
 import pytest

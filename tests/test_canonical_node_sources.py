@@ -1,6 +1,5 @@
 """Node sources must use accepted upstream main commits and exact bytes."""
-import hashlib
-import json
+import hashlib, json
 from pathlib import Path
 
 

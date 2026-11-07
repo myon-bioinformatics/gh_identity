@@ -1,6 +1,5 @@
 """local-position: where am I (cwd, Git top level, HEAD, changes, remote)."""
-import json
-import subprocess
+import json, subprocess
 
 import pytest
 import gh_identity as g

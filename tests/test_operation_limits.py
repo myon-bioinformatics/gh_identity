@@ -1,13 +1,6 @@
 """Operation budgets, injected pagination and real bounded transport tests."""
-import contextlib
-import io
-import json
-import subprocess
-import sys
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+import contextlib, io, json, subprocess, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer; from unittest.mock import patch
 
 import pytest
 import gh_identity as g

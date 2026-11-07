@@ -1,13 +1,6 @@
 """Offline contracts for exact, bounded, sanitized Actions job log reads."""
-import copy
-import hashlib
-import http.client
-import json
-import socket
-import urllib.error
-from email.message import Message
-from pathlib import Path
-from unittest.mock import patch
+import copy, hashlib, http.client, json, socket, urllib.error
+from email.message import Message; from pathlib import Path; from unittest.mock import patch
 
 import pytest
 import gh_identity as g

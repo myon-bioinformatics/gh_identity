@@ -1,8 +1,6 @@
 """Run the recorded public-response CLI probe as one integration smoke check."""
+import os, subprocess, sys
 from pathlib import Path
-import os
-import subprocess
-import sys
 import pytest
 
 

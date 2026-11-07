@@ -1,8 +1,6 @@
 """Replay actual browser DOM fragments without repeat GitHub access."""
-import json
+import json, subprocess, sys
 from pathlib import Path
-import subprocess
-import sys
 import pytest
 import gh_identity as ghi
 

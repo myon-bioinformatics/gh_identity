@@ -1,8 +1,6 @@
 """Recorded small DOM regions; site-independent extraction, no live requests."""
-import json
+import json, subprocess, sys
 from pathlib import Path
-import subprocess
-import sys
 import pytest
 import gh_identity as ghi
 

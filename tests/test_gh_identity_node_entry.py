@@ -1,13 +1,7 @@
 """gh_identity.cjs: Node entry parity with gh_identity.py through the vendored shared py_launch.cjs."""
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import re
-import shutil
-import subprocess
-import sys
+import hashlib, json, os, re, shutil, subprocess, sys
 from pathlib import Path
 
 import pytest

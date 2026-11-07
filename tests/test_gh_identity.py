@@ -1,5 +1,4 @@
-import urllib.parse
-import json, unittest
+import json, unittest, urllib.parse
 from unittest import mock
 import gh_identity as g
 

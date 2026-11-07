@@ -1,8 +1,5 @@
 """merge-trial and git-activity: local and read-only."""
-import json
-import os
-import subprocess
-import sys
+import json, os, subprocess, sys
 
 import pytest
 import gh_identity as g

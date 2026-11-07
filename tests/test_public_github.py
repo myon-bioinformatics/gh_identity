@@ -1,9 +1,5 @@
 """Public GitHub URL helpers (Atom branch feed, raw.githubusercontent.com)."""
-import base64
-import io
-import json
-import socket
-import urllib.error
+import base64, io, json, socket, urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import argparse
-import importlib.util
-import json
-import os
-import subprocess
-import sys
+import argparse, importlib.util, json, os, subprocess, sys
 from pathlib import Path
 
 import pytest

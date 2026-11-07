@@ -1,7 +1,5 @@
 """Subprocess mutation tests: each mutant must fail at least one targeted pytest node."""
-import os
-import subprocess
-import sys
+import os, subprocess, sys
 from pathlib import Path
 
 import pytest

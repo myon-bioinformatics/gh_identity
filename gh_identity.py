@@ -1,24 +1,11 @@
 #!/usr/bin/env python3
 """gh_identity: stdlib-only GitHub operations with gh-first/urllib fallback."""
 from __future__ import annotations
-from collections import Counter
-import base64,io,zipfile
-import argparse,fnmatch,json,os,re,shutil,signal,subprocess,sys,urllib.error,urllib.parse,urllib.request
-from datetime import datetime,timezone
-from html.parser import HTMLParser
-import hashlib
-import http.client
+import argparse, base64, contextlib, contextvars, fnmatch, functools, hashlib, http.client, inspect, io, json, math, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
+from collections import Counter; from datetime import datetime, timezone; from html.parser import HTMLParser; from pathlib import Path, PurePosixPath
 API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
-import contextlib
-import contextvars
-import functools
-import inspect
-import math
-import threading
-import time
-import tempfile
 
 
 class _Budget:
@@ -2067,7 +2054,6 @@ def compare_sha(local,remote_sha):
 
 # Local Git observations migrated from parent git_inspector.py (380d877).
 # Named read-only operations, bounded output; trusted checkout configuration.
-from pathlib import Path, PurePosixPath
 
 class GitInspectionError(RuntimeError):
     """A bounded read-only Git observation failed."""

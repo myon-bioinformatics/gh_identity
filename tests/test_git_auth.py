@@ -1,15 +1,5 @@
 """Real Git transports against controlled wrappers/helpers; no user credentials."""
-import base64
-import functools
-import http.server
-import json
-import os
-import shlex
-import shutil
-import ssl
-import subprocess
-import threading
-import time
+import base64, functools, http.server, json, os, shlex, shutil, ssl, subprocess, threading, time
 
 import pytest
 import gh_identity as g

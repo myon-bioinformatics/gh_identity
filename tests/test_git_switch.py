@@ -1,6 +1,5 @@
 """git switch: planned by default, performed only with write, verified after."""
-import json
-import subprocess
+import json, subprocess
 
 import pytest
 import gh_identity as g
