@@ -14,10 +14,10 @@ import sys
 import tempfile
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('snapshots', type=Path, help='directory containing manifest.json and raw responses')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     source = args.snapshots.resolve()
     cli = Path(__file__).resolve().parents[1] / 'gh_identity.py'
     try:
