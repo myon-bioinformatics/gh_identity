@@ -23,6 +23,9 @@ jobs:
           version: "latest"
           python-version: "${{ matrix.python == '3.x' && '3' || matrix.python }}"
           activate-environment: true
-          enable-cache: false
+          enable-cache: true
+          # Pull requests restore the cache and never write it; only main saves it.
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          prune-cache: true
       - name: Exercise runtime behavior without site-packages
         run: python -S -m unittest discover -s tests -p test_gh_identity.py -v
