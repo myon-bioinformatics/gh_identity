@@ -6122,6 +6122,7 @@ def _cli_parser():
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
  x=s.add_parser("labels",help="add/remove existing labels on one Issue/PR (planned unless --write)");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--add",action="append",default=[],metavar="LABEL");x.add_argument("--remove",action="append",default=[],metavar="LABEL");x.add_argument("--write",action="store_true")
  x=s.add_parser("comment");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("body",nargs="?");x.add_argument("--body-file");x.add_argument("--operation-key");x.add_argument("--sanitize-mentions",action="store_true");x.add_argument("--write",action="store_true")
+ for p in (a,*s.choices.values()):p.suggest_on_error=True  # 🤔 argparse 3.14+: "maybe you meant" for subcommands and choices; older Pythons ignore it
  _CLI_PARSER=a;return a
 def _main(argv=None):
  argv=list(sys.argv[1:] if argv is None else argv)
