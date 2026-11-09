@@ -4,14 +4,8 @@
 Exit 0: all bodies match; 1: output/CLI mismatch; 2: invalid evidence or runner error.
 This tests a recorded gh transport, not live GitHub connectivity.
 """
-import argparse
-import hashlib
-import json
-import os
+import argparse, hashlib, json, os, subprocess, sys, tempfile
 from pathlib import Path
-import subprocess
-import sys
-import tempfile
 
 
 def main():

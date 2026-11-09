@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Optional local Gradio DOM lab. No external page fetch or CORS workaround."""
-import argparse
-import importlib.util
+import argparse, importlib.util, sys
 from pathlib import Path
-import sys
 
 
 def render_fixture(markdown_path):

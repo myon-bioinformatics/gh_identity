@@ -1,8 +1,6 @@
 """Offline review identity, bounded pagination and failure contracts."""
-import copy
-import json
-from pathlib import Path
-from unittest.mock import patch
+import copy, json
+from pathlib import Path; from unittest.mock import patch
 
 import pytest
 import gh_identity as g

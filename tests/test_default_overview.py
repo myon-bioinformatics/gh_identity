@@ -1,5 +1,4 @@
-import json
-import subprocess
+import json, subprocess
 
 import pytest
 import gh_identity as ghi

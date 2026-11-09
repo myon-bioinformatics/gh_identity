@@ -2,13 +2,8 @@
 """Small HTML/Markdown semantic round-trip probe; explicit external markdown.py.
 Exit 0: matched, 1: semantic drift, 2: runner error. No network or screenshots.
 """
-import argparse
-import hashlib
-import importlib.util
-import json
+import argparse, hashlib, importlib.util, json, re, sys
 from pathlib import Path
-import re
-import sys
 
 CASES = {
     'paragraph_link': '<p>日本語 &amp; <a href="https://github.com/example/repo">リンク</a></p>',

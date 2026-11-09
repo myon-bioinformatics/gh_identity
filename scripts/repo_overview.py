@@ -37,12 +37,7 @@ Provenance: browser-test-kit ``scripts/repo_overview.py`` (blob 08cefe25) at
 """
 from __future__ import annotations
 
-import argparse
-import importlib.util
-import json
-import os
-import re
-import sys
+import argparse, importlib.util, json, os, re, sys
 from pathlib import Path
 
 

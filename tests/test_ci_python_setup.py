@@ -1,9 +1,6 @@
 """Keep declared Python support, runtime CI, and contributor CI aligned."""
+import json, re, tomllib, unittest
 from pathlib import Path
-import json
-import re
-import tomllib
-import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -1,7 +1,5 @@
 """pin-audit: commit pins checked with plain git against local remotes (no network, no token)."""
-import json
-import subprocess
-import sys
+import json, subprocess, sys
 from pathlib import Path
 
 import pytest

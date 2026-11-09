@@ -1,12 +1,6 @@
 """Real isolated workers against offline HTTP fixtures; all values are synthetic."""
-import json
-import os
-import subprocess
-import sys
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+import json, os, subprocess, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer; from unittest.mock import patch
 
 import pytest
 

@@ -1,6 +1,5 @@
 """merge-preview: snapshot PR commits in a temporary repository, even when refs move."""
-import json
-import subprocess
+import json, subprocess
 
 import pytest
 import gh_identity as g

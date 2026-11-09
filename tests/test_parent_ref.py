@@ -1,8 +1,5 @@
 """parent-pr.ref.json, first-parent pins, child-heads.json, redaction, enrollment progress (fake transport)."""
-import base64
-import hashlib
-import json
-import subprocess
+import base64, hashlib, json, subprocess
 from unittest.mock import patch
 
 import pytest

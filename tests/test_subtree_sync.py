@@ -1,7 +1,5 @@
 """subtree-sync-status / sync-provenance / split-preflight: local, read-only."""
-import json
-import subprocess
-import sys
+import json, subprocess, sys
 from pathlib import Path
 
 import pytest
