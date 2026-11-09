@@ -32,11 +32,11 @@ def signature(node, pre=False):
     return (node.tag or 'root', attrs, flat)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('markdown_module', type=Path)
     parser.add_argument("--web-ui-module", type=Path, help="optional trusted web_ui.py for CSS/script wrapper integration")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         spec = importlib.util.spec_from_file_location('roundtrip_markdown', args.markdown_module)
         md = importlib.util.module_from_spec(spec)
