@@ -159,16 +159,14 @@ jobs:
               exit 1
             fi
             echo "::warning::Vendor hash check failed (report-only for this event)"
+            return 1
           }
-          hash_check
-          python -S - <<'PY'
-          import json
-          from pathlib import Path
-          for entry in json.loads(Path("vendor.lock.json").read_text(encoding="utf-8"))["files"]:
-              Path(entry["destination"]).unlink()
-          PY
-          python -S .vendor-sync-tools/vendor_sync.py materialize --manifest vendor.lock.json
-          hash_check
+          if hash_check; then
+            python -S .vendor-sync-tools/vendor_sync.py recreate --manifest vendor.lock.json
+            if ! hash_check; then
+              : # report-only: keep the workflow non-blocking for a post-recreate hash warning
+            fi
+          fi
 
   test:
     if: needs.changes.outputs.product_changed == 'true'
