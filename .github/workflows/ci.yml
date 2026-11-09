@@ -224,7 +224,7 @@ jobs:
 
   failure-identity:
     needs: [changes, test]
-    if: (always()) && needs.changes.outputs.product_changed == 'true'
+    if: (always()) && needs.changes.outputs.product_changed == 'true' && needs.test.result != 'skipped'
     permissions:
       contents: read
       actions: read
