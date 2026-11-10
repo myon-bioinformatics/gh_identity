@@ -1601,10 +1601,11 @@ parent `gh_ops.py git-push`.
 
 ## Node entry (Node 26+)
 
-`node gh_identity.cjs <args>` runs `gh_identity.py` through the vendored shared launcher
-`vendor/py_launch.cjs` (pinned in `vendor.lock.json`). Arguments, stdin/stdout/stderr and the
-exit code are passed through unchanged; Python runs with `-S`. Set `GH_IDENTITY_PYTHON` to pick
-the interpreter, which must be Python 3.11+ for supported use. The pinned shared
+`node vendor/py_launch.cjs --env-var GH_IDENTITY_PYTHON -- gh_identity.py <args>` runs
+`gh_identity.py` through the vendored shared launcher `vendor/py_launch.cjs` (pinned in
+`vendor.lock.json`); there is no per-tool `.cjs` wrapper. Arguments, stdin/stdout/stderr and the
+exit code are passed through unchanged; Python runs with `-S`. `GH_IDENTITY_PYTHON` picks
+the interpreter, which must be Python 3.11+ for supported use. A Node older than 26 exits 2. The pinned shared
 launcher still probes for Python 3.9+; that discovery threshold is not this tool's
 support policy and does not read `pyproject.toml`. Launcher failures (no Python
 meeting that probe, spawn error, signal) exit 2. The launcher and its vendor pin
@@ -1615,3 +1616,24 @@ are unchanged by this repository's Python policy.
 See [standard-library discovery commands](docs/unittest-discovery.md) for
 validated `python -S -m unittest discover` recipes, filename/name filtering,
 and the boundary with the full pytest suite.
+
+
+## uv: install the single-file command
+
+Runtime dependencies remain empty. From this repository root:
+
+```sh
+uv tool install .
+ghi --help
+```
+
+Or use it once without registering a persistent command:
+
+```sh
+uvx --from 'git+https://github.com/myon-bioinformatics/gh_identity.git@main' ghi --help
+```
+
+For Python imports in another project, use `uv add /absolute/path/to/gh_identity` and
+`uv run python -c 'import gh_identity'`. `uv tool install` uses a separate environment.
+Use a reviewed full commit SHA instead of `main` when reproducibility is required.
+Only `gh_identity.py` is installed; development dependency groups are not runtime requirements.
