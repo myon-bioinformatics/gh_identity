@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Optional local Gradio DOM lab. No external page fetch or CORS workaround."""
-import argparse
-import importlib.util
+import argparse, importlib.util, sys
 from pathlib import Path
-import sys
 
 
 def render_fixture(markdown_path):
@@ -15,12 +13,12 @@ def render_fixture(markdown_path):
     return '<article id="dom-lab-body">' + md.markdown_to_html(source) + '</article>'
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('markdown_module', type=Path, help='trusted existing markdown.py')
     parser.add_argument('--port', type=int, default=7860)
     parser.add_argument('--export-html', type=Path, help='write fixture without requiring Gradio')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not 1024 <= args.port <= 65535:
         parser.error('port must be 1024..65535')
     html = render_fixture(args.markdown_module)

@@ -1,7 +1,6 @@
 """Issue/PR discovery: identity, bounds, partial search, CLI and transports."""
 import json
-from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch; from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import gh_identity as g

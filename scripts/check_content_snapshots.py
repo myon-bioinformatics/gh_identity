@@ -4,20 +4,14 @@
 Exit 0: all bodies match; 1: output/CLI mismatch; 2: invalid evidence or runner error.
 This tests a recorded gh transport, not live GitHub connectivity.
 """
-import argparse
-import hashlib
-import json
-import os
+import argparse, hashlib, json, os, subprocess, sys, tempfile
 from pathlib import Path
-import subprocess
-import sys
-import tempfile
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('snapshots', type=Path, help='directory containing manifest.json and raw responses')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     source = args.snapshots.resolve()
     cli = Path(__file__).resolve().parents[1] / 'gh_identity.py'
     try:

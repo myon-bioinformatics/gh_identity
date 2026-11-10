@@ -1,7 +1,5 @@
 """subtree-split: read-only `git subtree split --prefix` returning the split SHA."""
-import json
-import subprocess
-import sys
+import json, subprocess, sys
 from pathlib import Path
 
 import pytest

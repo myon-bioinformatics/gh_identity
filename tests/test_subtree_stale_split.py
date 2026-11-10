@@ -1,9 +1,6 @@
 """Regression: git subtree split can exit 0 with a stale SHA; tree validation must catch it."""
-import subprocess
-import sys
-import contextlib
-from pathlib import Path
-from types import SimpleNamespace
+import contextlib, subprocess, sys
+from pathlib import Path; from types import SimpleNamespace
 
 import pytest
 import gh_identity as g

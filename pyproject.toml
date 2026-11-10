@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "gh-identity-dev"
 version = "0.0.0"
@@ -7,9 +11,15 @@ dependencies = []
 [dependency-groups]
 dev = ["pytest>=9.1.1"]
 
-# Vendored/source runtime has no dependencies. uv manages contributor tools only.
+# The installed artifact is one stdlib-only module; dev tools stay in dependency groups.
 [tool.uv]
-package = false
 
 [tool.uv.dependency-groups]
 dev = { requires-python = ">=3.11" }
+
+[project.scripts]
+ghi = "gh_identity:main"
+gh_identity = "gh_identity:main"
+
+[tool.setuptools]
+py-modules = ["gh_identity"]

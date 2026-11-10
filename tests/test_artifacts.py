@@ -1,9 +1,5 @@
 """Run artifacts: identity-checked listing and bounded single-member reads."""
-import base64
-import hashlib
-import io
-import json
-import zipfile
+import base64, hashlib, io, json, zipfile
 
 import pytest
 import gh_identity as g

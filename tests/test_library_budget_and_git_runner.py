@@ -1,7 +1,5 @@
 """Library calls outside operation() and the pluggable git runner for first_parent_check."""
-import json
-import os
-import subprocess
+import json, os, subprocess
 
 import pytest
 import gh_identity as g

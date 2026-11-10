@@ -1,8 +1,5 @@
 """Isolated synthetic filtering comparison; no GitHub requests."""
-import json
-import statistics
-import sys
-import time
+import json, statistics, sys, time
 
 
 def baseline(checks,ignore):

@@ -1,8 +1,5 @@
 """Repository metadata: checkout identity (v2) and the Ironmate v1 adapter."""
-import json
-import os
-import subprocess
-import sys
+import json, os, subprocess, sys
 from pathlib import Path
 
 import pytest

@@ -1,11 +1,6 @@
 """duplicate-files: same basename across one owner's repositories, read-only, fake transport."""
-import base64
-import hashlib
-import json
-import subprocess
-import sys
-from pathlib import Path
-from unittest.mock import patch
+import base64, hashlib, json, subprocess, sys
+from pathlib import Path; from unittest.mock import patch
 
 import pytest
 import gh_identity as g

@@ -1,7 +1,5 @@
 """Offline regression tests for the mutation/verification boundary."""
-import contextlib
-import io
-import json
+import contextlib, io, json
 from unittest.mock import patch
 
 import pytest

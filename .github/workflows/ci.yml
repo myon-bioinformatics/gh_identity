@@ -32,7 +32,10 @@ jobs:
           version: "latest"
           python-version: "3.15"
           activate-environment: true
-          enable-cache: false
+          enable-cache: true
+          # Pull requests restore the cache and never write it; only main saves it.
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          prune-cache: true
       # The historical parent compat fixture is not this job. Resolve parent main
       # at runtime, then check the shared tool out at that commit.
       - name: Resolve parent main
@@ -156,16 +159,14 @@ jobs:
               exit 1
             fi
             echo "::warning::Vendor hash check failed (report-only for this event)"
+            return 1
           }
-          hash_check
-          python -S - <<'PY'
-          import json
-          from pathlib import Path
-          for entry in json.loads(Path("vendor.lock.json").read_text(encoding="utf-8"))["files"]:
-              Path(entry["destination"]).unlink()
-          PY
-          python -S .vendor-sync-tools/vendor_sync.py materialize --manifest vendor.lock.json
-          hash_check
+          if hash_check; then
+            python -S .vendor-sync-tools/vendor_sync.py recreate --manifest vendor.lock.json
+            if ! hash_check; then
+              : # report-only: keep the workflow non-blocking for a post-recreate hash warning
+            fi
+          fi
 
   test:
     if: needs.changes.outputs.product_changed == 'true'
@@ -191,7 +192,10 @@ jobs:
           version: "latest"
           python-version: "${{ matrix.python-version == '3.x' && '3' || matrix.python-version }}"
           activate-environment: true
-          enable-cache: false
+          enable-cache: true
+          # Pull requests restore the cache and never write it; only main saves it.
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          prune-cache: true
       - name: Sync locked development environment
         shell: bash
         run: |
@@ -220,7 +224,7 @@ jobs:
 
   failure-identity:
     needs: [changes, test]
-    if: (always()) && needs.changes.outputs.product_changed == 'true'
+    if: (always()) && needs.changes.outputs.product_changed == 'true' && needs.test.result != 'skipped'
     permissions:
       contents: read
       actions: read

@@ -1,9 +1,6 @@
 """Keep declared Python support, runtime CI, and contributor CI aligned."""
+import json, re, tomllib, unittest
 from pathlib import Path
-import json
-import re
-import tomllib
-import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +20,7 @@ class TestCIPythonSetup(unittest.TestCase):
         self.assertEqual(project["project"]["requires-python"], ">=3.11")
         self.assertEqual(lock["requires-python"], project["project"]["requires-python"])
         self.assertEqual(project["project"]["dependencies"], [])
-        self.assertFalse(project["tool"]["uv"]["package"])
+        self.assertIsNot(project["tool"]["uv"].get("package"), False)
         self.assertEqual(project["tool"]["uv"]["dependency-groups"]["dev"]["requires-python"], ">=3.11")
         expected = ["3.11", "3.12", "3.13", "3.14", "3.x"]
         for path, job, selector in (
