@@ -155,8 +155,14 @@ def consumer(tmp_path):
     return tmp_path
 
 
+def _licence_api(method, path, **kwargs):
+    # Only the licence lookup reaches the API in a plan; anything else is a test error.
+    assert method == "GET" and path == f"repos/o/up/license?ref={C1}", path
+    return {"license": {"spdx_id": "MIT"}}
+
+
 def plan(consumer, candidates, rules=None):
-    with patch.object(g, "_remote_file", side_effect=fake_remote(UPSTREAM)):
+    with patch.object(g, "_remote_file", side_effect=fake_remote(UPSTREAM)), g.request_stub(_licence_api):
         return {d["candidate"]: d for d in g.vendor_plan(consumer, candidates, rules)["decisions"]}
 
 
@@ -166,6 +172,8 @@ def test_plan_rules(consumer):
     out = plan(consumer, cands)
     assert out[cands[0]]["action"] == "place" and out[cands[0]]["destination"] == "vendor/mod.py"
     assert out[cands[0]]["license_destination"] == "vendor/up-LICENSE"
+    assert out[cands[0]]["license_spdx"] == "MIT"
+    assert "license_spdx" not in out[cands[6]]  # no LICENSE file: nothing to identify
     assert out[cands[0]]["blob_sha"] == g.git_blob_sha(MOD)
     assert out[cands[1]]["reasons"] == ["not_stdlib_only"]
     assert out[cands[2]]["reasons"] == ["relative_import"]

@@ -235,24 +235,203 @@ def pages_bounded(path,transport="auto",timeout=30,*,max_pages=20,requester=None
   if b is not None:b.charge("items",len(data))
   out.extend(data);path=_next_page(path,headers,len(data))
  return out,True,n
-def capabilities():
+def capabilities(rate_limit=False):
+ """Local tool facts; rate_limit=True adds one network read of the API quota (opt-in)."""
  versions=tool_versions(("git","gh"))
- return {"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],
-         "gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token()),
-         "git_version":versions.get("git"),"gh_version":versions.get("gh")}
-def repository(r,**k):
- r=repo(r);d=request("GET",f"repos/{r}",**k)
- return {"schema":"gh-identity-repository/1","repository":r,"id":d.get("id"),"default_branch":d.get("default_branch"),"visibility":d.get("visibility"),"archived":d.get("archived"),"url":d.get("html_url"),"observed_at":now()}
-def repositories(owner,transport="auto",timeout=30):
- xs=pages(f"users/{owner}/repos?sort=full_name",transport,timeout)
- rows=[{"full_name":x.get("full_name"),"archived":x.get("archived"),"updated_at":x.get("updated_at"),"url":x.get("html_url")} for x in xs]
- return {"schema":"gh-identity-repositories/1","owner":owner,"complete":True,"count":len(rows),"repositories":rows}
+ o={"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],
+    "gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token()),
+    "git_version":versions.get("git"),"gh_version":versions.get("gh")}
+ if rate_limit:
+  try:o["rate_limit"]=globals()["rate_limit"]()
+  except Error as e:o["rate_limit"]={"error":e.code}
+ return o
+def rate_limit(transport="auto",timeout=30):
+ """API quota per resource (GET rate_limit is not charged against the quota). Read-only."""
+ d=request("GET","rate_limit",transport=transport,timeout=timeout)
+ resources=d.get("resources") if isinstance(d,dict) else None
+ if not isinstance(resources,dict):raise Error("invalid_json")
+ current=datetime.now(timezone.utc);out={}
+ for name in ("core","search","graphql"):
+  x=resources.get(name)
+  if not isinstance(x,dict):continue
+  reset=x.get("reset");at=seconds=None
+  if type(reset) is int and reset>=0:
+   try:
+    when=datetime.fromtimestamp(reset,timezone.utc)
+    at=when.isoformat();seconds=max(0,int((when-current).total_seconds()))
+   except (ValueError,OverflowError,OSError):pass
+  out[name]={"limit":x.get("limit"),"remaining":x.get("remaining"),"used":x.get("used"),
+             "reset_at":at,"resets_in_seconds":seconds}
+ core=out.get("core") or {}
+ # Anonymous REST reads share 60 requests/hour per address; any credential lifts the limit.
+ return {"schema":"gh-identity-rate-limit/1","authenticated":type(core.get("limit")) is int and core["limit"]>60,
+         "exhausted":sorted(k for k,v in out.items() if v["remaining"]==0),"resources":out,"observed_at":current.isoformat()}
+def _days_since(value,current=None):
+ """Whole days from an ISO-8601 timestamp until now; None when missing or malformed."""
+ if not isinstance(value,str):return None
+ try:t=datetime.fromisoformat(value.replace("Z","+00:00"))
+ except ValueError:return None
+ if t.tzinfo is None:return None
+ return max(0,((current or datetime.now(timezone.utc))-t).days)
+def _count(d,key):
+ v=d.get(key);return v if type(v) is int and v>=0 else None
+def _repo_brief(d):
+ """Facts in every GitHub repository object (single GET and list rows alike); no extra request."""
+ lic=d.get("license") if isinstance(d.get("license"),dict) else {}
+ return {"stars":_count(d,"stargazers_count"),"forks":_count(d,"forks_count"),"license":lic.get("spdx_id"),
+         "language":d.get("language"),"pushed_at":d.get("pushed_at"),"fork":bool(d.get("fork"))}
+def _repo_facts(d):
+ """_repo_brief plus the facts a person checks before depending on someone else's repository."""
+ lic=d.get("license") if isinstance(d.get("license"),dict) else {}
+ parent=d.get("parent") if isinstance(d.get("parent"),dict) else {}
+ topics=d.get("topics")
+ return {"description":d.get("description"),"homepage":d.get("homepage") or None,**_repo_brief(d),
+         "license_name":lic.get("name"),"watchers":_count(d,"subscribers_count"),"open_issues":_count(d,"open_issues_count"),
+         "topics":[x for x in topics if isinstance(x,str)] if isinstance(topics,list) else [],
+         "size_kb":_count(d,"size"),"created_at":d.get("created_at"),"updated_at":d.get("updated_at"),
+         "parent":parent.get("full_name"),"template":bool(d.get("is_template")),"disabled":bool(d.get("disabled")),
+         "owner_type":(d.get("owner") or {}).get("type") if isinstance(d.get("owner"),dict) else None}
+REPO_INCLUDES=("health","fork-diff","languages","contributors","community","releases")
+def repository(r,*,include=(),stale_days=365,transport="auto",timeout=30):
+ """One repository: identity, licence (SPDX), stars and other facts from a single GET.
+
+ include: any of REPO_INCLUDES (or "all"); each costs extra requests and is reported
+ under its own key. A section that cannot be read is {"error": code}, not a failure.
+ """
+ r=repo(r)
+ if isinstance(include,str):include=(include,)
+ include=tuple(REPO_INCLUDES if "all" in include else dict.fromkeys(include))
+ if any(x not in REPO_INCLUDES for x in include):raise ValueError("include must be all or one of: "+", ".join(REPO_INCLUDES))
+ if type(stale_days) is not int or stale_days<1:raise ValueError("stale_days must be positive")
+ d=request("GET",f"repos/{r}",transport=transport,timeout=timeout)
+ if not isinstance(d,dict):raise Error("invalid_json")
+ o={"schema":"gh-identity-repository/1","repository":r,"id":d.get("id"),"default_branch":d.get("default_branch"),"visibility":d.get("visibility"),"archived":d.get("archived"),"url":d.get("html_url"),**_repo_facts(d)}
+ k={"transport":transport,"timeout":timeout}
+ sections={"health":lambda:_repo_health(r,o,stale_days,**k),"fork-diff":lambda:_repo_fork_diff(r,d,**k),
+           "languages":lambda:_repo_languages(r,**k),"contributors":lambda:_repo_contributors(r,**k),
+           "community":lambda:_repo_community(r,**k),
+           "releases":lambda:{x:v for x,v in releases(r,**k).items() if x in ("latest","releases","tags","complete")}}
+ for name in include:
+  try:o[name.replace("-","_")]=sections[name]()
+  except Error as e:o[name.replace("-","_")]={"error":e.code}
+ o["observed_at"]=now()
+ return o
+def _release_row(x):
+ assets=x.get("assets") if isinstance(x.get("assets"),list) else []
+ return {"tag":x.get("tag_name"),"name":x.get("name"),"published_at":x.get("published_at"),
+         "prerelease":bool(x.get("prerelease")),"draft":bool(x.get("draft")),"url":x.get("html_url"),
+         "assets":[{"name":a.get("name"),"size":a.get("size"),"downloads":a.get("download_count")} for a in assets if isinstance(a,dict)]}
+def releases(r,*,max_items=10,transport="auto",timeout=30):
+ """Newest releases and tags (one request each). latest = newest published, non-prerelease row fetched."""
+ r=repo(r)
+ if type(max_items) is not int or not 1<=max_items<=100:raise ValueError("max_items must be 1..100")
+ rel=request("GET",f"repos/{r}/releases?per_page={max_items}",transport=transport,timeout=timeout)
+ tag=request("GET",f"repos/{r}/tags?per_page={max_items}",transport=transport,timeout=timeout)
+ if not isinstance(rel,list) or not isinstance(tag,list):raise Error("invalid_json")
+ rows=[_release_row(x) for x in rel if isinstance(x,dict)]
+ tags=[{"name":x.get("name"),"sha":(x.get("commit") or {}).get("sha") if isinstance(x.get("commit"),dict) else None} for x in tag if isinstance(x,dict)]
+ latest=next((x for x in rows if not x["draft"] and not x["prerelease"]),None)
+ return {"schema":"gh-identity-releases/1","repository":r,"latest":latest,"releases":rows,"tags":tags,
+         "complete":len(rel)<max_items and len(tag)<max_items,"max_items":max_items,"observed_at":now()}
+def _repo_health(r,o,stale_days,transport="auto",timeout=30):
+ """Is this repository alive? archived/disabled, last push, newest release, CI on the default branch head."""
+ pushed=_days_since(o.get("pushed_at"))
+ status="archived" if o.get("archived") else "disabled" if o.get("disabled") else "unknown" if pushed is None else "stale" if pushed>stale_days else "active"
+ out={"status":status,"stale_days":stale_days,"days_since_push":pushed,"open_issues":o.get("open_issues"),
+      "latest_release":None,"days_since_release":None,"head_sha":None,"head_date":None,"ci_state":None}
+ try:
+  latest=releases(r,max_items=5,transport=transport,timeout=timeout)["latest"]
+  if latest:out["latest_release"]=latest["tag"];out["days_since_release"]=_days_since(latest["published_at"])
+ except Error as e:out["latest_release_error"]=e.code
+ branch=o.get("default_branch")
+ if isinstance(branch,str) and branch:
+  try:
+   head=request("GET",f"repos/{r}/commits/{urllib.parse.quote(branch,safe='')}",transport=transport,timeout=timeout)
+   sha=head.get("sha") if isinstance(head,dict) else None
+   if isinstance(sha,str) and re.fullmatch(r"[0-9a-f]{40}",sha):
+    commit=head.get("commit") if isinstance(head.get("commit"),dict) else {}
+    out["head_sha"]=sha;out["head_date"]=(commit.get("committer") or {}).get("date") if isinstance(commit.get("committer"),dict) else None
+    checks=checks_for_sha(r,sha,transport=transport,timeout=timeout)
+    out["ci_state"]="none" if checks["count"]==0 and checks["complete"] else checks["state"]
+  except Error as e:out["ci_error"]=e.code
+ return out
+def _repo_fork_diff(r,d,transport="auto",timeout=30):
+ """Commits the fork's default branch is ahead of / behind its parent's default branch."""
+ parent=d.get("parent") if isinstance(d.get("parent"),dict) else None
+ if not d.get("fork") or parent is None:return {"fork":False}
+ base=parent.get("full_name");base_branch=parent.get("default_branch");branch=d.get("default_branch")
+ if not isinstance(base,str) or not REPO.fullmatch(base) or not isinstance(base_branch,str) or not isinstance(branch,str):raise Error("invalid_json")
+ q=lambda x:urllib.parse.quote(x,safe="")
+ c=request("GET",f"repos/{base}/compare/{q(base_branch)}...{q(r.split('/')[0])}:{q(branch)}?per_page=1",transport=transport,timeout=timeout)
+ if not isinstance(c,dict):raise Error("invalid_json")
+ return {"fork":True,"parent":base,"parent_branch":base_branch,"branch":branch,
+         "ahead_by":_count(c,"ahead_by"),"behind_by":_count(c,"behind_by"),"status":c.get("status")}
+def _repo_languages(r,transport="auto",timeout=30):
+ d=request("GET",f"repos/{r}/languages",transport=transport,timeout=timeout)
+ if not isinstance(d,dict):raise Error("invalid_json")
+ sizes={k:v for k,v in d.items() if isinstance(k,str) and type(v) is int and v>=0};total=sum(sizes.values())
+ rows=[{"name":k,"bytes":v,"percent":round(100*v/total,1) if total else 0.0} for k,v in sorted(sizes.items(),key=lambda kv:(-kv[1],kv[0]))]
+ return {"total_bytes":total,"languages":rows}
+def _repo_contributors(r,max_pages=5,top=5,transport="auto",timeout=30):
+ """Contributor count (anonymous included, bounded to max_pages*100) and the top accounts by commits."""
+ xs,complete,_n=pages_bounded(f"repos/{r}/contributors?anon=1",transport,timeout,max_pages=max_pages)
+ # Anonymous rows carry a name and e-mail; only account logins are reported.
+ named=[{"login":x["login"],"contributions":_count(x,"contributions")} for x in xs if isinstance(x,dict) and isinstance(x.get("login"),str)]
+ return {"count":len(xs),"complete":complete,"accounts":len(named),"top":named[:top]}
+def _repo_community(r,transport="auto",timeout=30):
+ d=request("GET",f"repos/{r}/community/profile",transport=transport,timeout=timeout)
+ if not isinstance(d,dict):raise Error("invalid_json")
+ files=d.get("files") if isinstance(d.get("files"),dict) else {}
+ return {"health_percentage":_count(d,"health_percentage"),"files":{k:v is not None for k,v in sorted(files.items()) if isinstance(k,str)}}
+def render_repository(o):
+ """Icon-first lines: one identity line, then one line per included section."""
+ def n(v):return "?" if v is None else str(v)
+ def day(v):return v[:10] if isinstance(v,str) else "?"
+ flags=[w for w,on in (("🗃 archived",o.get("archived")),("⛔ disabled",o.get("disabled")),("🧬 template",o.get("template")),
+                       ("🔱 fork of "+n(o.get("parent")),o.get("fork"))) if on]
+ lines=["  ".join([f"📦 {o['repository']}",f"⭐ {n(o.get('stars'))}",f"🍴 {n(o.get('forks'))}",f"📄 {o.get('license') or 'no licence'}",
+                   f"🗣 {o.get('language') or '?'}",f"🕒 {day(o.get('pushed_at'))}",*flags])]
+ def section(key,fn):
+  x=o.get(key)
+  if x is None:return
+  lines.append(f"⚠️ {key}: {x['error']}" if "error" in x else fn(x))
+ section("health",lambda x:"💓 "+" · ".join([x["status"],f"push {n(x['days_since_push'])}d",
+   f"release {x['latest_release']} {n(x['days_since_release'])}d" if x["latest_release"] else "no release",f"CI {x['ci_state'] or '?'}",f"issues {n(x['open_issues'])}"]))
+ section("fork_diff",lambda x:f"🔱 {x['parent']} +{n(x['ahead_by'])} -{n(x['behind_by'])}" if x["fork"] else "🔱 not a fork")
+ section("languages",lambda x:"🧩 "+(" · ".join(f"{y['name']} {y['percent']}%" for y in x["languages"][:5]) or "none"))
+ section("contributors",lambda x:f"👥 {x['count']}{'' if x['complete'] else '+'}"+("  "+" ".join(f"{y['login']}({n(y['contributions'])})" for y in x["top"]) if x["top"] else ""))
+ section("community",lambda x:f"📑 {n(x['health_percentage'])}%  "+" ".join(f"{k} {'✓' if v else '✗'}" for k,v in x["files"].items()))
+ section("releases",lambda x:"🏷️ "+(f"{x['latest']['tag']} ({day(x['latest']['published_at'])})" if x["latest"] else "no release")+f" · tags {len(x['tags'])}{'' if x['complete'] else '+'}")
+ return "\n".join(lines)
+def render_releases(o):
+ rows=[f"🏷️ {o['repository']}  latest {o['latest']['tag'] if o['latest'] else 'none'}"]
+ rows+=[f"{'🧪' if x['prerelease'] else '📝' if x['draft'] else '🚀'} {x['tag']}  {(x['published_at'] or '?')[:10]}  📎 {len(x['assets'])}" for x in o["releases"]]
+ rows+=[f"🔖 {x['name']}  {(x['sha'] or '?')[:7]}" for x in o["tags"]]
+ return "\n".join(rows)
+def _owner_bases(owner,kind):
+ if kind not in ("auto","user","org"):raise ValueError("kind must be auto, user or org")
+ return {"user":[f"users/{owner}/repos"],"org":[f"orgs/{owner}/repos"],"auto":[f"users/{owner}/repos",f"orgs/{owner}/repos"]}[kind]
+def repositories(owner,transport="auto",timeout=30,*,kind="auto"):
+ """Every repository listed for a user or an organisation (kind auto tries users/ then orgs/)."""
+ bases=_owner_bases(owner,kind)
+ for i,base in enumerate(bases):
+  try:xs=pages(base+"?sort=full_name",transport,timeout);break
+  except Error as e:
+   if e.code!="not_found_or_inaccessible" or i+1==len(bases):raise
+ rows=[{"full_name":x.get("full_name"),"archived":x.get("archived"),"updated_at":x.get("updated_at"),"url":x.get("html_url"),**_repo_brief(x)} for x in xs]
+ return {"schema":"gh-identity-repositories/1","owner":owner,"kind":base.split("/",1)[0],"complete":True,"count":len(rows),"repositories":rows}
+INVENTORY_FIELDS=("name","size-kb","run-count","updated-at","stars","forks","license","language","pushed-at")
 def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
-                         max_repos=30, max_pages=5, transport="auto", timeout=30):
- """Bounded public non-archived repository inventory; run counts are opt-in."""
+                         max_repos=30, max_pages=5, transport="auto", timeout=30,
+                         kind="auto", include_archived=False):
+ """Bounded public repository inventory of a user or organisation; run counts are opt-in.
+
+ Archived repositories are left out unless include_archived; every row says archived/fork.
+ """
  if not isinstance(owner,str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})",owner):
   raise ValueError("invalid owner")
- allowed={"name","size-kb","run-count","updated-at"}
+ allowed=set(INVENTORY_FIELDS)
+ bases=_owner_bases(owner,kind);base=bases[0]
  if isinstance(fields,str):fields=tuple(x.strip() for x in fields.split(","))
  else:fields=tuple(fields)
  if not fields or any(x not in allowed for x in fields):raise ValueError("invalid fields")
@@ -262,20 +441,26 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
  need_counts="run-count" in fields or sort=="run-count"
  rows=[];page=1;exhausted=False;pages_fetched=0
  while page<=max_pages and len(rows)<max_repos:
-  data,_headers=_page("users/"+owner+"/repos?per_page=100&page="+str(page),
-                      transport=transport,timeout=timeout)
+  try:
+   data,_headers=_page(base+"?per_page=100&page="+str(page),
+                       transport=transport,timeout=timeout)
+  except Error as exc:
+   # kind auto: a name that is not a user may be an organisation (first page only).
+   if exc.code!="not_found_or_inaccessible" or page!=1 or base==bases[-1]:raise
+   base=bases[-1];continue
   if not isinstance(data,list) or len(data)>100:raise Error("invalid_json")
   _BUDGET.get().charge("items",len(data))
   pages_fetched+=1
   for item in data:
    if not isinstance(item,dict):raise Error("invalid_json")
-   if item.get("private") is not False or item.get("archived") is not False:continue
+   if item.get("private") is not False:continue
+   if item.get("archived") is not False and not (include_archived and item.get("archived") is True):continue
    name=item.get("name");full=item.get("full_name")
    if not isinstance(name,str) or full!=owner+"/"+name:raise Error("invalid_repository_identity")
    size=item.get("size")
    if type(size) is not int or size<0:size=None
    row={"name":name,"full_name":full,"size_kb":size,"updated_at":item.get("updated_at"),
-        "run_count":None,"run_count_status":"not_requested"}
+        "run_count":None,"run_count_status":"not_requested",**_repo_brief(item),"archived":item.get("archived") is True}
    rows.append(row)
    if len(rows)>=max_repos:break
   if len(data)<100 and len(rows)<max_repos:
@@ -294,12 +479,13 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
    if exc.code in ("authentication_required","permission_or_rate_limit","not_found_or_inaccessible"):
     row["run_count_status"]=exc.code
    else:raise
- keymap={"name":"name","size-kb":"size_kb","run-count":"run_count","updated-at":"updated_at"}
+ keymap={"name":"name","size-kb":"size_kb","run-count":"run_count","updated-at":"updated_at",
+         "stars":"stars","forks":"forks","license":"license","language":"language","pushed-at":"pushed_at"}
  key=keymap[sort]
  # Normalize timestamps to UTC before ordering; malformed values sort as missing.
  def sort_value(row):
   value=row[key]
-  if sort=="updated-at":
+  if sort in ("updated-at","pushed-at"):
    if not isinstance(value,str):return None
    try:
     parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
@@ -315,7 +501,8 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
  known.sort(key=lambda pair:pair[0],reverse=order=="desc")
  missing.sort(key=lambda row:row["name"])
  rows=[row for _,row in known]+missing
- return {"schema":"gh-identity-repository-inventory/1","owner":owner,"repositories":rows,
+ return {"schema":"gh-identity-repository-inventory/1","owner":owner,"kind":base.split("/",1)[0],
+         "include_archived":bool(include_archived),"repositories":rows,
          "count":len(rows),"complete":exhausted,"truncated":not exhausted,
          "limit_reason":None if exhausted else ("max_repos" if len(rows)>=max_repos else "max_pages"),
          "pages_fetched":pages_fetched,"sort":sort,"order":order,
@@ -3971,6 +4158,18 @@ def _remote_file(repository, path, commit, transport="auto", timeout=30, max_byt
     return data
 
 
+def _license_spdx(repository, commit, transport="auto", timeout=30):
+    """SPDX id GitHub detects for repository@commit (NOASSERTION = unrecognised); None when unreadable."""
+    try:
+        d = request("GET", f"repos/{repo(repository)}/license?ref={urllib.parse.quote(commit, safe='')}",
+                    transport=transport, timeout=timeout)
+    except Error:
+        return None
+    lic = d.get("license") if isinstance(d, dict) else None
+    spdx = lic.get("spdx_id") if isinstance(lic, dict) else None
+    return spdx if isinstance(spdx, str) else None
+
+
 def _remote_exists(repository, path, commit, transport="auto", timeout=30):
     try:
         _remote_file(repository, path, commit, transport, timeout)
@@ -4101,6 +4300,7 @@ def vendor_plan(root=".", candidates=(), rules=None, *, transport="auto", timeou
         if body is not None and not reasons and req["license_sidecar"]:
             if _remote_exists(repository, "LICENSE", ref, transport, timeout):
                 d["license_destination"] = _vendor_destination(parsed, repository, "LICENSE", "license")[0]
+                d["license_spdx"] = _license_spdx(repository, ref, transport, timeout)
             else:
                 skip("license_missing")
         d["action"] = "skip" if reasons else "place"
@@ -5467,7 +5667,7 @@ def list_owner_repositories(owner, *, kind="auto", include_forks=False, include_
                 continue
             seen.add(x["full_name"])
             rows.append({"full_name": x["full_name"], "repository_id": x.get("id"), "default_branch": x.get("default_branch"),
-                         "archived": bool(x.get("archived")), "fork": bool(x.get("fork"))})
+                         "archived": bool(x.get("archived")), **_repo_brief(x)})
         if rows or kind != "auto":
             break
     return {"schema": "gh-identity-owner-repositories/1", "write": False, "owner": owner, "kind": source or kind,
@@ -6030,7 +6230,7 @@ def _cli_parser():
  if _CLI_PARSER is not None:return _CLI_PARSER
  a=argparse.ArgumentParser(allow_abbrev=False,epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
  x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
- s.add_parser("capabilities")
+ x=s.add_parser("capabilities",help="local tool facts; --rate-limit adds the API quota (remaining, reset)");x.add_argument("--rate-limit",action="store_true",help="one network read; shows whether a 403 is the quota or a permission")
  s.add_parser("overview",help="best-effort local and GitHub workspace summary (default)")
  for command in ("git-status", "git-files", "git-diff", "git-log", "git-numstat", "git-show", "git-blame", "git-grep", "git-ignore"):
   x=s.add_parser(command);x.add_argument("--root",default=".");x.add_argument("--output-bytes",type=int,default=1000000)
@@ -6071,12 +6271,13 @@ def _cli_parser():
  x=s.add_parser("commit-pulls",help="pull requests associated with a commit (read-only)");x.add_argument("repository");x.add_argument("sha")
  x=s.add_parser("first-parent",help="is commit on the default-branch first-parent history (API or exact git)");x.add_argument("repository");x.add_argument("commit");x.add_argument("--branch");x.add_argument("--exact",action="store_true",help="blob-less bare fetch (True/False only)");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300)
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
- x=s.add_parser("repo");x.add_argument("repo")
+ x=s.add_parser("repo",help="one repository: licence (SPDX), stars, forks, topics, language, dates; --include adds health, fork-diff, languages, contributors, community, releases");x.add_argument("repo");x.add_argument("--include",action="append",default=[],choices=("all",)+REPO_INCLUDES,metavar="SECTION",help="repeatable; extra sections (extra requests): all "+" ".join(REPO_INCLUDES));x.add_argument("--stale-days",type=int,default=365,help="health: days without a push before status is stale");x.add_argument("--text",action="store_true")
+ x=s.add_parser("releases",help="newest releases (with assets) and tags of one repository (read-only)");x.add_argument("repo");x.add_argument("--limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
  depth_args=x.add_mutually_exclusive_group();depth_args.add_argument("--depth",type=int,default=1);depth_args.add_argument("--recursive",action="store_true")
  x.add_argument("--exclude-dir",action="append",default=[]);x.add_argument("--exclude-file",action="append",default=[])
- x=s.add_parser("repos");x.add_argument("owner")
- x=s.add_parser("repo-inventory");x.add_argument("owner");x.add_argument("--fields",default="name");x.add_argument("--sort",choices=("name","size-kb","run-count","updated-at"),default="name");x.add_argument("--order",choices=("asc","desc"),default="asc");x.add_argument("--max-repos",type=int,default=30);x.add_argument("--page-limit",type=int,default=5)
+ x=s.add_parser("repos");x.add_argument("owner");x.add_argument("--kind",choices=("auto","user","org"),default="auto")
+ x=s.add_parser("repo-inventory");x.add_argument("owner");x.add_argument("--fields",default="name",help="comma-separated: "+",".join(INVENTORY_FIELDS));x.add_argument("--sort",choices=INVENTORY_FIELDS,default="name");x.add_argument("--kind",choices=("auto","user","org"),default="auto");x.add_argument("--include-archived",action="store_true");x.add_argument("--order",choices=("asc","desc"),default="asc");x.add_argument("--max-repos",type=int,default=30);x.add_argument("--page-limit",type=int,default=5)
  x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("content");x.add_argument("repo");x.add_argument("kind",choices=("pr","issue","commit"));x.add_argument("identifier");x.add_argument("--field",action="append")
  x=s.add_parser("issues");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
@@ -6119,7 +6320,7 @@ def _main(argv=None):
  try:ns=_cli_parser().parse_args(argv)
  except SystemExit as e:return int(e.code)
  try:
-  if ns.cmd=="capabilities":o=capabilities()
+  if ns.cmd=="capabilities":o=capabilities(rate_limit=ns.rate_limit)
   elif ns.cmd=="git-status":o=git_status(ns.root,max_bytes=ns.output_bytes)
   elif ns.cmd=="git-files":o=git_ls_files(ns.root,max_bytes=ns.output_bytes)
   elif ns.cmd=="git-diff":o=git_diff(ns.root,staged=ns.staged,base=ns.base,head=ns.head,path=ns.path,max_bytes=ns.output_bytes)
@@ -6185,10 +6386,11 @@ def _main(argv=None):
     o=repository_metadata(ns.root,repository=ns.repository,source_sha=ns.source_sha,expected_sha=ns.expected_sha,generated_at=ns.generated_at)
    if ns.output_dir:write_repository_metadata(o,ns.output_dir)
   elif ns.cmd=="overview":o=overview()
-  elif ns.cmd=="repo":o=repository(ns.repo,transport=transport)
+  elif ns.cmd=="repo":o=repository(ns.repo,include=ns.include,stale_days=ns.stale_days,transport=transport)
+  elif ns.cmd=="releases":o=releases(ns.repo,max_items=ns.limit,transport=transport)
   elif ns.cmd=="tree":o=tree(ns.repo,ns.ref,depth=None if ns.recursive else ns.depth,exclude_dirs=ns.exclude_dir,exclude_files=ns.exclude_file,transport=transport)
-  elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport)
-  elif ns.cmd=="repo-inventory":o=repository_inventory(ns.owner,fields=ns.fields,sort=ns.sort,order=ns.order,max_repos=ns.max_repos,max_pages=ns.page_limit,transport=transport)
+  elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport,kind=ns.kind)
+  elif ns.cmd=="repo-inventory":o=repository_inventory(ns.owner,fields=ns.fields,sort=ns.sort,order=ns.order,max_repos=ns.max_repos,max_pages=ns.page_limit,transport=transport,kind=ns.kind,include_archived=ns.include_archived)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes,ns.include_controls)
   elif ns.cmd=="content":
@@ -6241,6 +6443,8 @@ def _main(argv=None):
  elif ns.cmd=="checks" and ns.text:print(render_checks(o))
  elif ns.cmd in ("prs","issues") and ns.text:print(render_list(o))
  elif ns.cmd=="get" and ns.text:print(render_get(o))
+ elif ns.cmd=="repo" and ns.text:print(render_repository(o))
+ elif ns.cmd=="releases" and ns.text:print(render_releases(o))
  elif ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.markdown:print(render_vendor_markdown(o))
  elif ns.cmd=="pin-audit" and ns.text:print(render_pin_audit(o))
  elif ns.cmd=="merge-preview" and ns.text:print(render_merge_preview(o))
@@ -6311,7 +6515,7 @@ def main(argv=None):
   return 2
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
-for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","pr","comments","reviews","inline_comments","review_threads","review_observations",
+for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","rate_limit","releases","pr","comments","reviews","inline_comments","review_threads","review_observations",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",

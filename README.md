@@ -1003,6 +1003,9 @@ python gh_identity.py vendor-matrix OWNER [--repos a,b,c] [--lock-path vendor.lo
   commit, deny list, upstream exists, standard library only, no relative
   imports (single file), imported by this project, LICENSE sidecar, then the
   destination from the layout or an override with a reason.
+  When the LICENSE sidecar exists the decision also carries `license_spdx`,
+  the SPDX id GitHub detects at that commit (`NOASSERTION` = unrecognised,
+  `null` = could not be read); it informs, it never changes `place`/`skip`.
 - `vendor-matrix` reads every repository's lock (default branch) and reports
   edges, placement roots per consumer, and `pin_mismatch` (one upstream source
   pinned at different commits).
@@ -1324,14 +1327,70 @@ A=$(python gh_identity.py artifacts OWNER/REPO RUN_ID | python -c "import json,s
 python gh_identity.py artifact-file OWNER/REPO "$A" route-verification.json | python -c "import json,sys;d=json.load(sys.stdin);print(d['head_sha'],d['sha256']);print(d['text'])"
 ```
 
+## Repositories of any account (`repo`, `releases`, `capabilities --rate-limit`)
+
+Facts to check before depending on a repository that is not yours. Read-only.
+
+```bash
+python gh_identity.py repo OWNER/REPO --text                  # licence (SPDX), stars, forks, language, last push
+python gh_identity.py repo OWNER/REPO --include health --text # is it alive?
+python gh_identity.py repo OWNER/REPO --include all           # every section, JSON
+python gh_identity.py releases OWNER/REPO --limit 5 --text    # newest releases (assets) and tags
+python gh_identity.py capabilities --rate-limit               # API quota: remaining, reset
+```
+
+```text
+📦 up/lib  ⭐ 120  🍴 9  📄 MIT  🗣 Python  🕒 2026-11-07
+💓 active · push 3d · release v1.4.0 40d · CI green · issues 3
+🧩 Python 90.0% · Shell 10.0%
+👥 2  alice(50)
+📑 71%  contributing ✗ license ✓ readme ✓
+🏷️ v1.4.0 (2026-10-01) · tags 1
+```
+
+`repo` reads one `GET repos/OWNER/REPO` and reports, besides the identity keys it always
+had: `license` (SPDX id; `NOASSERTION` means GitHub found a licence file it could not
+identify, `null` means none), `license_name`, `stars`, `forks`, `watchers`, `open_issues`
+(GitHub counts open pull requests in it), `topics`, `language`, `description`, `homepage`,
+`size_kb`, `created_at`, `updated_at`, `pushed_at`, `fork`, `parent`, `template`,
+`disabled`, `owner_type`. A count GitHub did not send is `null`, never zero.
+
+`--include SECTION` (repeatable, or `all`) adds sections that cost extra requests:
+
+| Section | Adds | Requests |
+| --- | --- | --- |
+| `health` | `status` (`archived`, `disabled`, `stale`, `active`, `unknown`), days since the last push and the newest release, CI state of the default-branch head (`none` when it has no checks) | 4+ |
+| `fork-diff` | commits the fork's default branch is ahead of / behind its parent's | 1 (0 when not a fork) |
+| `languages` | bytes and percent per language | 1 |
+| `contributors` | count (anonymous included, bounded to 500) and the top five accounts; anonymous names and e-mails are never printed | 1–5 |
+| `community` | GitHub's community health percentage and which files exist (README, LICENSE, CONTRIBUTING, ...) | 1 |
+| `releases` | same as the `releases` command | 2 |
+
+`stale` means no push for more than `--stale-days` (default 365). A section that cannot be
+read is `{"error": CODE}` and the command still succeeds, so one exhausted quota does not
+hide the facts already read. `releases` reports `latest` as the newest published,
+non-prerelease row among those fetched; `complete` is false when a list filled `--limit`.
+
+`capabilities` stays offline by default. `--rate-limit` adds one read of `GET rate_limit`
+(not charged against the quota): `limit`, `remaining`, `used`, `reset_at` and
+`resets_in_seconds` for `core`, `search` and `graphql`, `exhausted` resources, and
+`authenticated` (anonymous reads share 60 requests per hour). Use it to tell which half of
+`permission_or_rate_limit` an error was.
+
+From Python or Node, without the CLI: `repository("o/r", include=("health",))`,
+`releases("o/r")`, `rate_limit()`, `capabilities(rate_limit=True)`, `render_repository(o)`.
+
 ## Optional public repository inventory (Issue #29)
 
 ```bash
 python gh_identity.py repo-inventory myon-bioinformatics --fields name,size-kb
 python gh_identity.py repo-inventory myon-bioinformatics --fields name,run-count --sort run-count --order desc --max-repos 20
+python gh_identity.py repo-inventory SOME-ORG --fields name,stars,license --sort stars --order desc --include-archived
 ```
 
-`repository_inventory(owner, fields=("name",), sort="name", order="asc", max_repos=30, max_pages=5)` selects public, non-archived repositories. Size is GitHub's approximate repository metadata size in KiB, **not** source LOC. Run count is repository-wide Actions `total_count`, not workflow-specific. Run-count fan-out is opt-in; inaccessible values remain null with a reason, not zero. Limits are cumulative, and a partial inventory is not a complete ranking. Ascending and descending sorts place unavailable (null) metric values last; zero is a valid value, not missing. For `updated-at`, timezone-aware ISO timestamps are compared as UTC instants; missing or malformed timestamps sort last. Equal metric values use repository name ascending as a deterministic tie-breaker.
+Fields and sort keys: `name`, `size-kb`, `run-count`, `updated-at`, `stars`, `forks`, `license` (SPDX id), `language`, `pushed-at`. `--kind auto|user|org` (default `auto`: a name that is not a user is read as an organisation); `repos` takes the same option. Archived repositories are left out unless `--include-archived`; every row carries `archived` and `fork`, and the result names the `kind` it read. `repos` and `owner-repositories` rows also carry `stars`, `forks`, `license`, `language`, `pushed_at` (same response, no extra request).
+
+`repository_inventory(owner, fields=("name",), sort="name", order="asc", max_repos=30, max_pages=5, kind="auto", include_archived=False)` selects public repositories (non-archived by default). Size is GitHub's approximate repository metadata size in KiB, **not** source LOC. Run count is repository-wide Actions `total_count`, not workflow-specific. Run-count fan-out is opt-in; inaccessible values remain null with a reason, not zero. Limits are cumulative, and a partial inventory is not a complete ranking. Ascending and descending sorts place unavailable (null) metric values last; zero is a valid value, not missing. For `updated-at` and `pushed-at`, timezone-aware ISO timestamps are compared as UTC instants; missing or malformed timestamps sort last. Equal metric values use repository name ascending as a deterministic tie-breaker.
 
 Reaching `max_repos` conservatively reports `truncated=true` and `sort_scope="partial"`, even when the available repository count happens to equal the limit; no extra request is made to prove exhaustion.
 
