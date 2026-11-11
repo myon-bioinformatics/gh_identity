@@ -1,0 +1,66 @@
+name: Pages
+
+# Publishes the usage guide: docs/guide.page.json (a web-ui-page/1 spec, data only) rendered at build
+# time by PySaiyanWeBoo's web_ui.page_document — no HTML, CSS or JS lives in this repository.
+# Pull requests build the page (an invalid spec fails here); only main deploys.
+# Move the web_ui pin by changing WEB_UI below.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/guide.page.json"
+      - "assets/branding/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "docs/guide.page.json"
+      - "assets/branding/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WEB_UI: "pysaiyanweboo @ git+https://github.com/myon-bioinformatics/PySaiyanWeBoo@187102817d4955234d4edc1d3bd681edc59dc198"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "latest"
+          python-version: "3.15"
+          enable-cache: false
+      - name: Build the guide
+        run: |
+          mkdir -p _site
+          uv run --no-project --with "$WEB_UI" python -m web_ui --page docs/guide.page.json > _site/index.html
+          cp assets/branding/repository-icon.png _site/icon.png
+          cp assets/branding/concept-c-32.png _site/favicon.png
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: _site
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
