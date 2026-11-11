@@ -235,14 +235,14 @@ def pages_bounded(path,transport="auto",timeout=30,*,max_pages=20,requester=None
   if b is not None:b.charge("items",len(data))
   out.extend(data);path=_next_page(path,headers,len(data))
  return out,True,n
-def capabilities(rate_limit=False):
+def capabilities(rate_limit=False,transport="auto",timeout=30):
  """Local tool facts; rate_limit=True adds one network read of the API quota (opt-in)."""
  versions=tool_versions(("git","gh"))
  o={"schema":"gh-identity-capabilities/1","observed_at":now(),"python":sys.version.split()[0],
     "gh":gh_available(),"git":shutil.which("git") is not None,"token_present":bool(token()),
     "git_version":versions.get("git"),"gh_version":versions.get("gh")}
  if rate_limit:
-  try:o["rate_limit"]=globals()["rate_limit"]()
+  try:o["rate_limit"]=globals()["rate_limit"](transport=transport,timeout=timeout)
   except Error as e:o["rate_limit"]={"error":e.code}
  return o
 def rate_limit(transport="auto",timeout=30):
@@ -352,7 +352,16 @@ def _repo_health(r,o,stale_days,transport="auto",timeout=30):
     commit=head.get("commit") if isinstance(head.get("commit"),dict) else {}
     out["head_sha"]=sha;out["head_date"]=(commit.get("committer") or {}).get("date") if isinstance(commit.get("committer"),dict) else None
     checks=checks_for_sha(r,sha,transport=transport,timeout=timeout)
-    out["ci_state"]="none" if checks["count"]==0 and checks["complete"] else checks["state"]
+    # The combined status endpoint aggregates the latest legacy status per context,
+    # including contexts beyond its first page. Check runs alone omit these CI systems.
+    legacy=request("GET",f"repos/{r}/commits/{sha}/status",transport=transport,timeout=timeout)
+    if (not isinstance(legacy,dict) or type(legacy.get("total_count")) is not int
+        or legacy["total_count"]<0 or legacy.get("state") not in ("success","pending","failure","error")):
+     raise Error("invalid_json")
+    check_state="none" if checks["count"]==0 and checks["complete"] else checks["state"]
+    legacy_state="none" if legacy["total_count"]==0 else {"success":"green","pending":"pending","failure":"failed","error":"failed"}[legacy["state"]]
+    states=(check_state,legacy_state)
+    out["ci_state"]=next((state for state in ("failed","incomplete","pending","green") if state in states),"none")
   except Error as e:out["ci_error"]=e.code
  return out
 def _repo_fork_diff(r,d,transport="auto",timeout=30):
@@ -6320,7 +6329,7 @@ def _main(argv=None):
  try:ns=_cli_parser().parse_args(argv)
  except SystemExit as e:return int(e.code)
  try:
-  if ns.cmd=="capabilities":o=capabilities(rate_limit=ns.rate_limit)
+  if ns.cmd=="capabilities":o=capabilities(rate_limit=ns.rate_limit,transport=transport)
   elif ns.cmd=="git-status":o=git_status(ns.root,max_bytes=ns.output_bytes)
   elif ns.cmd=="git-files":o=git_ls_files(ns.root,max_bytes=ns.output_bytes)
   elif ns.cmd=="git-diff":o=git_diff(ns.root,staged=ns.staged,base=ns.base,head=ns.head,path=ns.path,max_bytes=ns.output_bytes)

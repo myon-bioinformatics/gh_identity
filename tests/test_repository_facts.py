@@ -71,6 +71,7 @@ def test_repo_include_all_sections():
         "repos/up/lib/commits/main": {"sha": SHA, "commit": {"committer": {"date": _ago(3)}}},
         f"repos/up/lib/commits/{SHA}/check-runs?per_page=100&page=1": {
             "total_count": 1, "check_runs": [{"id": 1, "name": "ci", "status": "completed", "conclusion": "success"}]},
+        f"repos/up/lib/commits/{SHA}/status": {"total_count": 0, "state": "pending"},
         "repos/up/lib/languages": {"Python": 900, "Shell": 100},
         "repos/up/lib/contributors?anon=1&per_page=100&page=1": [
             {"login": "alice", "contributions": 50}, {"type": "Anonymous", "email": "x@example.invalid", "contributions": 2}],
@@ -114,6 +115,7 @@ def test_health_without_checks_is_none_not_pending():
     routes = {"repos/up/lib": _repo(), "repos/up/lib/releases?per_page=5": [], "repos/up/lib/tags?per_page=5": [],
               "repos/up/lib/commits/main": {"sha": SHA},
               f"repos/up/lib/commits/{SHA}/check-runs?per_page=100&page=1": {"total_count": 0, "check_runs": []}}
+    routes[f"repos/up/lib/commits/{SHA}/status"] = {"total_count": 0, "state": "pending"}
     with ghi.request_stub(_api(routes)):
         assert ghi.repository("up/lib", include="health")["health"]["ci_state"] == "none"
 
@@ -259,3 +261,45 @@ def test_cli_repo_text_and_releases(capsys):
 def test_license_spdx_is_best_effort(answer, expected):
     with ghi.request_stub(_api({f"repos/up/lib/license?ref={SHA}": answer})):
         assert ghi._license_spdx("up/lib", SHA) == expected
+
+
+@pytest.mark.parametrize("check_state,legacy_state,count,expected", [
+    (None, "failure", 1, "failed"), ("success", "failure", 1, "failed"),
+    (None, "success", 1, "green"), ("success", "pending", 1, "pending"),
+    ("failure", "success", 1, "failed"), (None, "pending", 0, "none"),
+    ("success", "success", 101, "green"), ("success", "error", 1, "failed"),
+])
+def test_health_includes_combined_legacy_status(check_state, legacy_state, count, expected):
+    checks = [] if check_state is None else [{"id": 1, "name": "ci", "status": "completed", "conclusion": check_state}]
+    routes = {"repos/up/lib": _repo(), "repos/up/lib/releases?per_page=5": [],
+              "repos/up/lib/tags?per_page=5": [], "repos/up/lib/commits/main": {"sha": SHA},
+              f"repos/up/lib/commits/{SHA}/check-runs?per_page=100&page=1": {"total_count": len(checks), "check_runs": checks},
+              f"repos/up/lib/commits/{SHA}/status": {"total_count": count, "state": legacy_state}}
+    with ghi.request_stub(_api(routes)):
+        assert ghi.repository("up/lib", include="health")["health"]["ci_state"] == expected
+
+
+@pytest.mark.parametrize("response", [ghi.Error("permission_or_rate_limit"), {"total_count": True, "state": "success"}, {"total_count": 1, "state": "mystery"}])
+def test_unreadable_legacy_status_does_not_claim_green(response):
+    routes = {"repos/up/lib": _repo(), "repos/up/lib/releases?per_page=5": [],
+              "repos/up/lib/tags?per_page=5": [], "repos/up/lib/commits/main": {"sha": SHA},
+              f"repos/up/lib/commits/{SHA}/check-runs?per_page=100&page=1": {"total_count": 1, "check_runs": [{"id": 1, "status": "completed", "conclusion": "success"}]},
+              f"repos/up/lib/commits/{SHA}/status": response}
+    with ghi.request_stub(_api(routes)):
+        health = ghi.repository("up/lib", include="health")["health"]
+    assert health["ci_state"] is None
+    assert "ci_error" in health
+
+
+def test_capabilities_rate_limit_preserves_transport_and_timeout(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ghi, "rate_limit", lambda **kw: calls.append(kw) or {})
+    ghi.capabilities(rate_limit=True, transport="urllib", timeout=7)
+    assert calls == [{"transport": "urllib", "timeout": 7}]
+
+
+def test_capabilities_cli_forwards_transport(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ghi, "rate_limit", lambda **kw: calls.append(kw) or {})
+    assert ghi.main(["--transport", "urllib", "capabilities", "--rate-limit"]) == 0
+    assert calls == [{"transport": "urllib", "timeout": 30}]
