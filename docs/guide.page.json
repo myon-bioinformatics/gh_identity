@@ -1,0 +1,131 @@
+{
+  "schema": "web-ui-page/1",
+  "title": "gh_identity 利用ガイド",
+  "theme": "auto",
+  "description": "GitHub とローカル Git を読み取り専用で観測する単一ファイルのツール（gh があれば使い、なければ urllib）。",
+  "icon": "./icon.png",
+  "favicon": "./favicon.png",
+  "blocks": [
+    {
+      "type": "badges",
+      "items": [
+        "📄 単一ファイル",
+        "🧰 標準ライブラリのみ",
+        "🐍 Python 3.11+",
+        "👀 読み取り専用"
+      ]
+    },
+    {
+      "type": "section",
+      "title": "📥 取得",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "1 ファイルを置くだけで動きます（pip 不要）。"
+        },
+        {
+          "type": "output",
+          "text": "curl -fsSLO https://raw.githubusercontent.com/myon-bioinformatics/gh_identity/main/gh_identity.py"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "title": "▶️ 実行",
+      "blocks": [
+        {
+          "type": "card",
+          "title": "🧭 いまの位置",
+          "text": "引数なしで、ローカルと GitHub の現在地をまとめて出します。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python gh_identity.py\n{\"schema\": \"gh-identity-overview/1\", \"environment\": {…}, \"local\": {…}, …}"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "📍 ローカルだけ",
+          "text": "cwd・Git のトップ・HEAD・変更数・リモート（通信なし）。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python gh_identity.py local-position\n{\"schema\": \"gh-identity-local-position/1\", \"cwd\": \"…\", \"git\": {…}}"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "🧰 使える道具",
+          "text": "python / gh / git / トークンの有無を出します。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python gh_identity.py capabilities\n{\"schema\": \"gh-identity-capabilities/1\", \"python\": \"…\", \"gh\": true, \"git\": true, …}"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "✅ PR のチェック",
+          "text": "OWNER/REPO#N の check-runs。終了コード 0=緑 / 1=失敗 / 3=保留。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python gh_identity.py pr-checks OWNER/REPO#N"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "🔀 まとめてマージできるか",
+          "text": "複数の open PR が衝突しないかを、何も push せずに試します。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python gh_identity.py merge-preview OWNER/REPO --all-open"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "title": "🐍 Python から呼ぶ",
+      "blocks": [
+        {
+          "type": "output",
+          "text": "python gh_identity.py --help   # サブコマンド一覧"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "title": "🔗 リンク",
+      "blocks": [
+        {
+          "type": "links",
+          "items": [
+            {
+              "label": "📦 リポジトリ",
+              "href": "https://github.com/myon-bioinformatics/gh_identity"
+            },
+            {
+              "label": "📖 README",
+              "href": "https://github.com/myon-bioinformatics/gh_identity#readme"
+            },
+            {
+              "label": "📄 gh_identity.py",
+              "href": "https://github.com/myon-bioinformatics/gh_identity/blob/main/gh_identity.py"
+            },
+            {
+              "label": "📐 SPEC",
+              "href": "https://github.com/myon-bioinformatics/gh_identity/blob/main/SPEC.md"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

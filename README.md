@@ -4,6 +4,8 @@
 
 Single-file, stdlib-only Python interface for portable GitHub identity and operations.
 
+📘 [利用ガイド / Usage guide](https://myon-bioinformatics.github.io/gh_identity/) (GitHub Pages)
+
 - **No third-party Python runtime dependency**
 - Prefers authenticated **`gh`** when available
 - Falls back to stdlib **`urllib`** for supported REST operations, including anonymous public reads
