@@ -538,7 +538,73 @@ class HabitsAndConsolidationTests(unittest.TestCase):
   self.assertEqual(out["items"][0],{"repository":"o/r","kind":"code","path":"src/gh_identity.py","name":"gh_identity.py","sha":"a"*40,"url":"https://github.com/o/r/blob/main/src/gh_identity.py"})
   self.assertEqual(g.render_search(out),"o/r:src/gh_identity.py aaaaaaaa")
 
+ def test_search_repo_kind_and_render(self):
+  payload={
+   "total_count":1,"incomplete_results":False,
+   "items":[{"id":99,"full_name":"o/r","private":False,"visibility":"public","archived":False,
+             "default_branch":"main","description":"Bio tool","html_url":"https://github.com/o/r",
+             "stargazers_count":12,"forks_count":3,"language":"Python","pushed_at":"2026-10-01T00:00:00Z",
+             "fork":False,"license":{"spdx_id":"MIT"}}]
+  }
+  with mock.patch.object(g,"request",return_value=payload) as req:
+   out=g.search("org:o topic:bio",kind="repo",sort="stars")
+  self.assertIn("search/repositories?",req.call_args.args[1])
+  self.assertEqual(out["kind"],"repo")
+  self.assertEqual(out["sort"],"stars")
+  self.assertEqual(out["items"][0]["repository"],"o/r")
+  self.assertEqual(out["items"][0]["stars"],12)
+  self.assertEqual(out["items"][0]["license"],"MIT")
+  self.assertEqual(g.render_search(out),"o/r stars=12 forks=3 lang=Python Bio tool")
+
+ def test_workflows_and_render(self):
+  payload={"total_count":2,"workflows":[
+   {"id":10,"name":"CI","path":".github/workflows/ci.yml","state":"active","html_url":"https://github.com/o/r/actions/workflows/ci.yml"},
+   {"id":20,"name":"Nightly","path":".github/workflows/nightly.yml","state":"disabled_manually","html_url":"https://github.com/o/r/actions/workflows/nightly.yml"}
+  ]}
+  with mock.patch.object(g,"request",return_value=payload):
+   out=g.workflows("o/r")
+  self.assertEqual(out["schema"],"gh-identity-workflows/1")
+  self.assertTrue(out["complete"])
+  self.assertEqual(out["count"],2)
+  self.assertIn("10 active .github/workflows/ci.yml CI",g.render_workflows(out))
+
+ def test_failed_job_logs_and_render(self):
+  def req(method,path,**kw):
+   if path=="repos/o/r/actions/runs/500":
+    return {"id":500,"workflow_id":10,"run_attempt":2,"head_sha":"a"*40,"event":"pull_request","status":"completed","conclusion":"failure"}
+   if path=="repos/o/r/actions/runs/500/attempts/2/jobs?per_page=100&page=1":
+    return {"total_count":2,"jobs":[
+     {"id":70,"run_id":500,"run_attempt":2,"head_sha":"a"*40,"name":"lint","status":"completed","conclusion":"success","steps":[{"number":1,"name":"ruff","status":"completed","conclusion":"success"}]},
+     {"id":71,"run_id":500,"run_attempt":2,"head_sha":"a"*40,"name":"pytest","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/500/job/71","steps":[
+      {"number":1,"name":"Checkout","status":"completed","conclusion":"success"},
+      {"number":2,"name":"Run tests","status":"completed","conclusion":"failure"}
+     ]}
+    ]}
+   raise AssertionError(path)
+  log_res={"complete":True,"truncated":False,"text":"line 1\nline 2\nFAIL: test_foo\nAssertionError: boom\n","text_sha256":"f"*64,"bytes_read":50,"redaction":{"applied":True,"replacements":0}}
+  with mock.patch.object(g,"request",side_effect=req),mock.patch.object(g,"_download_job_log",return_value=log_res) as dl:
+   out=g.failed_job_logs("o/r",500,tail_lines=2)
+  dl.assert_called_once()
+  self.assertEqual(out["schema"],"gh-identity-failed-logs/1")
+  self.assertEqual(out["attempt"],2)
+  self.assertEqual(out["failed_job_count"],1)
+  self.assertTrue(out["complete"])
+  job=out["jobs"][0]
+  self.assertEqual(job["job_id"],71)
+  self.assertEqual(job["failed_steps"][0]["name"],"Run tests")
+  self.assertEqual(job["failed_steps"][0]["url"],"https://github.com/o/r/actions/runs/500/job/71#step:2")
+  self.assertTrue(job["tail_truncated"])
+  self.assertEqual(job["tail"],"FAIL: test_foo\nAssertionError: boom")
+  rendered=g.render_failed_job_logs(out)
+  self.assertIn("=== job 71 pytest (failure) steps=[Run tests] ===",rendered)
+  self.assertIn("AssertionError: boom",rendered)
+
+ def test_render_runs_and_jobs(self):
+  runs_obs={"schema":"gh-identity-runs/1","repository":"o/r","runs":[{"run_id":12,"attempt":1,"name":"CI","head_branch":"main","status":"completed","conclusion":"success","head_sha":"a"*40,"event":"push"}]}
+  self.assertEqual(g.render_runs(runs_obs),"12 #1 success push aaaaaaaa main CI")
+  jobs_obs={"schema":"gh-identity-jobs/1","repository":"o/r","run_id":12,"jobs":[{"job_id":71,"name":"pytest","status":"completed","conclusion":"failure","steps":[{"number":1,"name":"Checkout","status":"completed","conclusion":"success"},{"number":2,"name":"Run pytest","status":"completed","conclusion":"failure"}]}]}
+  self.assertEqual(g.render_jobs(jobs_obs),"71 failure pytest\n  step 2: failure Run pytest")
+
 
 if __name__ == "__main__":
  unittest.main()
-

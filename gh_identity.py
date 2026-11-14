@@ -1118,19 +1118,33 @@ def _code_search_row(d):
   raise Error("invalid_search_response")
  return {"repository":full,"kind":"code","path":path,"name":name,"sha":sha.lower(),"url":d.get("html_url")}
 
+def _repo_search_row(d):
+ if not isinstance(d,dict):raise Error("invalid_search_response")
+ full=d.get("full_name");rid=d.get("id")
+ if not isinstance(full,str) or not REPO.fullmatch(full) or type(rid) is not int or rid<1 or type(d.get("private")) is not bool:
+  raise Error("invalid_search_response")
+ return {"repository":full,"id":rid,"kind":"repo","private":d["private"],"visibility":d.get("visibility"),
+         "archived":bool(d.get("archived")),"default_branch":d.get("default_branch"),
+         "description":d.get("description"),"url":d.get("html_url"),**_repo_brief(d)}
+
 def search(query,kind="pr",sort="updated",order="desc",max_items=100,max_pages=10,transport="auto",timeout=30):
- """Bounded cross-repository Issue/PR/code search; never a fleet enumeration claim.
+ """Bounded cross-repository Issue/PR/code/repo search; never a fleet enumeration claim.
 
  Pass GitHub qualifiers (repo:, org:, user:, is:open/closed, label:, author:,
- head:, base:, is:merged/unmerged, draft:, created:, updated:, path:, language:) in query.
+ head:, base:, is:merged/unmerged, draft:, created:, updated:, path:, language:, topic:) in query.
  """
  if not isinstance(query,str) or not query.strip():raise ValueError("query is required")
- if kind not in ("pr","issue","code") or sort not in ("updated","created","comments","best-match") or order not in ("asc","desc"):
+ allowed_sorts={"pr":("updated","created","comments","best-match"),"issue":("updated","created","comments","best-match"),
+                "code":("updated","created","comments","stars","forks","best-match"),"repo":("updated","stars","forks","best-match")}
+ if kind not in allowed_sorts or sort not in allowed_sorts[kind] or order not in ("asc","desc"):
   raise ValueError("invalid search selection")
  for v in (max_items,max_pages):
   if type(v) is not int or v<1:raise ValueError("limits must be positive integers")
  if kind=="code":
   effective=query.strip();endpoint="search/code";params={"q":effective,"per_page":100};out_sort="best-match"
+ elif kind=="repo":
+  effective=query.strip();endpoint="search/repositories";params={"q":effective,"order":order,"per_page":100};out_sort=sort
+  if sort!="best-match":params["sort"]=sort
  else:
   effective=query.strip()+" is:"+kind;endpoint="search/issues";params={"q":effective,"order":order,"per_page":100};out_sort=sort
   if sort!="best-match":params["sort"]=sort
@@ -1147,6 +1161,8 @@ def search(query,kind="pr",sort="updated",order="desc",max_items=100,max_pages=1
   for d in batch:
    if kind=="code":
     row=_code_search_row(d);key=(row["repository"].lower(),row["path"],row["sha"])
+   elif kind=="repo":
+    row=_repo_search_row(d);key=row["repository"].lower()
    else:
     row=_issue_row(d,kind=kind);key=(row["repository"].lower(),row["number"])
    if key in seen:raise Error("pagination_incomplete")
@@ -1164,6 +1180,8 @@ def render_search(o):
  for x in o.get("items") or []:
   if x.get("kind")=="code":
    out.append(f"{x['repository']}:{x['path']} {(x.get('sha') or '?')[:8]}")
+  elif x.get("kind")=="repo":
+   out.append(f"{x['repository']} stars={x.get('stars')} forks={x.get('forks')} lang={x.get('language') or '?'} {x.get('description') or ''}".rstrip())
   else:
    labels=f" [{','.join(x['labels'])}]" if x.get("labels") else ""
    out.append(f"{x['repository']}#{x['number']} {x['state']}{labels} {x['title']}")
@@ -1282,8 +1300,19 @@ def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=
 
 def runs(r,limit=20,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/runs?per_page={min(100,max(1,limit))}",transport=transport,timeout=timeout)
- ds=[{"run_id":x.get("id"),"attempt":x.get("run_attempt"),"status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"event":x.get("event"),"url":x.get("html_url")} for x in (d.get("workflow_runs")or[])[:limit]]
+ ds=[{"run_id":x.get("id"),"attempt":x.get("run_attempt"),"name":x.get("name"),"head_branch":x.get("head_branch"),"status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"event":x.get("event"),"url":x.get("html_url")} for x in (d.get("workflow_runs")or[])[:limit]]
  return {"schema":"gh-identity-runs/1","repository":r,"runs":ds}
+
+def render_runs(o):
+ lines=[]
+ for x in o.get("runs") or []:
+  res=x.get("conclusion") or x.get("status") or "?"
+  sha=(x.get("head_sha") or "?")[:8]
+  branch=f" {x['head_branch']}" if x.get("head_branch") else ""
+  name=f" {x['name']}" if x.get("name") else ""
+  lines.append(f"{x['run_id']} #{x.get('attempt') or 1} {res} {x.get('event') or '?'} {sha}{branch}{name}")
+ if o.get("truncated"):lines.append(f"(truncated after {o.get('count',len(lines))})")
+ return "\n".join(lines)
 def variable(r,name,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/variables/{urllib.parse.quote(name,safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-variable/1","repository":r,"name":d.get("name"),"value":d.get("value"),"updated_at":d.get("updated_at")}
@@ -1781,6 +1810,38 @@ def workflow(r,w,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/workflows/{urllib.parse.quote(str(w),safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-workflow/1","repository":r,"id":d.get("id"),"name":d.get("name"),"path":d.get("path"),"state":d.get("state"),"url":d.get("html_url"),"observed_at":now()}
 
+def workflows(r,*,max_items=100,max_pages=10,transport="auto",timeout=30):
+ """List Actions workflows of one repository with bounded pagination."""
+ r=repo(r)
+ for v in (max_items,max_pages):
+  if type(v) is not int or v<1:raise ValueError("limits must be positive integers")
+ rows=[];seen=set();page=1;exhausted=False;fetched=0;total=None
+ while page<=max_pages and len(rows)<max_items:
+  data,_headers=_page(f"repos/{r}/actions/workflows?per_page=100&page={page}",transport=transport,timeout=timeout)
+  fetched+=1
+  if not isinstance(data,dict) or not isinstance(data.get("workflows"),list):raise Error("invalid_json")
+  if total is None:total=data.get("total_count")
+  batch=data["workflows"]
+  _BUDGET.get().charge("items",len(batch))
+  consumed=0
+  for w in batch:
+   if not isinstance(w,dict) or type(w.get("id")) is not int or w["id"]<1:raise Error("invalid_workflow_identity")
+   if w["id"] in seen:raise Error("pagination_incomplete")
+   seen.add(w["id"]);consumed+=1
+   rows.append({"id":w["id"],"name":w.get("name"),"path":w.get("path"),"state":w.get("state"),"url":w.get("html_url")})
+   if len(rows)>=max_items:break
+  if len(batch)<100:
+   exhausted=consumed==len(batch) and (type(total) is not int or len(rows)==total)
+   break
+  page+=1
+ return {"schema":"gh-identity-workflows/1","repository":r,"workflows":rows,"count":len(rows),
+         "pages_fetched":fetched,"complete":exhausted,"truncated":not exhausted,"observed_at":now()}
+
+def render_workflows(o):
+ lines=[f"{w['id']} {w.get('state') or '?'} {w.get('path') or '?'} {w.get('name') or ''}".rstrip() for w in o.get("workflows") or []]
+ if o.get("truncated"):lines.append(f"(truncated after {o['count']})")
+ return "\n".join(lines)
+
 def run(r, run_id, attempt=None, transport="auto", timeout=30):
  """Read an exact Actions run and optionally one exact rerun attempt."""
  r=repo(r)
@@ -1835,6 +1896,17 @@ def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
    "status":step.get("status"),"conclusion":step.get("conclusion")} for step in (x.get("steps") or [])]})
  return {"schema":"gh-identity-jobs/1","repository":r,"run_id":run_id,"attempt":attempt,
   "complete":True,"count":len(out),"jobs":out,"observed_at":now()}
+
+def render_jobs(o):
+ lines=[]
+ for j in o.get("jobs") or []:
+  res=j.get("conclusion") or j.get("status") or "?"
+  lines.append(f"{j['job_id']} {res} {j.get('name') or '?'}")
+  for s in j.get("steps") or []:
+   sres=s.get("conclusion") or s.get("status") or "?"
+   if sres not in ("success","skipped"):
+    lines.append(f"  step {s.get('number')}: {sres} {s.get('name') or '?'}")
+ return "\n".join(lines)
 
 def step_url(r,run_id,job_id,step_number,line=None):
  """Build a UI permalink from explicit identities; performs no observation."""
@@ -2233,6 +2305,93 @@ def job_log(r, run_id, job_id, *, attempt, max_bytes=1_000_000, redact=(), trans
     return {"schema": "gh-identity-job-log/1", "repository": r, "run_id": run_id,
             "job_id": job_id, "attempt": attempt, "head_sha": sha.lower(), "step_urls": step_urls,
             **result, "observed_at": now()}
+
+
+def failed_job_logs(r, run_id, *, attempt=None, max_jobs=5, max_bytes=200_000, tail_lines=200,
+                    redact=(), transport="auto", timeout=30):
+    """Read bounded, redacted log tails and failed steps for failed jobs in an Actions run."""
+    r = repo(r)
+    run_id = _positive_identifier(run_id, "run")
+    if attempt is not None:
+        attempt = _positive_identifier(attempt, "attempt")
+    if type(max_jobs) is not int or not 1 <= max_jobs <= 50:
+        raise ValueError("max_jobs must be 1..50")
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError("max_bytes must be a positive integer")
+    if type(tail_lines) is not int or tail_lines < 1:
+        raise ValueError("tail_lines must be a positive integer")
+    if transport not in ("auto", "gh", "urllib"):
+        raise ValueError("bad transport")
+    redact = _log_redactions(redact)
+    budget = _BUDGET.get()
+    deadline = min(budget.deadline, time.monotonic() + timeout)
+    def remaining():
+        left = min(budget.remaining(), deadline - time.monotonic())
+        if left <= 0:
+            budget.fail("operation_timeout")
+        return left
+    observed_run = run(r, run_id, attempt=attempt, transport=transport, timeout=remaining())
+    actual_attempt = observed_run.get("attempt")
+    sha = observed_run.get("head_sha")
+    if (type(observed_run.get("run_id")) is not int or observed_run["run_id"] != run_id
+            or type(actual_attempt) is not int or actual_attempt < 1
+            or (attempt is not None and actual_attempt != attempt)
+            or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha)):
+        raise Error("invalid_run_identity")
+    observation = jobs(r, run_id, attempt=actual_attempt, transport=transport, timeout=remaining())
+    bad = {"failure", "timed_out", "cancelled", "startup_failure", "action_required"}
+    failed = [j for j in observation["jobs"] if j.get("status") == "completed" and j.get("conclusion") in bad]
+    encoded = "/".join(urllib.parse.quote(part, safe="") for part in r.split("/"))
+    out_jobs = []
+    for job in failed[:max_jobs]:
+        jid = job["job_id"]
+        if not isinstance(job.get("head_sha"), str) or job["head_sha"].lower() != sha.lower():
+            raise Error("job_identity_mismatch")
+        failed_steps = []
+        for step in job.get("steps") or []:
+            if step.get("conclusion") in bad:
+                num = step.get("number")
+                if type(num) is not int or num < 1:
+                    raise Error("invalid_step_identity")
+                failed_steps.append({"number": num, "name": step.get("name"), "conclusion": step.get("conclusion"),
+                                     "url": step_url_from_jobs(observation, jid, num)})
+        entry = {"job_id": jid, "name": job.get("name"), "conclusion": job.get("conclusion"),
+                 "url": job.get("url"), "failed_steps": failed_steps}
+        try:
+            res = _download_job_log(f"repos/{encoded}/actions/jobs/{jid}/logs", max_bytes=max_bytes,
+                                    redact=redact, transport=transport, timeout=remaining())
+            text = res.get("text")
+            lines = text.splitlines() if isinstance(text, str) else []
+            tail = "\n".join(lines[-tail_lines:]) if isinstance(text, str) else None
+            entry.update(complete=res["complete"], truncated=res["truncated"], bytes_read=res["bytes_read"],
+                         text_sha256=res["text_sha256"], line_count=len(lines) if isinstance(text, str) else None,
+                         tail_lines=tail_lines, tail_truncated=len(lines) > tail_lines if isinstance(text, str) else False,
+                         tail=tail, redaction=res.get("redaction"))
+        except Error as exc:
+            if exc.code in ("pages_limit", "items_limit", "bytes_limit", "operation_timeout"):
+                raise
+            entry.update(complete=False, truncated=False, error=exc.code, tail=None)
+        out_jobs.append(entry)
+    complete = len(failed) <= max_jobs and all(x.get("complete") is True for x in out_jobs)
+    truncated = len(failed) > max_jobs or any(x.get("truncated") is True for x in out_jobs)
+    return {"schema": "gh-identity-failed-logs/1", "repository": r, "run_id": run_id, "attempt": actual_attempt,
+            "head_sha": sha.lower(), "run_status": observed_run.get("status"), "run_conclusion": observed_run.get("conclusion"),
+            "failed_job_count": len(failed), "count": len(out_jobs), "jobs": out_jobs,
+            "complete": complete, "truncated": truncated, "observed_at": now()}
+
+
+def render_failed_job_logs(o):
+    lines = [f"{o['repository']} run={o['run_id']} attempt={o['attempt']} head={(o.get('head_sha') or '?')[:8]} status={o.get('run_status')} conclusion={o.get('run_conclusion')} failed_jobs={o['failed_job_count']}"]
+    for j in o.get("jobs") or []:
+        steps = f" steps=[{', '.join(s.get('name') or str(s.get('number')) for s in j.get('failed_steps') or [])}]" if j.get("failed_steps") else ""
+        lines.append(f"=== job {j['job_id']} {j.get('name') or '?'} ({j.get('conclusion')}){steps} ===")
+        if j.get("error"):
+            lines.append(f"(error: {j['error']})")
+        elif j.get("truncated"):
+            lines.append(f"(log exceeded {j.get('bytes_read')} bytes)")
+        elif j.get("tail"):
+            lines.append(j["tail"])
+    return "\n".join(lines)
 
 
 def artifacts(r, run_id, *, max_items=100, max_pages=10, transport="auto", timeout=30):
@@ -6445,7 +6604,7 @@ def _cli_parser():
  x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("content");x.add_argument("repo");x.add_argument("kind",choices=("pr","issue","commit"));x.add_argument("identifier");x.add_argument("--field",action="append")
  x=s.add_parser("issues");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
- x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue","code"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
+ x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue","code","repo"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","stars","forks","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("prs");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("pr-files",help="list changed files in a pull request with optional path glob and bounded patch (read-only)");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--path",help="fnmatch glob on path or basename");x.add_argument("--patch",action="store_true",help="include bounded unified diff patch per file");x.add_argument("--patch-bytes",type=int,default=4000);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("get",help="read-only GET of one REST path with query options; e.g. get repos/O/R/pulls -q state=open --pick number --pick head.ref --text");x.add_argument("path");x.add_argument("-q","--query",action="append",default=[],metavar="KEY=VALUE");x.add_argument("--pick",action="append",default=[],metavar="FIELD");x.add_argument("--text",action="store_true")
@@ -6456,9 +6615,10 @@ def _cli_parser():
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
  for command in ("inline-comments","review-threads","review-observations"):
   x=s.add_parser(command);x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
- x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0)
- x=s.add_parser("runs");x.add_argument("repo")
- x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[],help="e.g. dynamic (Copilot code review runs)");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("workflows",help="list Actions workflows of one repository (read-only)");x.add_argument("repo");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
+ x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0);x.add_argument("--text",action="store_true")
+ x=s.add_parser("runs",help="recent Actions workflow runs; supports --branch, --head-sha, --event, --exclude-event, --limit, --text");x.add_argument("repo");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[]);x.add_argument("--limit",type=int,default=20);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
+ x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[],help="e.g. dynamic (Copilot code review runs)");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("artifacts");x.add_argument("repo");x.add_argument("run_id",type=int)
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks",help="check-runs of one or more SHAs; --text prints only what needs attention");x.add_argument("repo");x.add_argument("sha",nargs="+");x.add_argument("--min-checks",type=int,default=1);x.add_argument("--text",action="store_true")
@@ -6467,8 +6627,9 @@ def _cli_parser():
  x=s.add_parser("pr-status",help="compact status of PRs/Issues: OWNER/REPO N [N...] or OWNER/REPO#N ...");x.add_argument("targets",nargs="+",metavar="OWNER/REPO|N|OWNER/REPO#N");x.add_argument("--last",type=int,default=3);x.add_argument("--exclude-event",action="append",default=None,metavar="EVENT");x.add_argument("--text",action="store_true",help="human-readable lines instead of JSON")
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
- x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
+ x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int);x.add_argument("--text",action="store_true")
  x=s.add_parser("job-log");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("--attempt",type=int,required=True);x.add_argument("--log-bytes",type=int,default=1_000_000);x.add_argument("--redact-env",action="append",default=[])
+ x=s.add_parser("failed-logs",help="redacted log tails and failed steps for failed jobs in an Actions run (read-only)");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int);x.add_argument("--max-jobs",type=int,default=5);x.add_argument("--log-bytes",type=int,default=200_000);x.add_argument("--tail",type=int,default=200);x.add_argument("--redact-env",action="append",default=[]);x.add_argument("--text",action="store_true")
  x=s.add_parser("step-url");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("step_number",type=int);x.add_argument("--line",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
@@ -6573,8 +6734,13 @@ def _main(argv=None):
   elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
   elif ns.cmd in ("inline-comments","review-threads","review-observations"):
    o={"inline-comments":inline_comments,"review-threads":review_threads,"review-observations":review_observations}[ns.cmd](ns.repo,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
+  elif ns.cmd=="workflows":o=workflows(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="workflow-runs":o=workflow_run_discovery(ns.repo,ns.workflow_id,branch=ns.branch,head_sha=ns.head_sha,event=ns.event,max_items=ns.limit,max_pages=ns.page_limit,page_size=ns.page_size,start_page=ns.start_page,start_offset=ns.start_offset,transport=transport)
-  elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
+  elif ns.cmd=="runs":
+   if ns.head_sha is not None and not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
+   if ns.branch or ns.head_sha or ns.event or ns.exclude_event or ns.limit>100:
+    o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,branch=ns.branch,event=ns.event,transport=transport,exclude_events=ns.exclude_event)
+   else:o=runs(ns.repo,limit=ns.limit,transport=transport)
   elif ns.cmd=="head-runs":
    if not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
    o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,event=ns.event,transport=transport,exclude_events=ns.exclude_event)
@@ -6590,6 +6756,7 @@ def _main(argv=None):
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="job-log":o=job_log(ns.repo,ns.run_id,ns.job_id,attempt=ns.attempt,max_bytes=ns.log_bytes,redact=_log_redact_env(ns.redact_env),transport=transport,timeout=_BUDGET.get().remaining())
+  elif ns.cmd=="failed-logs":o=failed_job_logs(ns.repo,ns.run_id,attempt=ns.attempt,max_jobs=ns.max_jobs,max_bytes=ns.log_bytes,tail_lines=ns.tail,redact=_log_redact_env(ns.redact_env),transport=transport,timeout=_BUDGET.get().remaining())
   elif ns.cmd=="step-url":o={"schema":"gh-identity-step-url/1","url":step_url(ns.repo,ns.run_id,ns.job_id,ns.step_number,ns.line)}
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
@@ -6614,6 +6781,10 @@ def _main(argv=None):
  elif ns.cmd=="search" and ns.text:print(render_search(o))
  elif ns.cmd=="compare" and ns.text:print(render_compare(o))
  elif ns.cmd=="file" and ns.text:print(render_remote_file(o),end="" if (o.get("text") or "").endswith("\n") else "\n")
+ elif ns.cmd=="workflows" and ns.text:print(render_workflows(o))
+ elif ns.cmd in ("runs","head-runs","workflow-runs") and ns.text:print(render_runs(o))
+ elif ns.cmd=="jobs" and ns.text:print(render_jobs(o))
+ elif ns.cmd=="failed-logs" and ns.text:print(render_failed_job_logs(o))
  elif ns.cmd=="get" and ns.text:print(render_get(o))
  elif ns.cmd=="repo" and ns.text:print(render_repository(o))
  elif ns.cmd=="releases" and ns.text:print(render_releases(o))
@@ -6643,7 +6814,7 @@ def _main(argv=None):
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
   return 0 if o["ok"] and not drift else 1
- if ns.cmd in ("job-log","inline-comments","review-threads","review-observations","pr-files"):return 0 if o["complete"] else 1
+ if ns.cmd in ("job-log","failed-logs","workflows","inline-comments","review-threads","review-observations","pr-files"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.
  if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
@@ -6689,7 +6860,7 @@ def main(argv=None):
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","rate_limit","releases","compare_refs","pr","pr_files","comments","reviews","inline_comments","review_threads","review_observations",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
-              "resolve_ref","tree","source_identity","remote_file","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
+              "resolve_ref","tree","source_identity","remote_file","get","checks_for_sha","observe_pr","workflow","workflows","run","jobs","job_log","failed_job_logs","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
                "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):
  globals()[_name]=_bounded(globals()[_name])
