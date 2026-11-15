@@ -1,111 +1,116 @@
-"""fleet-status / fleet-checks / fleet-pr: one row per local clone."""
-import subprocess
+"""Fleet contracts through the parent's shared checks (vendor/fleet_check.py): locks, pins, CI setup, benchmark, Node entry."""
+import json, re, tomllib, unittest
 
-import gh_identity as g
+import pytest
 
+from vendor import fleet_check as fleet
 
-def _git(root, *args):
-    return subprocess.run(["git", "-C", str(root), "-c", "user.email=t@e", "-c", "user.name=t", *args],
-                          check=True, capture_output=True, text=True).stdout.strip()
-
-
-def _clone(tmp_path):
-    bare, work = tmp_path / "remote.git", tmp_path / "work"
-    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(bare))
-    _git(tmp_path, "clone", "-q", str(bare), str(work))
-    _git(work, "commit", "-q", "--allow-empty", "-m", "a")
-    _git(work, "push", "-q", "origin", "main")
-    return bare, work
-
-
-def test_status_plans_then_writes_tracking_for_a_pushed_branch(tmp_path):
-    bare, work = _clone(tmp_path)
-    _git(work, "switch", "-q", "-c", "feat")
-    _git(work, "commit", "-q", "--allow-empty", "-m", "b")
-    _git(work, "push", "-q", str(bare), "feat")  # pushed without tracking: the "unpushed" false alarm
-    row = g.fleet_status([work])["rows"][0]
-    assert row["upstream"] is None and row["ok"] is False
-    planned = g.fleet_status([work], fix_tracking=True)["rows"][0]["tracking_fix"]
-    assert planned["status"] == "planned" and ["git", "fetch", "--no-tags", "origin", "feat"] in planned["commands"]
-    fixed = g.fleet_status([work], fix_tracking=True, write=True)
-    row = fixed["rows"][0]
-    assert row["tracking_fix"]["status"] == "verified" and row["upstream"] == "origin/feat"
-    assert (row["ahead"], row["behind"], row["ok"]) == (0, 0, True) and fixed["ok"]
-    (work / "x").write_text("1")
-    assert g.render_fleet_status(g.fleet_status([work])).endswith("changed=0 untracked=1")
+ROOT = fleet.repo_root(__file__)
+PARENT_WORKFLOW_PIN = "9e3da7ae1846e9604ebc24bb5178f7de094a4e77"
+# Node sources and the shared checks stay on accepted upstream commits with exact bytes.
+ACCEPTED = {
+    "vendor/py_launch.cjs": "384f5dd532076062f7833038764e9a62322c387c",
+    "vendor/fleet_check.py": "45ed741f7e1f60179934cee6fa1e16a887f97cb0",
+}
+TOOL, ENV_VAR = "gh_identity.py", "GH_IDENTITY_PYTHON"
+CASES = [{"id": "help", "args": ["--help"], "rc": 0}, {"id": "bogus", "args": ["--bogus"], "rc": 2}, {"id": "vendor-lock-missing", "args": ["vendor-lock-check", "--root", ".", "--lock", "no-such-lock.json"], "rc": 2}]
+needs_node = pytest.mark.skipif(fleet.node() is None, reason="Node 26+ not available (set NODE)")
 
 
-def test_status_reports_missing_remote_branch_and_errors(tmp_path):
-    _, work = _clone(tmp_path)
-    _git(work, "switch", "-q", "-c", "local-only")
-    assert g.fleet_status([work], fix_tracking=True)["rows"][0]["tracking_fix"] == {"status": "remote_branch_missing"}
-    out = g.fleet_status([tmp_path / "not-a-repo"])
-    assert out["rows"][0]["ok"] is False and "error" in out["rows"][0]
-    assert g.render_fleet_status(out).startswith("error not-a-repo")
+def job_text(path, name):
+    return fleet.workflow_job(ROOT, name, path.rsplit("/", 1)[-1])
 
 
-def _github_clone(tmp_path):
-    _, work = _clone(tmp_path)
-    _git(work, "remote", "set-url", "origin", "https://github.com/o/r.git")
-    return work
+def test_vendor_lock_matches_checked_in_bytes_and_accepted_commits():
+    rows = fleet.check_lock(ROOT, commits=ACCEPTED)
+    launcher = rows["vendor/py_launch.cjs"]
+    assert (launcher["repository"], launcher["source"]) == (fleet.PARENT, "py_launch.cjs")
 
 
-def test_checks_steps_and_annotations(tmp_path):
-    work = _github_clone(tmp_path)
-
-    def fake(method, path, payload=None, **_):
-        if "/check-runs?" in path:
-            return {"total_count": 3, "check_runs": [
-                {"id": 1, "name": "python", "status": "completed", "conclusion": "failure"},
-                {"id": 2, "name": "node", "status": "completed", "conclusion": "success"},
-                {"id": 3, "name": "copilot-pull-request-reviewer", "status": "completed", "conclusion": "failure"}]}, {}
-        if path.endswith("actions/jobs/1"):
-            return {"steps": [{"name": "Run pytest", "conclusion": "failure"}, {"name": "ok", "conclusion": "success"}]}
-        if path.endswith("check-runs/1/annotations"):
-            return [{"annotation_level": "failure", "path": ".github", "start_line": 9, "message": "Process completed with exit code 1."},
-                    {"annotation_level": "failure", "path": "tests/x.py", "start_line": 3, "message": "assert  1 == 2"},
-                    {"annotation_level": "notice", "path": ".github", "start_line": 1, "message": "probe summary"}]
-        raise AssertionError(path)
-
-    def page_fake(method, path, payload=None, **kw):
-        result = fake(method, path, payload, **kw)
-        return result[0] if isinstance(result, tuple) else result
-    with g.request_stub(page_fake):
-        out = g.fleet_checks([work], steps=True)
-    row = out["rows"][0]
-    assert out["state"] == "failed" and row["count"] == 2
-    assert row["failed"] == [{"id": 1, "name": "python", "conclusion": "failure", "failed_steps": ["Run pytest"],
-                              "annotations": [{"level": "failure", "path": "tests/x.py", "line": 3, "message": "assert 1 == 2"}]}]
-    text = g.render_fleet_checks(out)
-    assert "x python (failure)" in text and "step: Run pytest" in text and "probe summary" not in text
+def test_parent_workflow_uses_refs_are_reviewed_commit():
+    # The .vendor-sync-tools checkout resolves the shared vendor tool at runtime; it is not a pin.
+    assert set(fleet.parent_refs(ROOT, skip=(".vendor-sync-tools",))) == {PARENT_WORKFLOW_PIN}
 
 
-def test_pr_plans_reports_existing_and_writes(tmp_path):
-    work = _github_clone(tmp_path)
-    _git(work, "switch", "-q", "-c", "feat")
-    calls = []
+class TestCIPythonSetup(unittest.TestCase):
+    def test_python_support_metadata_and_ci_agree(self):
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+        self.assertEqual(project["project"]["requires-python"], ">=3.11")
+        self.assertEqual(lock["requires-python"], project["project"]["requires-python"])
+        self.assertEqual(project["project"]["dependencies"], [])
+        self.assertIsNot(project["tool"]["uv"].get("package"), False)
+        self.assertEqual(project["tool"]["uv"]["dependency-groups"]["dev"]["requires-python"], ">=3.11")
+        expected = ["3.11", "3.12", "3.13", "3.14", "3.x"]
+        for path, job, selector in (
+            (".github/workflows/ci.yml", "test", "python-version"),
+            (".github/workflows/runtime-compatibility.yml", "runtime", "python"),
+        ):
+            with self.subTest(workflow=path):
+                body = job_text(path, job)
+                match = re.search(r"(?m)^        " + re.escape(selector) + r": (\[[^\n]+\])$", body)
+                self.assertIsNotNone(match, "Missing Python version matrix")
+                self.assertEqual(json.loads(match.group(1)), expected)
+        runtime = job_text(".github/workflows/runtime-compatibility.yml", "runtime")
+        self.assertIn("python -S -m unittest discover -s tests -p test_gh_identity.py -v", runtime)
 
-    def fake(method, path, payload=None, **kw):
-        calls.append((method, path, payload, kw.get("mutating")))
-        if method == "GET":
-            return []
-        return {"number": 9, "html_url": "https://github.com/o/r/pull/9"}
+    def assert_latest_setup(self, path, job_name, selector):
+        job = job_text(path, job_name)
+        steps = re.split(r"(?m)^      - ", job)
+        setup = next(step for step in steps if "uses: astral-sh/setup-uv@" in step)
+        self.assertIn('python-version: "${{ ' + selector + " == '3.x' && '3' || " + selector + ' }}"', setup)
+        self.assertIn("env:\n", setup)
+        self.assertIn("UV_PYTHON_PREFERENCE: ${{ " + selector + " == '3.x' && 'only-managed' || 'managed' }}", setup)
+        self.assertIn("activate-environment: true", setup)
+        self.assertIn('"3.x"', job)
 
-    with g.request_stub(fake):
-        assert g.fleet_pr([work], "t", "body")["rows"][0]["status"] == "planned"
-        written = g.fleet_pr([work], "t", "body", write=True)
-    assert written["status"] == "verified" and written["rows"][0]["number"] == 9
-    assert calls[-1][:2] == ("POST", "repos/o/r/pulls") and calls[-1][2]["head"] == "feat" and calls[-1][3] is True
-    with g.request_stub(lambda method, path, payload=None, **kw: [{"number": 4, "html_url": "u4"}]):
-        existing = g.fleet_pr([work], "t", "body", write=True)
-    assert existing["rows"][0]["status"] == "already_exists"
-    assert g.render_fleet_pr(existing) == "already_exists o/r #4 u4"
+    def test_pytest_latest_is_managed_before_activation(self):
+        self.assert_latest_setup(".github/workflows/ci.yml", "test", "matrix.python-version")
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("junit-py3.x/junit.xml", workflow)
+        self.assertIn("name: junit-py${{ matrix.python-version }}", workflow)
+
+    def test_runtime_latest_is_managed_before_activation(self):
+        self.assert_latest_setup(".github/workflows/runtime-compatibility.yml", "runtime", "matrix.python")
 
 
-def test_cli(tmp_path, capsys):
-    _, work = _clone(tmp_path)
-    assert g.main(["fleet-status", str(work), "--text"]) == 0
-    assert capsys.readouterr().out.startswith("ok   work main@")
-    body = tmp_path / "b.md"
-    body.write_text("x")
-    assert g.main(["fleet-pr", str(work), "--title", "t", "--body-file", str(body)]) == 1  # no GitHub origin
+
+@pytest.mark.parametrize("optimized", [False, True], ids=["normal", "optimized"])
+@pytest.mark.parametrize("mismatch", [False, True], ids=["same", "mismatch"])
+def test_benchmark_parity_in_both_interpreter_modes(optimized, mismatch):
+    patch = "g['indexed'] = lambda *args: ['different']" if mismatch else ""
+    result = fleet.run_main(ROOT, "scripts/benchmark_ignore_filter.py", patch, optimized=optimized)
+    if mismatch:
+        assert (result.returncode, result.stdout) == (1, ""), result.stderr
+        assert "result mismatch" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("{"), result.stdout
+
+
+def test_ci_executes_node_parity_instead_of_skipping():
+    job = fleet.workflow_job(ROOT, "test")
+    assert "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1" in job
+    assert "node-version: '26'" in job
+    assert "Require supported Node in parity CI" in job
+
+
+def test_no_per_tool_wrapper_and_readme_documents_the_direct_command():
+    assert not (ROOT / "gh_identity.cjs").exists()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"node vendor/py_launch.cjs --env-var {ENV_VAR} -- {TOOL}" in readme
+    pkg = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    assert pkg["engines"]["node"] == ">=26"
+
+
+@needs_node
+@pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])
+def test_node_matches_python(case):
+    via_node, via_python = fleet.node_parity(ROOT, TOOL, ENV_VAR, *case["args"])
+    assert via_python[0] == case["rc"]
+    assert via_node == via_python
+
+
+@needs_node
+def test_vendored_launcher_keeps_its_contract():
+    fleet.launcher_contract(ROOT, ENV_VAR)
