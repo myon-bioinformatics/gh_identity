@@ -1374,3 +1374,24 @@ class RequestStubRoutes(unittest.TestCase):
         with g.request_stub(lambda method, path, **kw: {"path": path}, calls):
             self.assertEqual(g.repository("o/r")["repository"], "o/r")
         self.assertEqual(calls, ["repos/o/r"])
+
+
+# ──── shared parsers (_is_sha, _when) ─────────────────────────────────
+
+class SharedParsers(unittest.TestCase):
+    """One commit-id check and one timestamp parser serve every section of gh_identity.py."""
+
+    def test_is_sha(self):
+        self.assertTrue(g._is_sha("a" * 40))
+        self.assertFalse(g._is_sha("a" * 64))
+        self.assertTrue(g._is_sha("a" * 64, oid=True))
+        for bad in ("A" * 40, "a" * 39, "g" * 40, None, 40, "a" * 40 + "\n"):
+            with self.subTest(bad=bad):
+                self.assertFalse(g._is_sha(bad))
+
+    def test_when(self):
+        self.assertEqual(g._when("2026-11-15T00:00:00Z").utcoffset().total_seconds(), 0)
+        self.assertIsNone(g._when("2026-11-15T00:00:00").tzinfo)  # naive kept; callers decide
+        for bad in (None, "", "yesterday", 1):
+            with self.subTest(bad=bad):
+                self.assertIsNone(g._when(bad))
