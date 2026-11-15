@@ -10,7 +10,7 @@ PARENT_WORKFLOW_PIN = "9e3da7ae1846e9604ebc24bb5178f7de094a4e77"
 # Node sources and the shared checks stay on accepted upstream commits with exact bytes.
 ACCEPTED = {
     "vendor/py_launch.cjs": "384f5dd532076062f7833038764e9a62322c387c",
-    "vendor/fleet_check.py": "45ed741f7e1f60179934cee6fa1e16a887f97cb0",
+    "vendor/fleet_check.py": "6c29503cf17eda856766ddfdf4d66a5b0965a8b1",
 }
 TOOL, ENV_VAR = "gh_identity.py", "GH_IDENTITY_PYTHON"
 CASES = [{"id": "help", "args": ["--help"], "rc": 0}, {"id": "bogus", "args": ["--bogus"], "rc": 2}, {"id": "vendor-lock-missing", "args": ["vendor-lock-check", "--root", ".", "--lock", "no-such-lock.json"], "rc": 2}]
