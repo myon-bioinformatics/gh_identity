@@ -437,5 +437,174 @@ class StepPermalinkTests(unittest.TestCase):
   with mock.patch("sys.stderr"):
    self.assertEqual(g.main(["step-url","o/r","20","91","0"]),2)
 
+
+class HabitsAndConsolidationTests(unittest.TestCase):
+ def test_pr_files_filter_and_bounded_patch(self):
+  batch=[
+   {"filename":"src/a.py","status":"modified","additions":3,"deletions":1,"changes":4,"sha":"a"*40,"patch":"@@ -1 +1,3 @@\n-old\n+new1\n+new2\n+new3"},
+   {"filename":"docs/readme.md","status":"added","additions":2,"deletions":0,"changes":2,"sha":"b"*40,"patch":"@@ -0,0 +1,2 @@\n+hi"}
+  ]
+  with mock.patch.object(g,"request",return_value=batch):
+   out=g.pr_files("o/r",12,path="*.py",include_patch=True,patch_bytes=20)
+  self.assertEqual(out["schema"],"gh-identity-pr-files/1")
+  self.assertTrue(out["complete"])
+  self.assertEqual(out["count"],1)
+  self.assertEqual(out["files"][0]["filename"],"src/a.py")
+  self.assertTrue(out["files"][0]["patch_truncated"])
+  self.assertLessEqual(len(out["files"][0]["patch"].encode("utf-8")),20)
+  rendered=g.render_pr_files(out)
+  self.assertIn("o/r#12 files=1 filter=*.py",rendered)
+  self.assertIn("... (patch truncated)",rendered)
+
+ def test_pr_files_cli_and_duplicate_filename_rejected(self):
+  batch=[{"filename":"a.py","status":"modified","additions":1,"deletions":0,"changes":1,"sha":"a"*40}]
+  with mock.patch.object(g,"request",return_value=batch),mock.patch("builtins.print") as out:
+   self.assertEqual(g.main(["pr-files","o/r","5","--text"]),0)
+  self.assertIn("a.py",out.call_args.args[0])
+  with mock.patch.object(g,"request",return_value=batch*2):
+   with self.assertRaises(g.Error) as cm:g.pr_files("o/r",5)
+  self.assertEqual(cm.exception.code,"invalid_pr_files_response")
+
+ def test_remote_file_resolves_ref_and_verifies_blob(self):
+  content=b"hello world\n"
+  blob_sha=g.git_blob_sha(content)
+  def req(method,path,**kw):
+   if "/commits/" in path:return {"sha":"c"*40}
+   if "/contents/" in path:return {"type":"file","sha":blob_sha,"size":len(content)}
+   if "/git/blobs/" in path:return {"encoding":"base64","content":g.base64.b64encode(content).decode("ascii")}
+   raise AssertionError(path)
+  with mock.patch.object(g,"request",side_effect=req):
+   out=g.remote_file("o/r","dir/hello.txt",ref="main",transport="gh")
+  self.assertEqual(out["schema"],"gh-identity-file/1")
+  self.assertEqual(out["commit"],"c"*40)
+  self.assertEqual(out["blob_sha"],blob_sha)
+  self.assertFalse(out["binary"])
+  self.assertEqual(out["text"],"hello world\n")
+  self.assertEqual(g.render_remote_file(out),"hello world\n")
+  with mock.patch.object(g,"request",side_effect=req),mock.patch("builtins.print") as printed:
+   self.assertEqual(g.main(["file","o/r","dir/hello.txt","--ref","main","--transport","gh","--text"]),0)
+  self.assertEqual(printed.call_args.args[0],"hello world\n")
+
+ def test_compare_refs_and_fork_diff_delegation(self):
+  payload={
+   "status":"ahead","ahead_by":2,"behind_by":1,"total_commits":2,
+   "base_commit":{"sha":"a"*40},"merge_base_commit":{"sha":"b"*40},
+   "commits":[{"sha":"c"*40,"commit":{"message":"feat: first\n\nbody","committer":{"date":"2026-10-01T00:00:00Z"}},"author":{"login":"alice"}}],
+   "files":[{"filename":"gh_identity.py","status":"modified","additions":10,"deletions":2,"changes":12,"sha":"d"*40}],
+   "html_url":"https://github.com/o/r/compare/main...feat"
+  }
+  with mock.patch.object(g,"request",return_value=payload):
+   out=g.compare_refs("o/r","main","feat")
+   fork=g._repo_fork_diff("me/r",{"fork":True,"default_branch":"feat","parent":{"full_name":"o/r","default_branch":"main"}})
+  self.assertEqual(out["schema"],"gh-identity-compare/1")
+  self.assertEqual((out["ahead_by"],out["behind_by"],out["status"]),(2,1,"ahead"))
+  self.assertEqual(out["commits"][0]["title"],"feat: first")
+  self.assertEqual(out["files"][0]["filename"],"gh_identity.py")
+  self.assertIn("commit cccccccc feat: first",g.render_compare(out))
+  self.assertEqual((fork["ahead_by"],fork["behind_by"],fork["status"]),(2,1,"ahead"))
+
+ def test_pr_checks_steps_enriches_failed_steps_and_annotations(self):
+  def req(method,path,**kw):
+   if path=="repos/o/r/pulls/3":return {"head":{"sha":"a"*40},"base":{"sha":"b"*40}}
+   if "check-runs?per_page=100" in path:
+    return {"total_count":1,"check_runs":[{"id":55,"name":"unit","status":"completed","conclusion":"failure"}]}
+   if path=="repos/o/r/actions/jobs/55":
+    return {"steps":[{"name":"Checkout","conclusion":"success"},{"name":"pytest","conclusion":"failure"}]}
+   if path=="repos/o/r/check-runs/55/annotations":
+    return [{"annotation_level":"failure","path":"tests/test_x.py","start_line":42,"message":"assert 1 == 2"}]
+   raise AssertionError(path)
+  with mock.patch.object(g,"request",side_effect=req):
+   out=g.pr_checks(["o/r#3"],steps=True)
+  self.assertEqual(out["state"],"failed")
+  att=out["rows"][0]["attention"][0]
+  self.assertEqual(att["failed_steps"],["pytest"])
+  self.assertEqual(att["annotations"][0]["path"],"tests/test_x.py")
+  text=g.render_pr_checks(out)
+  self.assertIn("  step: pytest",text)
+  self.assertIn("  failure: tests/test_x.py:42 assert 1 == 2",text)
+
+ def test_search_code_kind_and_render(self):
+  payload={
+   "total_count":1,"incomplete_results":False,
+   "items":[{"name":"gh_identity.py","path":"src/gh_identity.py","sha":"A"*40,
+             "html_url":"https://github.com/o/r/blob/main/src/gh_identity.py",
+             "repository":{"full_name":"o/r"}}]
+  }
+  with mock.patch.object(g,"request",return_value=payload) as req:
+   out=g.search("def remote_file repo:o/r",kind="code")
+  self.assertIn("search/code?",req.call_args.args[1])
+  self.assertEqual(out["kind"],"code")
+  self.assertEqual(out["sort"],"best-match")
+  self.assertEqual(out["items"][0],{"repository":"o/r","kind":"code","path":"src/gh_identity.py","name":"gh_identity.py","sha":"a"*40,"url":"https://github.com/o/r/blob/main/src/gh_identity.py"})
+  self.assertEqual(g.render_search(out),"o/r:src/gh_identity.py aaaaaaaa")
+
+ def test_search_repo_kind_and_render(self):
+  payload={
+   "total_count":1,"incomplete_results":False,
+   "items":[{"id":99,"full_name":"o/r","private":False,"visibility":"public","archived":False,
+             "default_branch":"main","description":"Bio tool","html_url":"https://github.com/o/r",
+             "stargazers_count":12,"forks_count":3,"language":"Python","pushed_at":"2026-10-01T00:00:00Z",
+             "fork":False,"license":{"spdx_id":"MIT"}}]
+  }
+  with mock.patch.object(g,"request",return_value=payload) as req:
+   out=g.search("org:o topic:bio",kind="repo",sort="stars")
+  self.assertIn("search/repositories?",req.call_args.args[1])
+  self.assertEqual(out["kind"],"repo")
+  self.assertEqual(out["sort"],"stars")
+  self.assertEqual(out["items"][0]["repository"],"o/r")
+  self.assertEqual(out["items"][0]["stars"],12)
+  self.assertEqual(out["items"][0]["license"],"MIT")
+  self.assertEqual(g.render_search(out),"o/r stars=12 forks=3 lang=Python Bio tool")
+
+ def test_workflows_and_render(self):
+  payload={"total_count":2,"workflows":[
+   {"id":10,"name":"CI","path":".github/workflows/ci.yml","state":"active","html_url":"https://github.com/o/r/actions/workflows/ci.yml"},
+   {"id":20,"name":"Nightly","path":".github/workflows/nightly.yml","state":"disabled_manually","html_url":"https://github.com/o/r/actions/workflows/nightly.yml"}
+  ]}
+  with mock.patch.object(g,"request",return_value=payload):
+   out=g.workflows("o/r")
+  self.assertEqual(out["schema"],"gh-identity-workflows/1")
+  self.assertTrue(out["complete"])
+  self.assertEqual(out["count"],2)
+  self.assertIn("10 active .github/workflows/ci.yml CI",g.render_workflows(out))
+
+ def test_failed_job_logs_and_render(self):
+  def req(method,path,**kw):
+   if path=="repos/o/r/actions/runs/500":
+    return {"id":500,"workflow_id":10,"run_attempt":2,"head_sha":"a"*40,"event":"pull_request","status":"completed","conclusion":"failure"}
+   if path=="repos/o/r/actions/runs/500/attempts/2/jobs?per_page=100&page=1":
+    return {"total_count":2,"jobs":[
+     {"id":70,"run_id":500,"run_attempt":2,"head_sha":"a"*40,"name":"lint","status":"completed","conclusion":"success","steps":[{"number":1,"name":"ruff","status":"completed","conclusion":"success"}]},
+     {"id":71,"run_id":500,"run_attempt":2,"head_sha":"a"*40,"name":"pytest","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/500/job/71","steps":[
+      {"number":1,"name":"Checkout","status":"completed","conclusion":"success"},
+      {"number":2,"name":"Run tests","status":"completed","conclusion":"failure"}
+     ]}
+    ]}
+   raise AssertionError(path)
+  log_res={"complete":True,"truncated":False,"text":"line 1\nline 2\nFAIL: test_foo\nAssertionError: boom\n","text_sha256":"f"*64,"bytes_read":50,"redaction":{"applied":True,"replacements":0}}
+  with mock.patch.object(g,"request",side_effect=req),mock.patch.object(g,"_download_job_log",return_value=log_res) as dl:
+   out=g.failed_job_logs("o/r",500,tail_lines=2)
+  dl.assert_called_once()
+  self.assertEqual(out["schema"],"gh-identity-failed-logs/1")
+  self.assertEqual(out["attempt"],2)
+  self.assertEqual(out["failed_job_count"],1)
+  self.assertTrue(out["complete"])
+  job=out["jobs"][0]
+  self.assertEqual(job["job_id"],71)
+  self.assertEqual(job["failed_steps"][0]["name"],"Run tests")
+  self.assertEqual(job["failed_steps"][0]["url"],"https://github.com/o/r/actions/runs/500/job/71#step:2")
+  self.assertTrue(job["tail_truncated"])
+  self.assertEqual(job["tail"],"FAIL: test_foo\nAssertionError: boom")
+  rendered=g.render_failed_job_logs(out)
+  self.assertIn("=== job 71 pytest (failure) steps=[Run tests] ===",rendered)
+  self.assertIn("AssertionError: boom",rendered)
+
+ def test_render_runs_and_jobs(self):
+  runs_obs={"schema":"gh-identity-runs/1","repository":"o/r","runs":[{"run_id":12,"attempt":1,"name":"CI","head_branch":"main","status":"completed","conclusion":"success","head_sha":"a"*40,"event":"push"}]}
+  self.assertEqual(g.render_runs(runs_obs),"12 #1 success push aaaaaaaa main CI")
+  jobs_obs={"schema":"gh-identity-jobs/1","repository":"o/r","run_id":12,"jobs":[{"job_id":71,"name":"pytest","status":"completed","conclusion":"failure","steps":[{"number":1,"name":"Checkout","status":"completed","conclusion":"success"},{"number":2,"name":"Run pytest","status":"completed","conclusion":"failure"}]}]}
+  self.assertEqual(g.render_jobs(jobs_obs),"71 failure pytest\n  step 2: failure Run pytest")
+
+
 if __name__ == "__main__":
  unittest.main()

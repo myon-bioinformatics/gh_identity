@@ -171,6 +171,14 @@ def now(): return datetime.now(timezone.utc).isoformat()
 def repo(x):
  if not isinstance(x,str) or not REPO.fullmatch(x): raise ValueError("repo must be OWNER/REPO")
  return x
+_OWNER=re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
+def _owner(x):
+ if not isinstance(x,str) or not _OWNER.fullmatch(x): raise ValueError("invalid owner")
+ return x
+def _positive_identifier(value,label):
+ if isinstance(value,bool) or not isinstance(value,(int,str)) or not re.fullmatch(r"[0-9]+",str(value)) or int(value)<1:
+  raise ValueError("invalid "+label+" identifier")
+ return int(value)
 def token(): return os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
 def gh_available(): return shutil.which("gh") is not None
 def _gh(method,path,payload=None,timeout=30,mutating=False):
@@ -364,17 +372,56 @@ def _repo_health(r,o,stale_days,transport="auto",timeout=30):
     out["ci_state"]=next((state for state in ("failed","incomplete","pending","green") if state in states),"none")
   except Error as e:out["ci_error"]=e.code
  return out
+def compare_refs(r,base,head,*,max_items=100,transport="auto",timeout=30):
+ """Compare two refs/SHAs (or cross-fork OWNER:BRANCH) via GitHub compare API (read-only)."""
+ r=repo(r)
+ for name,val in (("base",base),("head",head)):
+  if not isinstance(val,str) or not val.strip() or any(c in val for c in "\r\n\0") or ".." in val:
+   raise ValueError(f"invalid {name} ref")
+ if type(max_items) is not int or not 1<=max_items<=250:raise ValueError("max_items must be 1..250")
+ q=lambda x:":".join(urllib.parse.quote(p,safe="") for p in x.split(":",1))
+ c=request("GET",f"repos/{r}/compare/{q(base)}...{q(head)}?per_page={min(100,max_items)}",transport=transport,timeout=timeout)
+ if not isinstance(c,dict):raise Error("invalid_json")
+ raw_commits=c.get("commits") if isinstance(c.get("commits"),list) else []
+ raw_files=c.get("files") if isinstance(c.get("files"),list) else []
+ commits=[{"sha":x.get("sha"),"title":((x.get("commit") or {}).get("message") or "").split("\n",1)[0],
+           "author":((x.get("author") or {}).get("login") if isinstance(x.get("author"),dict) else None)
+                    or (((x.get("commit") or {}).get("author") or {}).get("name") if isinstance((x.get("commit") or {}).get("author"),dict) else None),
+           "date":(((x.get("commit") or {}).get("committer") or {}).get("date") if isinstance((x.get("commit") or {}).get("committer"),dict) else None)}
+          for x in raw_commits[:max_items] if isinstance(x,dict)]
+ files=[{"filename":f.get("filename"),"status":f.get("status"),"additions":_count(f,"additions"),
+         "deletions":_count(f,"deletions"),"changes":_count(f,"changes"),"blob_sha":f.get("sha"),
+         "previous_filename":f.get("previous_filename")}
+        for f in raw_files[:max_items] if isinstance(f,dict) and isinstance(f.get("filename"),str)]
+ total_commits=_count(c,"total_commits")
+ commits_complete=total_commits is not None and len(commits)==total_commits and len(raw_commits)<=max_items
+ files_complete=len(raw_files)<=max_items and len(raw_files)<300
+ return {"schema":"gh-identity-compare/1","repository":r,"base":base,"head":head,
+         "status":c.get("status"),"ahead_by":_count(c,"ahead_by"),"behind_by":_count(c,"behind_by"),
+         "total_commits":total_commits,
+         "base_sha":(c.get("base_commit") or {}).get("sha") if isinstance(c.get("base_commit"),dict) else None,
+         "head_sha":(raw_commits[-1].get("sha") if raw_commits and isinstance(raw_commits[-1],dict) else None),
+         "merge_base_sha":(c.get("merge_base_commit") or {}).get("sha") if isinstance(c.get("merge_base_commit"),dict) else None,
+         "commits":commits,"commits_count":len(commits),"commits_complete":commits_complete,
+         "files":files,"files_count":len(files),"files_complete":files_complete,
+         "url":c.get("html_url"),"observed_at":now()}
+def render_compare(o):
+ lines=[f"{o['repository']} {o['base']}...{o['head']} status={o['status']} ahead={o['ahead_by']} behind={o['behind_by']} commits={o['total_commits']} files={o['files_count']}"]
+ for c in o["commits"]:
+  lines.append(f"  commit {(c['sha'] or '?')[:8]} {c['title']}")
+ for f in o["files"]:
+  ren=f" (from {f['previous_filename']})" if f.get("previous_filename") else ""
+  lines.append(f"  {f['status'] or '?':9} +{f['additions'] or 0}/-{f['deletions'] or 0} {f['filename']}{ren}")
+ return "\n".join(lines)
 def _repo_fork_diff(r,d,transport="auto",timeout=30):
  """Commits the fork's default branch is ahead of / behind its parent's default branch."""
  parent=d.get("parent") if isinstance(d.get("parent"),dict) else None
  if not d.get("fork") or parent is None:return {"fork":False}
  base=parent.get("full_name");base_branch=parent.get("default_branch");branch=d.get("default_branch")
  if not isinstance(base,str) or not REPO.fullmatch(base) or not isinstance(base_branch,str) or not isinstance(branch,str):raise Error("invalid_json")
- q=lambda x:urllib.parse.quote(x,safe="")
- c=request("GET",f"repos/{base}/compare/{q(base_branch)}...{q(r.split('/')[0])}:{q(branch)}?per_page=1",transport=transport,timeout=timeout)
- if not isinstance(c,dict):raise Error("invalid_json")
+ c=compare_refs(base,base_branch,f"{r.split('/')[0]}:{branch}",max_items=1,transport=transport,timeout=timeout)
  return {"fork":True,"parent":base,"parent_branch":base_branch,"branch":branch,
-         "ahead_by":_count(c,"ahead_by"),"behind_by":_count(c,"behind_by"),"status":c.get("status")}
+         "ahead_by":c["ahead_by"],"behind_by":c["behind_by"],"status":c["status"]}
 def _repo_languages(r,transport="auto",timeout=30):
  d=request("GET",f"repos/{r}/languages",transport=transport,timeout=timeout)
  if not isinstance(d,dict):raise Error("invalid_json")
@@ -526,6 +573,59 @@ def _review_limits(n,max_items,max_pages):
  for value in (max_items,max_pages):
   if type(value) is not int or value<1:raise ValueError("limits must be positive integers")
  return n
+def pr_files(r,n,*,path=None,include_patch=False,patch_bytes=4000,max_items=100,max_pages=10,transport="auto",timeout=30):
+ """List changed files in a pull request with bounded pagination and optional bounded patch snippets."""
+ r=repo(r);n=_review_limits(n,max_items,max_pages)
+ if path is not None and (not isinstance(path,str) or not path.strip()):raise ValueError("invalid path filter")
+ if type(include_patch) is not bool:raise ValueError("include_patch must be bool")
+ if type(patch_bytes) is not int or not 1<=patch_bytes<=200_000:raise ValueError("patch_bytes must be 1..200000")
+ rows=[];seen=set();fetched=0;complete=False;limit_reason=None
+ url=f"repos/{r}/pulls/{n}/files?per_page=100&page=1"
+ while url and fetched<max_pages:
+  batch,headers=_page(url,transport,timeout);fetched+=1
+  if not isinstance(batch,list) or any(not isinstance(x,dict) for x in batch):raise Error("invalid_json")
+  _BUDGET.get().charge("items",len(batch))
+  consumed=0
+  for x in batch:
+   consumed+=1
+   fname=x.get("filename")
+   if not isinstance(fname,str) or not fname or fname in seen:raise Error("invalid_pr_files_response")
+   seen.add(fname)
+   if path is not None and not (fnmatch.fnmatchcase(fname,path) or fnmatch.fnmatchcase(fname.rsplit("/",1)[-1],path)):
+    continue
+   item={"filename":fname,"status":x.get("status"),"additions":_count(x,"additions"),
+         "deletions":_count(x,"deletions"),"changes":_count(x,"changes"),"blob_sha":x.get("sha"),
+         "previous_filename":x.get("previous_filename")}
+   if include_patch:
+    raw_patch=x.get("patch") if isinstance(x.get("patch"),str) else None
+    if raw_patch is not None:
+     encoded=raw_patch.encode("utf-8")
+     item["patch_truncated"]=len(encoded)>patch_bytes
+     item["patch"]=encoded[:patch_bytes].decode("utf-8",errors="ignore") if item["patch_truncated"] else raw_patch
+    else:
+     item["patch"]=None;item["patch_truncated"]=False
+   rows.append(item)
+   if len(rows)>=max_items:break
+  next_url=_next_page(url,headers,len(batch))
+  if len(rows)>=max_items and (consumed<len(batch) or next_url is not None):
+   limit_reason="max_items";break
+  if next_url is None:
+   complete=True;break
+  url=next_url
+ else:
+  if url is not None:limit_reason="max_pages"
+ return {"schema":"gh-identity-pr-files/1","repository":r,"number":n,"path_filter":path,
+         "files":rows,"count":len(rows),"pages_fetched":fetched,
+         "complete":complete,"truncated":not complete,"limit_reason":limit_reason,"observed_at":now()}
+def render_pr_files(o):
+ out=[f"{o['repository']}#{o['number']} files={o['count']}"+(f" filter={o['path_filter']}" if o.get("path_filter") else "")+(" (truncated)" if o.get("truncated") else "")]
+ for f in o["files"]:
+  ren=f" (from {f['previous_filename']})" if f.get("previous_filename") else ""
+  out.append(f"  {f['status'] or '?':9} +{f['additions'] or 0}/-{f['deletions'] or 0} {f['filename']}{ren}")
+  if f.get("patch"):
+   for line in f["patch"].splitlines():out.append("    "+line)
+   if f.get("patch_truncated"):out.append("    ... (patch truncated)")
+ return "\n".join(out)
 
 def _review_rest(path,transport,timeout,max_items,max_pages):
  if max_items is None and max_pages is None:
@@ -1009,24 +1109,49 @@ def issues(r,state="open",max_items=100,max_pages=10,transport="auto",timeout=30
  return {"schema":"gh-identity-issue-discovery/1","repository":r,"state":state,"issues":rows,
          "count":len(rows),"pages_fetched":fetched,"complete":complete,"truncated":not complete}
 
+def _code_search_row(d):
+ if not isinstance(d,dict):raise Error("invalid_search_response")
+ rep=d.get("repository")
+ full=rep.get("full_name") if isinstance(rep,dict) else None
+ path=d.get("path");name=d.get("name");sha=d.get("sha")
+ if not isinstance(full,str) or not REPO.fullmatch(full) or not isinstance(path,str) or not path or not isinstance(name,str) or not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha):
+  raise Error("invalid_search_response")
+ return {"repository":full,"kind":"code","path":path,"name":name,"sha":sha.lower(),"url":d.get("html_url")}
+
+def _repo_search_row(d):
+ if not isinstance(d,dict):raise Error("invalid_search_response")
+ full=d.get("full_name");rid=d.get("id")
+ if not isinstance(full,str) or not REPO.fullmatch(full) or type(rid) is not int or rid<1 or type(d.get("private")) is not bool:
+  raise Error("invalid_search_response")
+ return {"repository":full,"id":rid,"kind":"repo","private":d["private"],"visibility":d.get("visibility"),
+         "archived":bool(d.get("archived")),"default_branch":d.get("default_branch"),
+         "description":d.get("description"),"url":d.get("html_url"),**_repo_brief(d)}
+
 def search(query,kind="pr",sort="updated",order="desc",max_items=100,max_pages=10,transport="auto",timeout=30):
- """Bounded cross-repository Issue/PR search; never a fleet enumeration claim.
+ """Bounded cross-repository Issue/PR/code/repo search; never a fleet enumeration claim.
 
  Pass GitHub qualifiers (repo:, org:, user:, is:open/closed, label:, author:,
- head:, base:, is:merged/unmerged, draft:, created:, updated:) in query.
+ head:, base:, is:merged/unmerged, draft:, created:, updated:, path:, language:, topic:) in query.
  """
  if not isinstance(query,str) or not query.strip():raise ValueError("query is required")
- if kind not in ("pr","issue") or sort not in ("updated","created","comments","best-match") or order not in ("asc","desc"):
+ allowed_sorts={"pr":("updated","created","comments","best-match"),"issue":("updated","created","comments","best-match"),
+                "code":("updated","created","comments","stars","forks","best-match"),"repo":("updated","stars","forks","best-match")}
+ if kind not in allowed_sorts or sort not in allowed_sorts[kind] or order not in ("asc","desc"):
   raise ValueError("invalid search selection")
  for v in (max_items,max_pages):
   if type(v) is not int or v<1:raise ValueError("limits must be positive integers")
- effective=query.strip()+" is:"+kind
- params={"q":effective,"order":order,"per_page":100}
- if sort!="best-match":params["sort"]=sort
+ if kind=="code":
+  effective=query.strip();endpoint="search/code";params={"q":effective,"per_page":100};out_sort="best-match"
+ elif kind=="repo":
+  effective=query.strip();endpoint="search/repositories";params={"q":effective,"order":order,"per_page":100};out_sort=sort
+  if sort!="best-match":params["sort"]=sort
+ else:
+  effective=query.strip()+" is:"+kind;endpoint="search/issues";params={"q":effective,"order":order,"per_page":100};out_sort=sort
+  if sort!="best-match":params["sort"]=sort
  rows=[];seen=set();total=None;incomplete=False;complete=False;fetched=0;raw_count=0
  for page in range(1,min(max_pages,10)+1):
   params["page"]=page
-  data,_headers=_page("search/issues?"+urllib.parse.urlencode(params),transport,timeout);fetched+=1
+  data,_headers=_page(endpoint+"?"+urllib.parse.urlencode(params),transport,timeout);fetched+=1
   if not isinstance(data,dict) or type(data.get("total_count")) is not int or data["total_count"]<0 or type(data.get("incomplete_results")) is not bool or not isinstance(data.get("items"),list):raise Error("invalid_search_response")
   if total is not None and total!=data["total_count"]:raise Error("pagination_incomplete")
   total=data["total_count"];incomplete=incomplete or data["incomplete_results"];batch=data["items"]
@@ -1034,16 +1159,34 @@ def search(query,kind="pr",sort="updated",order="desc",max_items=100,max_pages=1
   _BUDGET.get().charge("items",len(batch));raw_count+=len(batch)
   if raw_count>total:raise Error("pagination_incomplete")
   for d in batch:
-   row=_issue_row(d,kind=kind);key=(row["repository"].lower(),row["number"])
+   if kind=="code":
+    row=_code_search_row(d);key=(row["repository"].lower(),row["path"],row["sha"])
+   elif kind=="repo":
+    row=_repo_search_row(d);key=row["repository"].lower()
+   else:
+    row=_issue_row(d,kind=kind);key=(row["repository"].lower(),row["number"])
    if key in seen:raise Error("pagination_incomplete")
    seen.add(key)
    if len(rows)<max_items:rows.append(row)
   complete=not incomplete and len(rows)==total
   if complete or len(rows)>=max_items or len(batch)<100:break
- return {"schema":"gh-identity-search/1","kind":kind,"query":effective,"sort":sort,"order":order,
+ return {"schema":"gh-identity-search/1","kind":kind,"query":effective,"sort":out_sort,"order":order,
          "items":rows,"count":len(rows),"total_count":total,"pages_fetched":fetched,
          "incomplete_results":incomplete,"complete":complete,"truncated":not complete,
          "scope":"accessible_search_results","observed_at":now()}
+
+def render_search(o):
+ out=[]
+ for x in o.get("items") or []:
+  if x.get("kind")=="code":
+   out.append(f"{x['repository']}:{x['path']} {(x.get('sha') or '?')[:8]}")
+  elif x.get("kind")=="repo":
+   out.append(f"{x['repository']} stars={x.get('stars')} forks={x.get('forks')} lang={x.get('language') or '?'} {x.get('description') or ''}".rstrip())
+  else:
+   labels=f" [{','.join(x['labels'])}]" if x.get("labels") else ""
+   out.append(f"{x['repository']}#{x['number']} {x['state']}{labels} {x['title']}")
+ if o.get("truncated"):out.append(f"(truncated after {o['count']} of {o['total_count']})")
+ return "\n".join(out)
 
 
 def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=None,transport="auto",timeout=30,exclude_events=()):
@@ -1157,8 +1300,19 @@ def workflow_run_discovery(r, workflow_id, *, branch=None, head_sha=None, event=
 
 def runs(r,limit=20,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/runs?per_page={min(100,max(1,limit))}",transport=transport,timeout=timeout)
- ds=[{"run_id":x.get("id"),"attempt":x.get("run_attempt"),"status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"event":x.get("event"),"url":x.get("html_url")} for x in (d.get("workflow_runs")or[])[:limit]]
+ ds=[{"run_id":x.get("id"),"attempt":x.get("run_attempt"),"name":x.get("name"),"head_branch":x.get("head_branch"),"status":x.get("status"),"conclusion":x.get("conclusion"),"head_sha":x.get("head_sha"),"event":x.get("event"),"url":x.get("html_url")} for x in (d.get("workflow_runs")or[])[:limit]]
  return {"schema":"gh-identity-runs/1","repository":r,"runs":ds}
+
+def render_runs(o):
+ lines=[]
+ for x in o.get("runs") or []:
+  res=x.get("conclusion") or x.get("status") or "?"
+  sha=(x.get("head_sha") or "?")[:8]
+  branch=f" {x['head_branch']}" if x.get("head_branch") else ""
+  name=f" {x['name']}" if x.get("name") else ""
+  lines.append(f"{x['run_id']} #{x.get('attempt') or 1} {res} {x.get('event') or '?'} {sha}{branch}{name}")
+ if o.get("truncated"):lines.append(f"(truncated after {o.get('count',len(lines))})")
+ return "\n".join(lines)
 def variable(r,name,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/variables/{urllib.parse.quote(name,safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-variable/1","repository":r,"name":d.get("name"),"value":d.get("value"),"updated_at":d.get("updated_at")}
@@ -1656,14 +1810,43 @@ def workflow(r,w,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/workflows/{urllib.parse.quote(str(w),safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-workflow/1","repository":r,"id":d.get("id"),"name":d.get("name"),"path":d.get("path"),"state":d.get("state"),"url":d.get("html_url"),"observed_at":now()}
 
+def workflows(r,*,max_items=100,max_pages=10,transport="auto",timeout=30):
+ """List Actions workflows of one repository with bounded pagination."""
+ r=repo(r)
+ for v in (max_items,max_pages):
+  if type(v) is not int or v<1:raise ValueError("limits must be positive integers")
+ rows=[];seen=set();page=1;exhausted=False;fetched=0;total=None
+ while page<=max_pages and len(rows)<max_items:
+  data,_headers=_page(f"repos/{r}/actions/workflows?per_page=100&page={page}",transport=transport,timeout=timeout)
+  fetched+=1
+  if not isinstance(data,dict) or not isinstance(data.get("workflows"),list):raise Error("invalid_json")
+  if total is None:total=data.get("total_count")
+  batch=data["workflows"]
+  _BUDGET.get().charge("items",len(batch))
+  consumed=0
+  for w in batch:
+   if not isinstance(w,dict) or type(w.get("id")) is not int or w["id"]<1:raise Error("invalid_workflow_identity")
+   if w["id"] in seen:raise Error("pagination_incomplete")
+   seen.add(w["id"]);consumed+=1
+   rows.append({"id":w["id"],"name":w.get("name"),"path":w.get("path"),"state":w.get("state"),"url":w.get("html_url")})
+   if len(rows)>=max_items:break
+  if len(batch)<100:
+   exhausted=consumed==len(batch) and (type(total) is not int or len(rows)==total)
+   break
+  page+=1
+ return {"schema":"gh-identity-workflows/1","repository":r,"workflows":rows,"count":len(rows),
+         "pages_fetched":fetched,"complete":exhausted,"truncated":not exhausted,"observed_at":now()}
+
+def render_workflows(o):
+ lines=[f"{w['id']} {w.get('state') or '?'} {w.get('path') or '?'} {w.get('name') or ''}".rstrip() for w in o.get("workflows") or []]
+ if o.get("truncated"):lines.append(f"(truncated after {o['count']})")
+ return "\n".join(lines)
+
 def run(r, run_id, attempt=None, transport="auto", timeout=30):
  """Read an exact Actions run and optionally one exact rerun attempt."""
  r=repo(r)
- def positive(x, label):
-  if isinstance(x,bool) or not str(x).isdigit() or int(x)<1:raise ValueError("invalid " + label + " identifier")
-  return int(x)
- run_id=positive(run_id, "run")
- if attempt is not None:attempt=positive(attempt, "attempt")
+ run_id=_positive_identifier(run_id, "run")
+ if attempt is not None:attempt=_positive_identifier(attempt, "attempt")
  path=f"repos/{r}/actions/runs/{run_id}"
  if attempt is not None:path+=f"/attempts/{attempt}"
  d=request("GET",path,transport=transport,timeout=timeout)
@@ -1680,12 +1863,8 @@ def run(r, run_id, attempt=None, transport="auto", timeout=30):
 def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
  """Read all jobs and their steps for one Actions run or exact attempt."""
  r=repo(r)
- def ident(value):
-  if isinstance(value,bool) or not str(value).isdigit() or int(value)<1:
-   raise ValueError("invalid job lookup identifier")
-  return int(value)
- run_id=ident(run_id)
- if attempt is not None:attempt=ident(attempt)
+ run_id=_positive_identifier(run_id,"job lookup")
+ if attempt is not None:attempt=_positive_identifier(attempt,"job lookup")
  base=f"repos/{r}/actions/runs/{run_id}"
  if attempt is not None:base+=f"/attempts/{attempt}"
  rows=[];page=1;total=None
@@ -1718,10 +1897,16 @@ def jobs(r, run_id, attempt=None, transport="auto", timeout=30):
  return {"schema":"gh-identity-jobs/1","repository":r,"run_id":run_id,"attempt":attempt,
   "complete":True,"count":len(out),"jobs":out,"observed_at":now()}
 
-def _positive_identifier(value,label):
- if isinstance(value,bool) or not isinstance(value,(int,str)) or not re.fullmatch(r"[0-9]+",str(value)) or int(value)<1:
-  raise ValueError("invalid "+label+" identifier")
- return int(value)
+def render_jobs(o):
+ lines=[]
+ for j in o.get("jobs") or []:
+  res=j.get("conclusion") or j.get("status") or "?"
+  lines.append(f"{j['job_id']} {res} {j.get('name') or '?'}")
+  for s in j.get("steps") or []:
+   sres=s.get("conclusion") or s.get("status") or "?"
+   if sres not in ("success","skipped"):
+    lines.append(f"  step {s.get('number')}: {sres} {s.get('name') or '?'}")
+ return "\n".join(lines)
 
 def step_url(r,run_id,job_id,step_number,line=None):
  """Build a UI permalink from explicit identities; performs no observation."""
@@ -2120,6 +2305,93 @@ def job_log(r, run_id, job_id, *, attempt, max_bytes=1_000_000, redact=(), trans
     return {"schema": "gh-identity-job-log/1", "repository": r, "run_id": run_id,
             "job_id": job_id, "attempt": attempt, "head_sha": sha.lower(), "step_urls": step_urls,
             **result, "observed_at": now()}
+
+
+def failed_job_logs(r, run_id, *, attempt=None, max_jobs=5, max_bytes=200_000, tail_lines=200,
+                    redact=(), transport="auto", timeout=30):
+    """Read bounded, redacted log tails and failed steps for failed jobs in an Actions run."""
+    r = repo(r)
+    run_id = _positive_identifier(run_id, "run")
+    if attempt is not None:
+        attempt = _positive_identifier(attempt, "attempt")
+    if type(max_jobs) is not int or not 1 <= max_jobs <= 50:
+        raise ValueError("max_jobs must be 1..50")
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError("max_bytes must be a positive integer")
+    if type(tail_lines) is not int or tail_lines < 1:
+        raise ValueError("tail_lines must be a positive integer")
+    if transport not in ("auto", "gh", "urllib"):
+        raise ValueError("bad transport")
+    redact = _log_redactions(redact)
+    budget = _BUDGET.get()
+    deadline = min(budget.deadline, time.monotonic() + timeout)
+    def remaining():
+        left = min(budget.remaining(), deadline - time.monotonic())
+        if left <= 0:
+            budget.fail("operation_timeout")
+        return left
+    observed_run = run(r, run_id, attempt=attempt, transport=transport, timeout=remaining())
+    actual_attempt = observed_run.get("attempt")
+    sha = observed_run.get("head_sha")
+    if (type(observed_run.get("run_id")) is not int or observed_run["run_id"] != run_id
+            or type(actual_attempt) is not int or actual_attempt < 1
+            or (attempt is not None and actual_attempt != attempt)
+            or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha)):
+        raise Error("invalid_run_identity")
+    observation = jobs(r, run_id, attempt=actual_attempt, transport=transport, timeout=remaining())
+    bad = {"failure", "timed_out", "cancelled", "startup_failure", "action_required"}
+    failed = [j for j in observation["jobs"] if j.get("status") == "completed" and j.get("conclusion") in bad]
+    encoded = "/".join(urllib.parse.quote(part, safe="") for part in r.split("/"))
+    out_jobs = []
+    for job in failed[:max_jobs]:
+        jid = job["job_id"]
+        if not isinstance(job.get("head_sha"), str) or job["head_sha"].lower() != sha.lower():
+            raise Error("job_identity_mismatch")
+        failed_steps = []
+        for step in job.get("steps") or []:
+            if step.get("conclusion") in bad:
+                num = step.get("number")
+                if type(num) is not int or num < 1:
+                    raise Error("invalid_step_identity")
+                failed_steps.append({"number": num, "name": step.get("name"), "conclusion": step.get("conclusion"),
+                                     "url": step_url_from_jobs(observation, jid, num)})
+        entry = {"job_id": jid, "name": job.get("name"), "conclusion": job.get("conclusion"),
+                 "url": job.get("url"), "failed_steps": failed_steps}
+        try:
+            res = _download_job_log(f"repos/{encoded}/actions/jobs/{jid}/logs", max_bytes=max_bytes,
+                                    redact=redact, transport=transport, timeout=remaining())
+            text = res.get("text")
+            lines = text.splitlines() if isinstance(text, str) else []
+            tail = "\n".join(lines[-tail_lines:]) if isinstance(text, str) else None
+            entry.update(complete=res["complete"], truncated=res["truncated"], bytes_read=res["bytes_read"],
+                         text_sha256=res["text_sha256"], line_count=len(lines) if isinstance(text, str) else None,
+                         tail_lines=tail_lines, tail_truncated=len(lines) > tail_lines if isinstance(text, str) else False,
+                         tail=tail, redaction=res.get("redaction"))
+        except Error as exc:
+            if exc.code in ("pages_limit", "items_limit", "bytes_limit", "operation_timeout"):
+                raise
+            entry.update(complete=False, truncated=False, error=exc.code, tail=None)
+        out_jobs.append(entry)
+    complete = len(failed) <= max_jobs and all(x.get("complete") is True for x in out_jobs)
+    truncated = len(failed) > max_jobs or any(x.get("truncated") is True for x in out_jobs)
+    return {"schema": "gh-identity-failed-logs/1", "repository": r, "run_id": run_id, "attempt": actual_attempt,
+            "head_sha": sha.lower(), "run_status": observed_run.get("status"), "run_conclusion": observed_run.get("conclusion"),
+            "failed_job_count": len(failed), "count": len(out_jobs), "jobs": out_jobs,
+            "complete": complete, "truncated": truncated, "observed_at": now()}
+
+
+def render_failed_job_logs(o):
+    lines = [f"{o['repository']} run={o['run_id']} attempt={o['attempt']} head={(o.get('head_sha') or '?')[:8]} status={o.get('run_status')} conclusion={o.get('run_conclusion')} failed_jobs={o['failed_job_count']}"]
+    for j in o.get("jobs") or []:
+        steps = f" steps=[{', '.join(s.get('name') or str(s.get('number')) for s in j.get('failed_steps') or [])}]" if j.get("failed_steps") else ""
+        lines.append(f"=== job {j['job_id']} {j.get('name') or '?'} ({j.get('conclusion')}){steps} ===")
+        if j.get("error"):
+            lines.append(f"(error: {j['error']})")
+        elif j.get("truncated"):
+            lines.append(f"(log exceeded {j.get('bytes_read')} bytes)")
+        elif j.get("tail"):
+            lines.append(j["tail"])
+    return "\n".join(lines)
 
 
 def artifacts(r, run_id, *, max_items=100, max_pages=10, transport="auto", timeout=30):
@@ -4167,6 +4439,34 @@ def _remote_file(repository, path, commit, transport="auto", timeout=30, max_byt
     return data
 
 
+def remote_file(repository, path, ref="main", *, max_bytes=1_000_000, transport="auto", timeout=30):
+    """Read one regular file from repository@ref with blob SHA and SHA-256 verification (read-only)."""
+    r = repo(repository)
+    clean = _vendor_path(path)
+    if not isinstance(ref, str) or not ref.strip():
+        raise ValueError("ref is required")
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 10_000_000:
+        raise ValueError("max_bytes must be 1..10000000")
+    commit = ref.lower() if re.fullmatch(r"[0-9a-fA-F]{40}", ref) else resolve_ref(r, ref, transport=transport, timeout=timeout)["sha"]
+    data = _remote_file(r, clean, commit, transport=transport, timeout=timeout, max_bytes=max_bytes)
+    binary = b"\x00" in data
+    text = None
+    if not binary:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            binary = True
+    return {"schema": "gh-identity-file/1", "write": False, "repository": r, "ref": ref, "commit": commit,
+            "path": clean, "size": len(data), "blob_sha": git_blob_sha(data),
+            "sha256": hashlib.sha256(data).hexdigest(), "binary": binary, "text": text, "observed_at": now()}
+
+
+def render_remote_file(o):
+    if o.get("text") is not None:
+        return o["text"]
+    return f"{o['repository']}@{o['commit'][:12]}:{o['path']} binary size={o['size']} blob={o['blob_sha']}"
+
+
 def _license_spdx(repository, commit, transport="auto", timeout=30):
     """SPDX id GitHub detects for repository@commit (NOASSERTION = unrecognised); None when unreadable."""
     try:
@@ -4327,8 +4627,7 @@ def vendor_matrix(owner, repos=None, *, lock_paths=("vendor.lock.json", "tool/py
     pin_mismatch (one upstream source pinned at different commits) and the
     placement roots each consumer uses.
     """
-    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
-        raise ValueError("invalid owner")
+    _owner(owner)
     targets, redacted = _public_targets(owner, repos, include_forks=include_forks, transport=transport, timeout=timeout)
     names = [t["name"] for t in targets][:max_repos]
     edges, consumers, errors = [], {}, []
@@ -4380,8 +4679,7 @@ def owner_repositories(owner, *, include_forks=False, transport="auto", timeout=
     """Repositories listed by the API for user `owner` (type=owner, so org repos are not
     listed), filtered explicitly: visibility public, archived false, forks excluded
     unless include_forks. No repository names are hard-coded."""
-    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
-        raise ValueError("invalid owner")
+    _owner(owner)
     rows = pages(f"users/{owner}/repos?type=owner&sort=full_name", transport, timeout)
     out = []
     for x in rows:
@@ -5026,6 +5324,31 @@ def render_fleet_status(o):
     return "\n".join(out)
 
 
+def _enrich_failed_checks(full, items, transport, timeout):
+    for item in items:
+        try:
+            job = request("GET", f"repos/{full}/actions/jobs/{item['id']}", transport=transport, timeout=timeout)
+            item["failed_steps"] = [s.get("name") for s in job.get("steps") or [] if s.get("conclusion") == "failure"]
+        except Error:
+            item["failed_steps"] = None
+        notes = request("GET", f"repos/{full}/check-runs/{item['id']}/annotations", transport=transport,
+                        timeout=timeout) or []
+        item["annotations"] = [
+            {"level": n.get("annotation_level"), "path": n.get("path"), "line": n.get("start_line"),
+             "message": " ".join((n.get("message") or "").split())[:300]}
+            for n in notes if n.get("annotation_level") in ("failure", "warning")
+            and not _FLEET_NOISE.search(" ".join((n.get("message") or "").split()))]
+
+
+def _render_failed_check_details(item, indent="     "):
+    out = []
+    for name in item.get("failed_steps") or []:
+        out.append(f"{indent}step: {name}")
+    for n in item.get("annotations") or []:
+        out.append(f"{indent}{n['level']}: {n['path']}:{n['line']} {n['message'][:200]}")
+    return out
+
+
 def fleet_checks(roots, *, ignore=FLEET_IGNORE, steps=False, transport="auto", timeout=30):
     """Checks of each clone's checked-out HEAD; with steps, failed job steps and failure/warning annotations."""
     if isinstance(roots, (str, os.PathLike)):
@@ -5048,19 +5371,7 @@ def fleet_checks(roots, *, ignore=FLEET_IGNORE, steps=False, transport="auto", t
                        pending=sum(c["status"] != "completed" for c in kept),
                        failed=[{"id": c["id"], "name": c["name"], "conclusion": c["conclusion"]} for c in failed])
             if steps:
-                for item in row["failed"]:
-                    try:
-                        job = request("GET", f"repos/{full}/actions/jobs/{item['id']}", transport=transport, timeout=timeout)
-                        item["failed_steps"] = [s.get("name") for s in job.get("steps") or [] if s.get("conclusion") == "failure"]
-                    except Error:
-                        item["failed_steps"] = None
-                    notes = request("GET", f"repos/{full}/check-runs/{item['id']}/annotations", transport=transport,
-                                    timeout=timeout) or []
-                    item["annotations"] = [
-                        {"level": n.get("annotation_level"), "path": n.get("path"), "line": n.get("start_line"),
-                         "message": " ".join((n.get("message") or "").split())[:300]}
-                        for n in notes if n.get("annotation_level") in ("failure", "warning")
-                        and not _FLEET_NOISE.search(" ".join((n.get("message") or "").split()))]
+                _enrich_failed_checks(full, row["failed"], transport, timeout)
         except (GitInspectionError, ValueError, Error) as error:
             row.update(state="error", error=str(getattr(error, "code", "")) or str(error))
         rows.append(row)
@@ -5078,10 +5389,7 @@ def render_fleet_checks(o):
         out.append(f"{r['state']:7} {r['repository']}@{r['sha'][:7]} runs={r['count']} pending={r['pending']} failed={len(r['failed'])}")
         for item in r["failed"]:
             out.append(f"   x {item['name']} ({item['conclusion']})")
-            for name in item.get("failed_steps") or []:
-                out.append(f"     step: {name}")
-            for n in item.get("annotations") or []:
-                out.append(f"     {n['level']}: {n['path']}:{n['line']} {n['message'][:200]}")
+            out += _render_failed_check_details(item, "     ")
     return "\n".join(out)
 
 
@@ -5097,7 +5405,7 @@ def parse_pr_check_targets(tokens, owner=None):
     return parse_status_targets(tokens)
 
 
-def _pr_checks_row(r, n, sha, pattern, show, transport, timeout):
+def _pr_checks_row(r, n, sha, pattern, show, transport, timeout, steps=False):
     observed = checks_for_sha(r, sha, transport=transport, timeout=timeout)
     kept = [c for c in observed["checks"] if not pattern.search(c["name"] or "")]
     by = dict(sorted(Counter(c["conclusion"] or "-" for c in kept).items()))
@@ -5108,13 +5416,17 @@ def _pr_checks_row(r, n, sha, pattern, show, transport, timeout):
         state = "failed"
     else:
         state = "green"
+    shown = [{"status": c["status"], "conclusion": c["conclusion"], "name": c["name"],
+              **({"id": c.get("id")} if steps else {})} for c in attention[:show]]
+    if steps and state != "pending":
+        _enrich_failed_checks(r, [x for x in shown if x["status"] == "completed" and x["conclusion"] not in _PR_CHECKS_OK and x.get("id") is not None], transport, timeout)
     return {"repository": r, "number": n, "head_sha": sha, "state": state, "total": len(kept), "by_conclusion": by,
             "ignored": len(observed["checks"]) - len(kept),
-            "attention": [{"status": c["status"], "conclusion": c["conclusion"], "name": c["name"]} for c in attention[:show]]}
+            "attention": shown}
 
 
 def pr_checks(tokens, *, owner=None, ignore=PR_CHECKS_IGNORE, wait=0, interval=30, delay=0, show=5,
-              transport="auto", timeout=30, sleep=None, clock=None):
+              steps=False, transport="auto", timeout=30, sleep=None, clock=None):
     """Check-runs on each PR's head, polled together until every PR is settled or wait runs out.
 
     A PR is settled when it has at least one kept check and all kept checks are
@@ -5149,7 +5461,7 @@ def pr_checks(tokens, *, owner=None, ignore=PR_CHECKS_IGNORE, wait=0, interval=3
             if row["state"] != "pending":
                 continue
             try:
-                rows[i] = _pr_checks_row(row["repository"], row["number"], row["head_sha"], pattern, show, transport, timeout)
+                rows[i] = _pr_checks_row(row["repository"], row["number"], row["head_sha"], pattern, show, transport, timeout, steps=steps)
             except (ValueError, Error) as error:
                 rows[i] = {**row, "state": "error", "error": str(getattr(error, "code", "")) or str(error)}
         elapsed = clock() - start
@@ -5171,7 +5483,9 @@ def render_pr_checks(o):
             continue
         counts = " ".join(f"{v} {k}" for k, v in r["by_conclusion"].items())
         out.append(f"## {name} {r['state']} total={r['total']} {counts}".rstrip())
-        out += [f"{c['status']} {c['conclusion'] or '-'} {c['name']}" for c in r["attention"]]
+        for c in r["attention"]:
+            out.append(f"{c['status']} {c['conclusion'] or '-'} {c['name']}")
+            out += _render_failed_check_details(c, "  ")
     return "\n".join(out)
 
 
@@ -5645,8 +5959,7 @@ def list_owner_repositories(owner, *, kind="auto", include_forks=False, include_
     At most max_pages pages are fetched; `complete` is False (truncated_reason
     "max_pages") when more pages remained.
     """
-    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
-        raise ValueError("invalid owner")
+    _owner(owner)
     if kind not in ("auto", "user", "org"):
         raise ValueError("kind must be auto, user or org")
     bases = {"user": [f"users/{owner}/repos?type=owner&sort=full_name"],
@@ -6113,8 +6426,7 @@ def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", includ
     Python hits get a static import classification. Consumption comes from every
     vendor.lock.json in every scanned tree (nested ones included) plus the parent's
     vendor-consumers.json."""
-    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", owner):
-        raise ValueError("invalid owner")
+    _owner(owner)
     parent = repo(parent if parent is not None else owner + "/" + owner)
     if not isinstance(parent_ref, str) or not parent_ref:
         raise ValueError("parent_ref is required")
@@ -6254,7 +6566,7 @@ def _cli_parser():
  x=s.add_parser("git-switch");x.add_argument("--root",default=".");x.add_argument("branch",nargs="?",help='existing branch, or "-" for the previous branch');x.add_argument("-c","--create",metavar="NEW_BRANCH");x.add_argument("--write",action="store_true")
  x=s.add_parser("fleet-status",help="branch, upstream +ahead/-behind, changes of several clones (local; --fix-tracking plans upstream config, --write applies)");x.add_argument("roots",nargs="+");x.add_argument("--fix-tracking",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-checks",allow_abbrev=False,help="checks of each clone's HEAD; --steps adds failed steps and failure/warning annotations (read-only)");x.add_argument("roots",nargs="+");x.add_argument("--steps",action="store_true");x.add_argument("--ignore",action="append",metavar="CHECK_NAME");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
- x=s.add_parser("pr-checks",help="check-runs on each PR head (OWNER/REPO#N, or REPO#N with --owner); --wait polls all together until settled; exit 0 green, 1 failed/error, 3 pending (read-only)");x.add_argument("targets",nargs="+",metavar="OWNER/REPO#N|OWNER/REPO|N");x.add_argument("--owner");x.add_argument("--ignore",default=PR_CHECKS_IGNORE,metavar="REGEX",help="drop check names matching REGEX (default (?i)copilot; empty keeps all)");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--delay",type=float,default=0,help="sleep before the first poll (CI start-up)");x.add_argument("--show",type=int,default=5,help="attention lines per PR");x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
+ x=s.add_parser("pr-checks",help="check-runs on each PR head (OWNER/REPO#N, or REPO#N with --owner); --wait polls all together until settled; exit 0 green, 1 failed/error, 3 pending (read-only)");x.add_argument("targets",nargs="+",metavar="OWNER/REPO#N|OWNER/REPO|N");x.add_argument("--owner");x.add_argument("--ignore",default=PR_CHECKS_IGNORE,metavar="REGEX",help="drop check names matching REGEX (default (?i)copilot; empty keeps all)");x.add_argument("--wait",type=float,default=0);x.add_argument("--interval",type=float,default=30);x.add_argument("--delay",type=float,default=0,help="sleep before the first poll (CI start-up)");x.add_argument("--show",type=int,default=5,help="attention lines per PR");x.add_argument("--steps",action="store_true",help="add failed job steps and failure/warning annotations");x.add_argument("--text",action="store_true");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
  x=s.add_parser("merge-readiness",help="review findings (Must/Blocking/Should), changes requested, open threads and head moves to confirm before merging; exit 0 clear, 1 blocked, 3 attention");x.add_argument("repository");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("fleet-pr",help="open a PR for each clone's current branch, or report the open one (planned unless --write)");x.add_argument("roots",nargs="+");x.add_argument("--title",required=True);x.add_argument("--body-file",required=True);x.add_argument("--base",default="main");x.add_argument("--draft",action="store_true");x.add_argument("--write",action="store_true");x.add_argument("--text",action="store_true")
  x=s.add_parser("merge-trial",help="would REF merge into BASE in this clone? merge-tree only: no work-tree, index or ref change; exit 0 clean, 1 conflict, 3 object missing");x.add_argument("root");x.add_argument("ref");x.add_argument("--base",default="HEAD");x.add_argument("--git-timeout",type=float,default=120);x.add_argument("--text",action="store_true")
@@ -6282,6 +6594,8 @@ def _cli_parser():
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo",help="one repository: licence (SPDX), stars, forks, topics, language, dates; --include adds health, fork-diff, languages, contributors, community, releases");x.add_argument("repo");x.add_argument("--include",action="append",default=[],choices=("all",)+REPO_INCLUDES,metavar="SECTION",help="repeatable; extra sections (extra requests): all "+" ".join(REPO_INCLUDES));x.add_argument("--stale-days",type=int,default=365,help="health: days without a push before status is stale");x.add_argument("--text",action="store_true")
  x=s.add_parser("releases",help="newest releases (with assets) and tags of one repository (read-only)");x.add_argument("repo");x.add_argument("--limit",type=int,default=10);x.add_argument("--text",action="store_true")
+ x=s.add_parser("compare",help="compare two refs/SHAs (or cross-fork OWNER:BRANCH) via GitHub compare API (read-only)");x.add_argument("repo");x.add_argument("base");x.add_argument("head");x.add_argument("--limit",type=int,default=100);x.add_argument("--text",action="store_true")
+ x=s.add_parser("file",help="read one regular file from repository@ref with blob SHA and SHA-256 verification (read-only)");x.add_argument("repo");x.add_argument("path");x.add_argument("--ref",default="main");x.add_argument("--file-bytes",type=int,default=1_000_000);x.add_argument("--text",action="store_true",help="print decoded UTF-8 file text directly")
  x=s.add_parser("tree");x.add_argument("repo");x.add_argument("--ref",default="main")
  depth_args=x.add_mutually_exclusive_group();depth_args.add_argument("--depth",type=int,default=1);depth_args.add_argument("--recursive",action="store_true")
  x.add_argument("--exclude-dir",action="append",default=[]);x.add_argument("--exclude-file",action="append",default=[])
@@ -6290,8 +6604,9 @@ def _cli_parser():
  x=s.add_parser("issue");x.add_argument("repo");x.add_argument("number",type=int)
  x=s.add_parser("content");x.add_argument("repo");x.add_argument("kind",choices=("pr","issue","commit"));x.add_argument("identifier");x.add_argument("--field",action="append")
  x=s.add_parser("issues");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
- x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("search");x.add_argument("query");x.add_argument("--kind",choices=("pr","issue","code","repo"),default="pr");x.add_argument("--sort",choices=("updated","created","comments","stars","forks","best-match"),default="updated");x.add_argument("--order",choices=("asc","desc"),default="desc");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("prs");x.add_argument("repo");x.add_argument("--state",choices=("open","closed","all"),default="open");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
+ x=s.add_parser("pr-files",help="list changed files in a pull request with optional path glob and bounded patch (read-only)");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--path",help="fnmatch glob on path or basename");x.add_argument("--patch",action="store_true",help="include bounded unified diff patch per file");x.add_argument("--patch-bytes",type=int,default=4000);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("get",help="read-only GET of one REST path with query options; e.g. get repos/O/R/pulls -q state=open --pick number --pick head.ref --text");x.add_argument("path");x.add_argument("-q","--query",action="append",default=[],metavar="KEY=VALUE");x.add_argument("--pick",action="append",default=[],metavar="FIELD");x.add_argument("--text",action="store_true")
  for command in ("read-comment","review","inline-comment"):
   x=s.add_parser(command,help="one comment body: URL, review REPO PR ID, or inline-comment REPO ID; text by default");x.add_argument("targets",nargs="+");x.add_argument("--json",action="store_true")
@@ -6300,9 +6615,10 @@ def _cli_parser():
  x=s.add_parser("reviews");x.add_argument("repo");x.add_argument("number",type=int)
  for command in ("inline-comments","review-threads","review-observations"):
   x=s.add_parser(command);x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
- x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0)
- x=s.add_parser("runs");x.add_argument("repo")
- x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[],help="e.g. dynamic (Copilot code review runs)");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10)
+ x=s.add_parser("workflows",help="list Actions workflows of one repository (read-only)");x.add_argument("repo");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
+ x=s.add_parser("workflow-runs");x.add_argument("repo");x.add_argument("workflow_id");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--page-size",type=int,default=100);x.add_argument("--start-page",type=int,default=1);x.add_argument("--start-offset",type=int,default=0);x.add_argument("--text",action="store_true")
+ x=s.add_parser("runs",help="recent Actions workflow runs; supports --branch, --head-sha, --event, --exclude-event, --limit, --text");x.add_argument("repo");x.add_argument("--branch");x.add_argument("--head-sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[]);x.add_argument("--limit",type=int,default=20);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
+ x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[],help="e.g. dynamic (Copilot code review runs)");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("artifacts");x.add_argument("repo");x.add_argument("run_id",type=int)
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
  x=s.add_parser("checks",help="check-runs of one or more SHAs; --text prints only what needs attention");x.add_argument("repo");x.add_argument("sha",nargs="+");x.add_argument("--min-checks",type=int,default=1);x.add_argument("--text",action="store_true")
@@ -6311,8 +6627,9 @@ def _cli_parser():
  x=s.add_parser("pr-status",help="compact status of PRs/Issues: OWNER/REPO N [N...] or OWNER/REPO#N ...");x.add_argument("targets",nargs="+",metavar="OWNER/REPO|N|OWNER/REPO#N");x.add_argument("--last",type=int,default=3);x.add_argument("--exclude-event",action="append",default=None,metavar="EVENT");x.add_argument("--text",action="store_true",help="human-readable lines instead of JSON")
  x=s.add_parser("workflow");x.add_argument("repo");x.add_argument("workflow_id")
  x=s.add_parser("run");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
- x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int)
+ x=s.add_parser("jobs");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int);x.add_argument("--text",action="store_true")
  x=s.add_parser("job-log");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("--attempt",type=int,required=True);x.add_argument("--log-bytes",type=int,default=1_000_000);x.add_argument("--redact-env",action="append",default=[])
+ x=s.add_parser("failed-logs",help="redacted log tails and failed steps for failed jobs in an Actions run (read-only)");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("--attempt",type=int);x.add_argument("--max-jobs",type=int,default=5);x.add_argument("--log-bytes",type=int,default=200_000);x.add_argument("--tail",type=int,default=200);x.add_argument("--redact-env",action="append",default=[]);x.add_argument("--text",action="store_true")
  x=s.add_parser("step-url");x.add_argument("repo");x.add_argument("run_id",type=int);x.add_argument("job_id",type=int);x.add_argument("step_number",type=int);x.add_argument("--line",type=int)
  x=s.add_parser("variable-get");x.add_argument("repo");x.add_argument("name")
  x=s.add_parser("variable-set");x.add_argument("repo");x.add_argument("name");x.add_argument("value");x.add_argument("--write",action="store_true")
@@ -6357,7 +6674,7 @@ def _main(argv=None):
     o=fleet_checks(ns.roots,ignore=ignore,steps=ns.steps,transport=transport,timeout=ns.poll_timeout)
     if o["state"]!="pending" or time.monotonic()+ns.interval>deadline:break
     time.sleep(ns.interval)
-  elif ns.cmd=="pr-checks":o=pr_checks(ns.targets,owner=ns.owner,ignore=ns.ignore,wait=ns.wait,interval=ns.interval,delay=ns.delay,show=ns.show,transport=transport,timeout=ns.poll_timeout)
+  elif ns.cmd=="pr-checks":o=pr_checks(ns.targets,owner=ns.owner,ignore=ns.ignore,wait=ns.wait,interval=ns.interval,delay=ns.delay,show=ns.show,steps=ns.steps,transport=transport,timeout=ns.poll_timeout)
   elif ns.cmd=="merge-readiness":o=merge_readiness(ns.repository,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="fleet-pr":o=fleet_pr(ns.roots,ns.title,Path(ns.body_file).read_text(encoding="utf-8"),base=ns.base,draft=ns.draft,write=ns.write,transport=transport)
   elif ns.cmd=="subtree-sync-status":o=subtree_sync_status(ns.root,ns.prefix,ns.other_root,revision=ns.revision,other_ref=ns.other_ref,other_only_paths=ns.other_only_path,timeout=ns.timeout,mainline=ns.mainline)
@@ -6397,6 +6714,8 @@ def _main(argv=None):
   elif ns.cmd=="overview":o=overview()
   elif ns.cmd=="repo":o=repository(ns.repo,include=ns.include,stale_days=ns.stale_days,transport=transport)
   elif ns.cmd=="releases":o=releases(ns.repo,max_items=ns.limit,transport=transport)
+  elif ns.cmd=="compare":o=compare_refs(ns.repo,ns.base,ns.head,max_items=ns.limit,transport=transport)
+  elif ns.cmd=="file":o=remote_file(ns.repo,ns.path,ns.ref,max_bytes=ns.file_bytes,transport=transport)
   elif ns.cmd=="tree":o=tree(ns.repo,ns.ref,depth=None if ns.recursive else ns.depth,exclude_dirs=ns.exclude_dir,exclude_files=ns.exclude_file,transport=transport)
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport,kind=ns.kind)
   elif ns.cmd=="repo-inventory":o=repository_inventory(ns.owner,fields=ns.fields,sort=ns.sort,order=ns.order,max_repos=ns.max_repos,max_pages=ns.page_limit,transport=transport,kind=ns.kind,include_archived=ns.include_archived)
@@ -6408,14 +6727,20 @@ def _main(argv=None):
    if ns.field is not None:o=select_content(o,ns.field)
   elif ns.cmd=="issues":o=issues(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="prs":o=pull_requests(ns.repo,state=ns.state,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
+  elif ns.cmd=="pr-files":o=pr_files(ns.repo,ns.number,path=ns.path,include_patch=ns.patch,patch_bytes=ns.patch_bytes,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="search":o=search(ns.query,kind=ns.kind,sort=ns.sort,order=ns.order,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="pr":o=pr(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="comments":o=comments(ns.repo,ns.number,transport=transport)
   elif ns.cmd=="reviews":o=reviews(ns.repo,ns.number,transport=transport)
   elif ns.cmd in ("inline-comments","review-threads","review-observations"):
    o={"inline-comments":inline_comments,"review-threads":review_threads,"review-observations":review_observations}[ns.cmd](ns.repo,ns.number,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
+  elif ns.cmd=="workflows":o=workflows(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,transport=transport)
   elif ns.cmd=="workflow-runs":o=workflow_run_discovery(ns.repo,ns.workflow_id,branch=ns.branch,head_sha=ns.head_sha,event=ns.event,max_items=ns.limit,max_pages=ns.page_limit,page_size=ns.page_size,start_page=ns.start_page,start_offset=ns.start_offset,transport=transport)
-  elif ns.cmd=="runs":o=runs(ns.repo,transport=transport)
+  elif ns.cmd=="runs":
+   if ns.head_sha is not None and not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
+   if ns.branch or ns.head_sha or ns.event or ns.exclude_event or ns.limit>100:
+    o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,branch=ns.branch,event=ns.event,transport=transport,exclude_events=ns.exclude_event)
+   else:o=runs(ns.repo,limit=ns.limit,transport=transport)
   elif ns.cmd=="head-runs":
    if not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
    o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,event=ns.event,transport=transport,exclude_events=ns.exclude_event)
@@ -6431,6 +6756,7 @@ def _main(argv=None):
   elif ns.cmd=="run":o=run(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="jobs":o=jobs(ns.repo,ns.run_id,attempt=ns.attempt,transport=transport)
   elif ns.cmd=="job-log":o=job_log(ns.repo,ns.run_id,ns.job_id,attempt=ns.attempt,max_bytes=ns.log_bytes,redact=_log_redact_env(ns.redact_env),transport=transport,timeout=_BUDGET.get().remaining())
+  elif ns.cmd=="failed-logs":o=failed_job_logs(ns.repo,ns.run_id,attempt=ns.attempt,max_jobs=ns.max_jobs,max_bytes=ns.log_bytes,tail_lines=ns.tail,redact=_log_redact_env(ns.redact_env),transport=transport,timeout=_BUDGET.get().remaining())
   elif ns.cmd=="step-url":o={"schema":"gh-identity-step-url/1","url":step_url(ns.repo,ns.run_id,ns.job_id,ns.step_number,ns.line)}
   elif ns.cmd=="variable-get":o=variable(ns.repo,ns.name,transport=transport)
   elif ns.cmd=="variable-set":o=set_variable(ns.repo,ns.name,ns.value,ns.write,transport)
@@ -6451,6 +6777,14 @@ def _main(argv=None):
  elif ns.cmd=="pr-status" and ns.text:print(render_status(o))
  elif ns.cmd=="checks" and ns.text:print(render_checks(o))
  elif ns.cmd in ("prs","issues") and ns.text:print(render_list(o))
+ elif ns.cmd=="pr-files" and ns.text:print(render_pr_files(o))
+ elif ns.cmd=="search" and ns.text:print(render_search(o))
+ elif ns.cmd=="compare" and ns.text:print(render_compare(o))
+ elif ns.cmd=="file" and ns.text:print(render_remote_file(o),end="" if (o.get("text") or "").endswith("\n") else "\n")
+ elif ns.cmd=="workflows" and ns.text:print(render_workflows(o))
+ elif ns.cmd in ("runs","head-runs","workflow-runs") and ns.text:print(render_runs(o))
+ elif ns.cmd=="jobs" and ns.text:print(render_jobs(o))
+ elif ns.cmd=="failed-logs" and ns.text:print(render_failed_job_logs(o))
  elif ns.cmd=="get" and ns.text:print(render_get(o))
  elif ns.cmd=="repo" and ns.text:print(render_repository(o))
  elif ns.cmd=="releases" and ns.text:print(render_releases(o))
@@ -6480,7 +6814,7 @@ def _main(argv=None):
  if ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.ci_check:
   drift=any(r.get("upstream_changed") for r in o["files"])
   return 0 if o["ok"] and not drift else 1
- if ns.cmd in ("job-log","inline-comments","review-threads","review-observations"):return 0 if o["complete"] else 1
+ if ns.cmd in ("job-log","failed-logs","workflows","inline-comments","review-threads","review-observations","pr-files"):return 0 if o["complete"] else 1
  # Gate-style exit codes: 0 only when everything observed is complete and green.
  if ns.cmd in ("checks","head-runs","wait-checks"):return 0 if o["state"]=="green" else 1
  if ns.cmd in ("artifacts","artifact-file"):return 0 if o["complete"] else 1
@@ -6524,9 +6858,9 @@ def main(argv=None):
   return 2
 
 # One outer deadline/budget is shared across nested calls and gh fallback.
-for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","rate_limit","releases","pr","comments","reviews","inline_comments","review_threads","review_observations",
+for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","rate_limit","releases","compare_refs","pr","pr_files","comments","reviews","inline_comments","review_threads","review_observations",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
-              "resolve_ref","tree","source_identity","get","checks_for_sha","observe_pr","workflow","run","jobs","job_log","artifacts","artifact_file",
+              "resolve_ref","tree","source_identity","remote_file","get","checks_for_sha","observe_pr","workflow","workflows","run","jobs","job_log","failed_job_logs","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
                "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):
  globals()[_name]=_bounded(globals()[_name])
