@@ -6,16 +6,18 @@ or browser installation. `-S` disables automatic `site` initialization and its
 usual site-packages path additions; it is not a complete isolation boundary.
 
 ```sh
-python -S -m unittest discover -s tests -p test_gh_identity.py -v
+python -S -m unittest discover -s tests -p test_core.py -v
 ```
 
-Validated on Linux / CPython 3.12.14: **66 tests, exit 0** (2026-11-03).
+`tests/test_core.py` is the stdlib-only file (CI runs this exact command first in every
+Python lane). It holds pytest-style tests too; without pytest they are defined but
+not collected, so only the `unittest.TestCase` classes run (78 tests on 2026-11-15).
 
 To narrow the first command to a test name, use the built-in `-k` filter
 (available since Python 3.7, including all versions supported here):
 
 ```sh
-python -S -m unittest discover -s tests -p test_gh_identity.py -v -k test_repo_validation
+python -S -m unittest discover -s tests -p test_core.py -v -k test_repo_validation
 ```
 
 `-s` is the discovery start directory, `-p` matches test filenames, `-k`
@@ -29,5 +31,4 @@ pytest/CI command for full coverage and native JUnit or fixture support.
 Unittest does not collect module-level pytest functions or apply pytest
 fixtures, parametrization, markers, conftest hooks or configured pythonpath.
 A broad `test*.py` pattern can import pytest-only modules and fail under `-S`.
-Do not add an extra CI pass over tests already owned by pytest just to expose
-this local command. No custom discovery runner is required.
+No custom discovery runner is required.

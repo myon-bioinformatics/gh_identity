@@ -1,8 +1,34 @@
 #!/usr/bin/env python3
-"""gh_identity: stdlib-only GitHub operations with gh-first/urllib fallback."""
+"""gh_identity (ghi): stdlib-only, read-first observation of GitHub repositories, yours or anyone's.
+
+One file on purpose: other repositories vendor it and call its functions by name
+(from Node through vendor/py_launch.cjs). Sections, in file order (search "# <title>"):
+   1. Transport and budgets
+   2. 🌐 Repositories of any account
+   3. 🔀 Pull requests and reviews
+   4. 📄 Issues, content and search
+   5. ⚙️ Runs, variables and writes guarded by --write; refs and trees
+   6. ✅ Checks and status
+   7. ⚙️ Workflows, jobs, logs and artifacts
+   8. 🌿 Local Git
+   9. 🧾 Repository metadata primitives (checkout head, remote)
+  10. 🌲 Subtree sync between a monorepo and its split repositories
+  11. 📦 Vendored files across repositories
+  12. 🧭 Parent references, enrollment and action pins
+  13. 🪪 Identity API
+  14. 📍 Where am I
+  15. 📖 Orientation of any checkout (repo-overview), cross-project HTML round trip, workspace overview
+  16. 🔤 Files named after their repository, across the owner's repositories
+  17. ⌨️ CLI
+"""
 from __future__ import annotations
-import argparse, base64, contextlib, contextvars, fnmatch, functools, hashlib, http.client, inspect, io, json, math, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
+import argparse, base64, contextlib, contextvars, fnmatch, functools, hashlib, http.client, importlib.util, inspect, io, json, math, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
 from collections import Counter; from datetime import datetime, timezone; from html.parser import HTMLParser; from pathlib import Path, PurePosixPath
+
+
+# ---------------------------------------------------------------------------
+# Transport and budgets: request (gh first, urllib fallback), pagination, operation limits
+# ---------------------------------------------------------------------------
 API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
@@ -168,6 +194,14 @@ def _next_page(path,headers,count):
  return parsed.path+"?"+urllib.parse.urlencode(query,doseq=True)
 
 def now(): return datetime.now(timezone.utc).isoformat()
+def _is_sha(value,*,oid=False):
+ """A full lowercase commit id: 40 hex (SHA-1); with oid=True also 64 hex (SHA-256 repositories)."""
+ return isinstance(value,str) and re.fullmatch(r"[0-9a-f]{64}|[0-9a-f]{40}" if oid else r"[0-9a-f]{40}",value) is not None
+def _when(value):
+ """ISO-8601 text (a trailing Z allowed) as a datetime; None when missing or malformed. Naive values are kept."""
+ if not isinstance(value,str):return None
+ try:return datetime.fromisoformat(value.replace("Z","+00:00"))
+ except ValueError:return None
 def repo(x):
  if not isinstance(x,str) or not REPO.fullmatch(x): raise ValueError("repo must be OWNER/REPO")
  return x
@@ -243,6 +277,11 @@ def pages_bounded(path,transport="auto",timeout=30,*,max_pages=20,requester=None
   if b is not None:b.charge("items",len(data))
   out.extend(data);path=_next_page(path,headers,len(data))
  return out,True,n
+
+
+# ---------------------------------------------------------------------------
+# 🌐 Repositories of any account: capabilities and quota, facts (licence, stars, health), releases, compare, inventories
+# ---------------------------------------------------------------------------
 def capabilities(rate_limit=False,transport="auto",timeout=30):
  """Local tool facts; rate_limit=True adds one network read of the API quota (opt-in)."""
  versions=tool_versions(("git","gh"))
@@ -276,10 +315,8 @@ def rate_limit(transport="auto",timeout=30):
          "exhausted":sorted(k for k,v in out.items() if v["remaining"]==0),"resources":out,"observed_at":current.isoformat()}
 def _days_since(value,current=None):
  """Whole days from an ISO-8601 timestamp until now; None when missing or malformed."""
- if not isinstance(value,str):return None
- try:t=datetime.fromisoformat(value.replace("Z","+00:00"))
- except ValueError:return None
- if t.tzinfo is None:return None
+ t=_when(value)
+ if t is None or t.tzinfo is None:return None
  return max(0,((current or datetime.now(timezone.utc))-t).days)
 def _count(d,key):
  v=d.get(key);return v if type(v) is int and v>=0 else None
@@ -356,7 +393,7 @@ def _repo_health(r,o,stale_days,transport="auto",timeout=30):
   try:
    head=request("GET",f"repos/{r}/commits/{urllib.parse.quote(branch,safe='')}",transport=transport,timeout=timeout)
    sha=head.get("sha") if isinstance(head,dict) else None
-   if isinstance(sha,str) and re.fullmatch(r"[0-9a-f]{40}",sha):
+   if _is_sha(sha):
     commit=head.get("commit") if isinstance(head.get("commit"),dict) else {}
     out["head_sha"]=sha;out["head_date"]=(commit.get("committer") or {}).get("date") if isinstance(commit.get("committer"),dict) else None
     checks=checks_for_sha(r,sha,transport=transport,timeout=timeout)
@@ -542,11 +579,9 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
  def sort_value(row):
   value=row[key]
   if sort in ("updated-at","pushed-at"):
-   if not isinstance(value,str):return None
-   try:
-    parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
-    if parsed.tzinfo is None:return None
-    return parsed.astimezone(timezone.utc)
+   parsed=_when(value)
+   if parsed is None or parsed.tzinfo is None:return None
+   try:return parsed.astimezone(timezone.utc)
    except (ValueError,OverflowError):return None
   return value
  decorated=[(sort_value(row),row) for row in rows]
@@ -565,6 +600,11 @@ def repository_inventory(owner, *, fields=("name",), sort="name", order="asc",
          "sort_scope":"complete" if exhausted else "partial",
          "fields":list(fields),"measured_at":now()}
 
+
+
+# ---------------------------------------------------------------------------
+# 🔀 Pull requests and reviews: files, comments, review findings, threads, observations
+# ---------------------------------------------------------------------------
 def pr(r,n,**k):
  r=repo(r);d=request("GET",f"repos/{r}/pulls/{n}",**k)
  return {"schema":"gh-identity-pr/1","repository":r,"number":n,"state":d.get("state"),"draft":d.get("draft"),"merged":d.get("merged"),"mergeable":d.get("mergeable"),"mergeable_state":d.get("mergeable_state"),"head_sha":(d.get("head")or{}).get("sha"),"head_ref":(d.get("head")or{}).get("ref"),"base_sha":(d.get("base")or{}).get("sha"),"base_ref":(d.get("base")or{}).get("ref"),"url":d.get("html_url"),"observed_at":now()}
@@ -892,6 +932,11 @@ def pull_requests(r,state="open",max_items=100,max_pages=10,transport="auto",tim
   "count":len(rows),"pages_fetched":pages_fetched,"complete":exhausted,"truncated":not exhausted}
 
 
+
+
+# ---------------------------------------------------------------------------
+# 📄 Issues, content and search: bodies, HTML extraction, code/repository search
+# ---------------------------------------------------------------------------
 def _issue_row(d,expected_repo=None,expected_number=None,kind=None,body=False):
  if not isinstance(d,dict):raise Error("invalid_issue_identity")
  number=d.get("number");url=d.get("repository_url")
@@ -1189,6 +1234,11 @@ def render_search(o):
  return "\n".join(out)
 
 
+
+
+# ---------------------------------------------------------------------------
+# ⚙️ Runs, variables and writes guarded by --write; refs and trees
+# ---------------------------------------------------------------------------
 def run_history(r,max_items=100,max_pages=10,head_sha=None,branch=None,event=None,transport="auto",timeout=30,exclude_events=()):
  r=repo(r)
  if not isinstance(max_items,int) or max_items<1:raise ValueError("max_items must be positive")
@@ -1459,7 +1509,7 @@ def tree(r,ref="main",*,depth=1,exclude_dirs=(),exclude_files=(),transport="auto
   prefix,sha,level,ancestors=pending.pop()
   _BUDGET.get().charge("pages",1)
   d=request("GET",f"repos/{r}/git/trees/{sha}",transport=transport,timeout=timeout);requests+=1
-  if not isinstance(d,dict) or not isinstance(d.get("sha"),str) or re.fullmatch(r"[0-9a-f]{40}",d["sha"]) is None:
+  if not isinstance(d,dict) or not _is_sha(d.get("sha")):
    raise Error("invalid_tree_identity")
   if prefix and d["sha"]!=sha:raise Error("invalid_tree_identity")
   if d["sha"] in ancestors:raise Error("invalid_tree_cycle")
@@ -1474,7 +1524,7 @@ def tree(r,ref="main",*,depth=1,exclude_dirs=(),exclude_files=(),transport="auto
    if not isinstance(name,str) or not name or name in (".","..") or "/" in name or "\0" in name or name in seen:
     raise Error("invalid_tree_entry")
    seen.add(name)
-   if not isinstance(mode,str) or mode not in modes or entry.get("type")!=modes[mode][0] or not isinstance(ident,str) or re.fullmatch(r"[0-9a-f]{40}",ident) is None:
+   if not isinstance(mode,str) or mode not in modes or entry.get("type")!=modes[mode][0] or not _is_sha(ident):
     raise Error("invalid_tree_entry")
    path=prefix+name;kind=modes[mode][1]
    patterns=dirs if kind=="directory" else files
@@ -1513,6 +1563,11 @@ def source_identity(r,ref,path,transport="auto",timeout=30):
  if not isinstance(blob,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",blob):raise Error("invalid_blob")
  if not isinstance(size,int) or size<0:raise Error("invalid_source_size")
  return {"schema":"gh-identity-source/1","repository":r,"ref":ref,"commit_sha":resolved["sha"],"path":path,"blob_sha":blob.lower(),"size":size,"type":"file","observed_at":now()}
+
+
+# ---------------------------------------------------------------------------
+# ✅ Checks and status: per SHA, per PR, waiting
+# ---------------------------------------------------------------------------
 def _min_checks(value):
  if not isinstance(value,int) or isinstance(value,bool) or value<1:raise ValueError("min_checks must be at least 1")
  return value
@@ -1806,6 +1861,11 @@ def observe_pr(r,n,min_checks=1,transport="auto",timeout=30):
  return {"schema":"gh-identity-pr-observation/1","repository":repo(r),"number":n,"head_sha":before["head_sha"],"base_sha":before["base_sha"],
   "state":before["state"],"draft":before["draft"],"mergeable":before["mergeable"],"checks":ch,"conversation":cs,"reviews":rs,
   "stale":before["head_sha"]!=after["head_sha"],"head_sha_after":after["head_sha"],"observed_at":now()}
+
+
+# ---------------------------------------------------------------------------
+# ⚙️ Workflows, jobs, logs and artifacts
+# ---------------------------------------------------------------------------
 def workflow(r,w,transport="auto",timeout=30):
  r=repo(r);d=request("GET",f"repos/{r}/actions/workflows/{urllib.parse.quote(str(w),safe='')}",transport=transport,timeout=timeout)
  return {"schema":"gh-identity-workflow/1","repository":r,"id":d.get("id"),"name":d.get("name"),"path":d.get("path"),"state":d.get("state"),"url":d.get("html_url"),"observed_at":now()}
@@ -2491,6 +2551,11 @@ def gh_help(*parts,timeout=15):
  if p.returncode:raise Error("gh_failed")
  return p.stdout
 
+
+
+# ---------------------------------------------------------------------------
+# 🌿 Local Git: bounded inspection of a clone (status, files, diff, log, blame, grep)
+# ---------------------------------------------------------------------------
 def local_identity(*,cwd=None,identity=None,env=None):
  env=os.environ if env is None else env
  if identity is not None:
@@ -3215,13 +3280,17 @@ def git_check_ignore(root=".", paths=(), *, max_paths=1000, max_bytes=1_000_000)
         })
     return {"records": ordered, "truncated": truncated}
 
+
+
+# ---------------------------------------------------------------------------
+# 🧾 Repository metadata primitives (checkout head, remote)
+# ---------------------------------------------------------------------------
 # Repository metadata: one checkout identity shared by every repository.
 # Git identity lives here; app-specific build data (sizes, screens) does not.
 REPOSITORY_METADATA_SCHEMA = "2.0"
 REPOSITORY_METADATA_V1_SCHEMA = "1.0"
 _RM_OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 _RM_NAME = re.compile(r"[A-Za-z0-9_.-]+")
-_RM_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _RM_TOOL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
 _RM_TOOL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+ -]{0,31}")
 _RM_MEASUREMENTS = ("github_reported_size_bytes", "working_tree_bytes", "release_artifact_bytes")
@@ -3249,18 +3318,15 @@ def _rm_full_name(full_name):
 
 
 def _rm_sha(value, name="sha"):
-    if not isinstance(value, str) or not _RM_SHA.fullmatch(value.lower()):
+    if not _is_sha(value.lower() if isinstance(value, str) else value, oid=True):
         raise ValueError(name + " must be a full 40- or 64-hex commit SHA")
     return value.lower()
 
 
 def _rm_time(value, name):
-    if not isinstance(value, str):
+    parsed = _when(value)
+    if parsed is None:
         raise ValueError(name + " must be an ISO 8601 timestamp")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ValueError(name + " must be an ISO 8601 timestamp") from error
     if parsed.tzinfo is None:
         raise ValueError(name + " must include a timezone")
     return value
@@ -3310,6 +3376,11 @@ def remote_repository(root=".", remote="origin"):
     return {"remote": remote, "full_name": None, "reason": "not_github"}
 
 
+
+
+# ---------------------------------------------------------------------------
+# 🌲 Subtree sync between a monorepo and its split repositories
+# ---------------------------------------------------------------------------
 def _git_subtree_available(root):
     """True when the contrib `git subtree` command is installed (exec-path or PATH)."""
     raw, _, _ = _git_run(root, ["--exec-path"], max_bytes=64 * 1024)
@@ -3342,7 +3413,7 @@ def _git_object_oid(root, spec):
     if code != 0:
         return None
     oid = _git_decode(raw).strip()
-    return oid if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid) else None
+    return oid if _is_sha(oid, oid=True) else None
 
 
 def _prefix_tree_at(root, source, prefix):
@@ -3467,7 +3538,7 @@ def git_subtree_split(root=".", prefix=None, revision="HEAD", *, timeout=600):
         raw, _, _ = _git_run(root, ["subtree", "split", "-q", "--prefix=" + prefix, source],
                              max_bytes=64 * 1024, timeout=max(0.001, deadline - time.monotonic()))
     sha = _git_decode(raw).strip().splitlines()[-1:] or [""]
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha[0]):
+    if not _is_sha(sha[0], oid=True):
         raise GitInspectionError("unexpected git subtree output")
     subtree_sha = sha[0]
     check = _subtree_split_matches_prefix_tree(root, source, prefix, subtree_sha)
@@ -4120,6 +4191,11 @@ def split_preflight(root=".", prefix=None, revision="HEAD", *, timeout=600, max_
             "checks": checks, "ok": all(c["ok"] for c in checks), "reason": split["reason"]}
 
 
+
+
+# ---------------------------------------------------------------------------
+# 📦 Vendored files across repositories: locks, public GitHub reads, remote files, plans, duplicates
+# ---------------------------------------------------------------------------
 VENDOR_LOCK_SCHEMA = "vendor-lock/1"
 VENDOR_RULES_SCHEMA = "vendor-rules/1"
 _NOT_FOUND_CODES = ("not_found_or_inaccessible", "gh_not_found", "not_found", "http_404")
@@ -4361,7 +4437,7 @@ def public_github_branch_head(repository, branch="main", *, timeout=30, max_byte
 
 
 def _pinned_commit_ref(ref):
-    return isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref, re.I) and set(ref.lower()) != {"0"}
+    return isinstance(ref, str) and _is_sha(ref.lower()) and set(ref.lower()) != {"0"}
 
 
 _REMOTE_FILE_RAW_FALLBACK = frozenset({
@@ -4387,7 +4463,7 @@ def public_github_repository_check(repository, commit, *, branch="main", source=
     The commit must appear among recent commits on ``branch`` in the Atom feed.
     When ``source`` is set, the file at ``repository@commit:source`` must be readable from raw.githubusercontent.com.
     """
-    if not re.fullmatch(r"[0-9a-f]{40}", commit or "") or set(commit) == {"0"}:
+    if not _is_sha(commit) or set(commit) == {"0"}:
         raise ValueError("commit must be a 40-character lowercase hex SHA")
     recent = []
     atom = {"status": "unavailable", "recent_commits": recent, "in_recent": False}
@@ -4577,7 +4653,7 @@ def vendor_plan(root=".", candidates=(), rules=None, *, transport="auto", timeou
         reasons, d = [], {"candidate": text, "repository": repository, "source": source, "commit": ref}
         def skip(reason):
             reasons.append(reason)
-        if req["pinned_commit"] and not re.fullmatch(r"[0-9a-f]{40}", ref):
+        if req["pinned_commit"] and not _is_sha(ref):
             skip("not_pinned_to_commit")
         basename = source.rsplit("/", 1)[-1]
         if any(fnmatch.fnmatchcase(basename, p) or fnmatch.fnmatchcase(source, p) for p in parsed["deny_sources"]):
@@ -4697,7 +4773,7 @@ def owner_repositories(owner, *, include_forks=False, transport="auto", timeout=
 
 def _repo_tree(full, branch, transport, timeout):
     head = request("GET", f"repos/{full}/commits/{urllib.parse.quote(branch, safe='')}", transport=transport, timeout=timeout)
-    if not isinstance(head, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(head.get("sha"))):
+    if not isinstance(head, dict) or not _is_sha(head.get("sha")):
         raise Error("invalid_commit")
     d = request("GET", f"repos/{full}/git/trees/{head['sha']}?recursive=1", transport=transport, timeout=timeout)
     if not isinstance(d, dict) or not isinstance(d.get("tree"), list):
@@ -4869,6 +4945,11 @@ def render_vendor_markdown(o):
     return "\n".join(lines)
 
 
+
+
+# ---------------------------------------------------------------------------
+# 🧭 Parent references, enrollment and action pins
+# ---------------------------------------------------------------------------
 PARENT_REF_SCHEMA = "parent-pr-ref/1"
 PARENT_REF_PATHS = ("templates/parent-pr.ref.json", "parent-pr.ref.json")
 
@@ -4887,7 +4968,7 @@ def validate_parent_ref(ref):
         if type(ref.get(key)) is not int or ref[key] < 1:
             problems.append(key)
     c = ref.get("commit")
-    if not isinstance(c, str) or not re.fullmatch(r"[0-9a-f]{40}", c) or set(c) == {"0"}:
+    if not _is_sha(c) or set(c) == {"0"}:
         problems.append("commit")
     if "optional" in ref and not isinstance(ref["optional"], dict):
         problems.append("optional")
@@ -4985,7 +5066,7 @@ def load_child_heads(path):
         raise ValueError("expected child-heads/1")
     out = {}
     for name, row in data["heads"].items():
-        if not isinstance(row, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(row.get("sha"))):
+        if not isinstance(row, dict) or not _is_sha(row.get("sha")):
             raise ValueError("invalid head entry")
         out[repo(name)] = row["sha"]
     return out
@@ -5107,7 +5188,7 @@ def _json_pins(path, document):
         if isinstance(node, dict):
             commit = node.get("commit") or node.get("sha")
             repository = node.get("repository") or key
-            if isinstance(repository, str) and isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) \
+            if isinstance(repository, str) and _is_sha(commit) \
                     and set(commit) != {"0"}:
                 try:
                     name = _pin_repo(repository)
@@ -5565,7 +5646,7 @@ def merge_preview(repository, numbers=None, *, all_open=False, base=None, pairs=
     for number in numbers:
         pr = request("GET", f"repos/{r}/pulls/{number}", transport=transport, timeout=30)
         head_sha = (pr.get("head") or {}).get("sha")
-        if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        if not _is_sha(head_sha):
             raise Error("invalid_pr_head_sha")
         prs.append({"number": number, "title": pr.get("title"), "state": pr.get("state"),
                     "base": (pr.get("base") or {}).get("ref"), "head_sha": head_sha})
@@ -5642,13 +5723,6 @@ def render_merge_preview(o):
 # Merge readiness: review findings that are easy to miss before merging.
 # ---------------------------------------------------------------------------
 _FINDING_ORDER = ("Must", "Blocking", "Should")
-
-
-def _when(text):
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")) if isinstance(text, str) else None
-    except ValueError:
-        return None
 
 
 def _ccr_review_threads(r, n, obs, *, transport, timeout):
@@ -5918,9 +5992,37 @@ def render_git_activity(o):
     return "\n".join(rows)
 
 
+
+
+# ---------------------------------------------------------------------------
+# 🪪 Identity API: repository / owner / PR / commit identities, first-parent checks (and the request double)
+# ---------------------------------------------------------------------------
 @contextlib.contextmanager
-def request_stub(handler):
-    """Temporarily replace GitHub `request` for tests (stdlib ContextVar)."""
+def request_stub(handler, calls=None):
+    """Temporarily replace GitHub `request` for tests (stdlib ContextVar).
+
+    handler is a callable shaped like `request`, or a routes dict {path: value} for
+    GET reads: an Exception value is raised, a missing path is Error(not_found_or_inaccessible).
+    calls, when a list, receives every requested path in order.
+    """
+    if isinstance(handler, dict):
+        routes = handler
+
+        def handler(method, path, **kwargs):
+            if method != "GET":
+                raise AssertionError(f"routes stub is read-only: {method} {path}")
+            if path not in routes:
+                raise Error("not_found_or_inaccessible")
+            value = routes[path]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+    if calls is not None:
+        inner = handler
+
+        def handler(method, path, **kwargs):
+            calls.append(path)
+            return inner(method, path, **kwargs)
     token = _REQUEST.set(handler)
     try:
         yield
@@ -5944,7 +6046,7 @@ def repo_identity(repository, *, transport="auto", timeout=30):
     if not isinstance(branch, str) or not branch:
         raise Error("no_default_branch")
     head = request("GET", f"repos/{r}/commits/{urllib.parse.quote(branch, safe='')}", transport=transport, timeout=timeout)
-    if not isinstance(head, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(head.get("sha"))):
+    if not isinstance(head, dict) or not _is_sha(head.get("sha")):
         raise Error("invalid_commit")
     return {"schema": "gh-identity-repo-identity/1", "write": False, "repository": r, "repository_id": d.get("id"),
             "visibility": visibility, "archived": bool(d.get("archived")), "fork": bool(d.get("fork")),
@@ -6019,7 +6121,7 @@ def pr_identity(repository, number, *, transport="auto", timeout=30):
 
 def commit_pulls(repository, sha, *, transport="auto", timeout=30):
     """Pull requests associated with a commit (GitHub /commits/{sha}/pulls). Read-only."""
-    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+    if not _is_sha(sha):
         raise ValueError("sha must be 40 hex")
     r = repo(repository)
     rows = request("GET", f"repos/{r}/commits/{sha}/pulls?per_page=100", transport=transport, timeout=timeout)
@@ -6072,7 +6174,7 @@ def first_parent_check(repository, commit, *, branch=None, exact=False, transpor
     (e.g. a caller's own sanitized subprocess, or an offline test double).
     Raises Error("git_remote_unavailable") when the remote or branch cannot be fetched.
     """
-    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+    if not _is_sha(commit):
         raise ValueError("commit must be 40 hex")
     r = repo(repository)
     if not exact:
@@ -6115,6 +6217,11 @@ def first_parent_check(repository, commit, *, branch=None, exact=False, transpor
             raise Error("git_failed")
         return result(commit in set(listed.split()), None, branch)
 
+
+
+# ---------------------------------------------------------------------------
+# 📍 Where am I: local position, repository metadata v1, tool versions
+# ---------------------------------------------------------------------------
 def local_position(root="."):
     """Where am I: cwd, Git top level, checkout HEAD, change counts, GitHub remote.
 
@@ -6212,7 +6319,7 @@ def validate_repository_metadata_v1(record):
     head = record["head"]
     if not isinstance(head, dict) or set(head) != {"sha", "short_sha", "branch", "timestamp", "subject"}:
         raise ValueError("invalid head")
-    if not isinstance(head["sha"], str) or not _RM_SHA.fullmatch(head["sha"]):
+    if not _is_sha(head["sha"], oid=True):
         raise ValueError("sha must be lowercase full hex")
     if head["short_sha"] != head["sha"][:8]:
         raise ValueError("short_sha must be the first 8 characters of sha")
@@ -6274,6 +6381,340 @@ def write_repository_metadata(record, output_dir):
     return {"json": "repository-metadata.json", "jsonl": "repository-metadata.jsonl"}
 
 
+
+
+# ---------------------------------------------------------------------------
+# 📖 Orientation of any checkout (repo-overview), cross-project HTML round trip, workspace overview
+# ---------------------------------------------------------------------------
+# Repository orientation (was scripts/repo_overview.py, from browser-test-kit 61872b2d):
+# about, key files, then the file list, each bounded so the text fits a log or an agent context.
+OVERVIEW_KEY_FILES = (
+    "README*", "CLAUDE.md", "AGENTS.md", "CONTRIBUTING*",
+    "package.json", "pyproject.toml", "setup.cfg", "setup.py", "requirements*.txt", "Pipfile", "tox.ini",
+    "noxfile.py", "Makefile", "Dockerfile*", "docker-compose*.y*ml", "compose*.y*ml",
+    "playwright.config.*", "tsconfig.json", "vite.config.*", "go.mod", "Cargo.toml",
+    ".tool-versions", ".python-version", ".nvmrc", ".github/workflows/*.y*ml",
+)
+OVERVIEW_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache",
+                                ".pytest_cache", ".ruff_cache", "dist", "build", "test-results", "playwright-report"})
+_OV_BADGE = re.compile(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)")
+
+
+def _ov_skipped(relative):
+    return any(part in OVERVIEW_SKIP_DIRS for part in Path(relative).parts[:-1])
+
+
+def _ov_inside(root, path):
+    """True when ``path`` (symlinks resolved) stays under ``root``."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return True
+
+
+def _ov_package_description(root):
+    path = root / "package.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    description = data.get("description") if isinstance(data, dict) else None
+    return description.strip() if isinstance(description, str) and description.strip() else None
+
+
+def _ov_pyproject_description(root):
+    path = root / "pyproject.toml"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r'^\s*description\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    return match.group(1).strip() if match and match.group(1).strip() else None
+
+
+def _ov_readme_paragraphs(text):
+    """README lines grouped into paragraphs; blank and heading lines (ATX or setext) separate them."""
+    def heading(line):
+        stripped = line.lstrip()
+        return stripped.startswith("#") or (len(stripped) >= 3 and set(stripped) <= {"=", "-"})
+    paragraphs = [[]]
+    for line in text.splitlines():
+        if not line.strip() or heading(line):
+            if paragraphs[-1]:
+                paragraphs.append([])
+        else:
+            paragraphs[-1].append(line.strip())
+    return [paragraph for paragraph in paragraphs if paragraph]
+
+
+def _ov_readme_paragraph(root, max_chars=300):
+    text = None
+    for path in sorted(root.glob("README*")):
+        if not path.is_file() or not _ov_inside(root, path):
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in data[:4096]:
+            continue
+        text = data.decode("utf-8", "replace")
+        break
+    if text is None:
+        return None
+    for paragraph in _ov_readme_paragraphs(text):
+        if all(_OV_BADGE.sub("", line).strip() == "" for line in paragraph):
+            continue
+        return " ".join(paragraph)[:max_chars]
+    return None
+
+
+def repo_overview_about(root):
+    """The ``=== about ===`` section (package.json / pyproject.toml / README opening), or None."""
+    root = Path(root)
+    lines = [f"{label}: {text}" for label, text in (("package.json", _ov_package_description(root)),
+                                                     ("pyproject.toml", _ov_pyproject_description(root)),
+                                                     ("README", _ov_readme_paragraph(root))) if text]
+    return "\n".join(["=== about ===", *lines]) if lines else None
+
+
+def repo_overview_files(root):
+    """Repository files relative to ``root``, sorted, without dependency/cache/result directories."""
+    root = Path(root)
+    try:
+        inventory = git_ls_files(root, include_untracked=True)
+    except GitInspectionError:
+        files = set()
+        for directory, subdirs, names in os.walk(root):
+            subdirs[:] = [name for name in subdirs if name not in OVERVIEW_SKIP_DIRS]
+            files.update(Path(directory, name).relative_to(root).as_posix() for name in names)
+    else:
+        if inventory["truncated"]:
+            # A walk would include ignored files; never substitute it for a
+            # successful but incomplete Git observation or hide partial output.
+            raise RuntimeError("repository file inventory exceeds shared inspector limits")
+        files = set(inventory["paths"])
+    return sorted(path for path in files
+                  if not _ov_skipped(path) and (root / path).is_file() and _ov_inside(root, root / path))
+
+
+def _ov_glob_inside(pattern):
+    if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+        raise ValueError(f"key-file glob must stay inside ROOT: {pattern}")
+
+
+def _ov_key_files(root, patterns):
+    found = []
+    for pattern in patterns:
+        _ov_glob_inside(pattern)
+        for path in sorted(root.glob(pattern)):
+            relative = path.relative_to(root).as_posix()
+            if path.is_file() and _ov_inside(root, path) and relative not in found and not _ov_skipped(relative):
+                found.append(relative)
+    return found
+
+
+def _ov_render_file(root, relative, max_lines):
+    data = (root / relative).read_bytes()
+    if b"\0" in data[:4096]:
+        return f"=== {relative} (binary, {len(data)} bytes; not shown) ==="
+    lines = data.decode("utf-8", "replace").splitlines()
+    body = lines[:max_lines]
+    if len(lines) > max_lines:
+        body.append(f"[... truncated: showing {max_lines} of {len(lines)} lines (--max-lines)]")
+    return "\n".join([f"=== {relative} ({_ov_plural(len(lines), 'line')}) ===", *body])
+
+
+def _ov_plural(count, word):
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def _ov_human_bytes(size):
+    for unit, threshold in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if size >= threshold:
+            return f"{round(size / threshold)} {unit}"
+    return f"{size} B"
+
+
+def _ov_stats_row(label, files, lines, size):
+    return f"{label}  {_ov_plural(files, 'file')}  {_ov_plural(lines, 'line')}  {_ov_human_bytes(size)}"
+
+
+def repo_overview_stats(root, top=15):
+    """The ``=== stats ===`` section: totals, then the top extensions by lines."""
+    root = Path(root)
+    per_extension = {}
+    total_files = total_lines = total_bytes = 0
+    for relative in repo_overview_files(root):
+        try:
+            data = (root / relative).read_bytes()
+        except OSError:
+            continue
+        entry = per_extension.setdefault(Path(relative).suffix or "(none)", {"files": 0, "lines": 0, "bytes": 0})
+        entry["files"] += 1
+        entry["bytes"] += len(data)
+        total_files += 1
+        total_bytes += len(data)
+        if b"\0" not in data[:4096]:
+            line_count = len(data.decode("utf-8", "replace").splitlines())
+            entry["lines"] += line_count
+            total_lines += line_count
+    ranked = sorted(per_extension.items(), key=lambda kv: (-kv[1]["lines"], kv[0]))
+    rows = ["=== stats ===", _ov_stats_row("total", total_files, total_lines, total_bytes)]
+    rows += [_ov_stats_row(extension, c["files"], c["lines"], c["bytes"]) for extension, c in ranked[:top]]
+    if len(ranked) > top:
+        rows.append(f"[... {len(ranked) - top} more extensions (top {top} shown)]")
+    return "\n".join(rows)
+
+
+def _ov_churn_path(path):
+    """Keep one display row per path; ordinary/Unicode paths stay readable."""
+    if any(ord(char) < 32 or ord(char) == 127 for char in path):
+        return json.dumps(path, ensure_ascii=False)
+    return path
+
+
+def repo_overview_churn(root, top, *, since=None):
+    """The ``=== churn ===`` section (top files by commit count), or a one-line note outside a work tree.
+
+    Commit count only approximates "important, recently touched": a file edited in many
+    tiny commits ranks above one rewritten once.
+    """
+    try:
+        history = git_log_numstat(Path(root), since=since or None)
+    except GitInspectionError:
+        return "not a git work tree; skipping --churn"
+    per_file = {}
+    for commit in history["commits"]:
+        date = commit["date"]
+        for file in commit["files"]:
+            added, deleted, path = file["added"], file["deleted"], file["path"]
+            if added is None or deleted is None:
+                continue
+            # Attribute a rename to its destination, without merging old-path
+            # history: the shared API retains orig_path for other consumers.
+            entry = per_file.setdefault(path, {"commits": 0, "added": 0, "deleted": 0, "last": date})
+            entry["commits"] += 1
+            entry["added"] += added
+            entry["deleted"] += deleted
+            entry["last"] = max(entry["last"], date)
+    ranked = sorted(per_file.items(), key=lambda kv: (-kv[1]["commits"], kv[0]))
+    rows = [f"=== churn ({_ov_plural(len(history['commits']), 'commit')} scanned) ==="]
+    rows += [f"  {_ov_plural(e['commits'], 'commit')}  +{e['added']}/-{e['deleted']}  {e['last']}  {_ov_churn_path(path)}"
+             for path, e in ranked[:top]]
+    if len(ranked) > top:
+        rows.append(f"[... {len(ranked) - top} more files (--churn {top} shows the top {top})]")
+    if history["truncated"]:
+        rows.append("[... history truncated by shared inspector limits "
+                    "(10,000 commits / 1,000,000 bytes); ranking covers complete scanned commits only]")
+    return "\n".join(rows)
+
+
+def repo_overview(root=".", *, max_lines=120, max_files=400, files=True, include=(), show_stats=False,
+                  churn_top=0, since=None):
+    """Bounded text orientation of any local checkout (yours or another project's).
+
+    ``=== about ===``, then key files (README, agent notes, build/test configuration) each
+    capped at max_lines, then up to max_files paths; optional stats and churn sections.
+    Raises ValueError for a missing directory, ``since`` without ``churn_top`` or a glob leaving ROOT.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        raise ValueError(f"not a directory: {root}")
+    if type(max_lines) is not int or type(max_files) is not int or max_lines < 1 or max_files < 1 or churn_top < 0:
+        raise ValueError("max_lines and max_files must be at least 1")
+    if since is not None and not churn_top:
+        raise ValueError("--since needs --churn")
+    include = tuple(include)
+    for pattern in include:
+        _ov_glob_inside(pattern)
+    root = root.resolve()
+    sections = [x for x in (repo_overview_about(root),) if x]
+    sections += [_ov_render_file(root, relative, max_lines) for relative in _ov_key_files(root, OVERVIEW_KEY_FILES + include)]
+    if files:
+        paths = repo_overview_files(root)
+        shown = paths[:max_files]
+        if len(paths) > max_files:
+            shown.append(f"[... {len(paths) - max_files} more files (--max-files)]")
+        sections.append("\n".join([f"=== files ({len(paths)}) ===", *shown]))
+    if show_stats:
+        sections.append(repo_overview_stats(root))
+    if churn_top:
+        sections.append(repo_overview_churn(root, churn_top, since=since))
+    return "\n\n".join(sections)
+
+
+def _html_roundtrip_signature(node, pre=False):
+    # Formatting whitespace outside pre is not semantic; inline spacing is kept.
+    if node.kind == "text":
+        text = node.text if pre else re.sub(r"\s+", " ", node.text)
+        return ("text", text) if text.strip() or pre else None
+    pre = pre or node.tag == "pre"
+    children = [s for child in node.children or [] if (s := _html_roundtrip_signature(child, pre)) is not None]
+    # Table section wrappers are optional in HTML; compare cells and rows.
+    if node.tag in ("thead", "tbody", "tfoot"):
+        return ("group", children)
+    flat = []
+    for child in children:
+        flat.extend(child[1] if child[0] == "group" else [child])
+    attrs = {k: v for k, v in (node.attrs or {}).items() if k in ("href", "src", "alt", "start", "type", "checked")}
+    return (node.tag or "root", attrs, flat)
+
+
+HTML_ROUNDTRIP_CASES = {
+    "paragraph_link": '<p>日本語 &amp; <a href="https://github.com/example/repo">リンク</a></p>',
+    "heading_emphasis": "<h2>見出し</h2><p><strong>重要</strong>と<em>補足</em></p>",
+    "code": '<pre><code>def main():\n    return "#CSS &amp; HTML"\n</code></pre>',
+    "list": "<ul><li>一つ目</li><li>二つ目</li></ul>",
+    "quote": "<blockquote><p>引用です</p></blockquote>",
+    "table": "<table><thead><tr><th>名前</th><th>値</th></tr></thead><tbody><tr><td>A</td><td>10</td></tr></tbody></table>",
+}
+
+
+def html_roundtrip(markdown_module, web_ui_module=None):
+    """HTML → Markdown → HTML through another project's markdown.py (and optionally PySaiyanWeBoo).
+
+    Loads the explicitly supplied, trusted modules (no network). Per case: semantic_match
+    (structure, links, pre whitespace), markdown_stable (second conversion equal), and with
+    web_ui_module whether GHI extraction is unchanged after PySaiyanWeBoo wraps the fragment.
+    Not a byte-for-byte reversibility claim or a live GitHub layout test.
+    """
+    def load(name, file):
+        spec = importlib.util.spec_from_file_location(name, file)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"not a Python module: {file}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    markdown_module = Path(markdown_module)
+    md = load("roundtrip_markdown", markdown_module)
+    web = load("roundtrip_web_ui", Path(web_ui_module)) if web_ui_module else None
+    cases = []
+    for name, source in HTML_ROUNDTRIP_CASES.items():
+        markdown = md.html_to_markdown(source)
+        restored = md.markdown_to_html(markdown)
+        row = {"case": name,
+               "semantic_match": _html_roundtrip_signature(md.parse_html_dom(source)) == _html_roundtrip_signature(md.parse_html_dom(restored)),
+               "markdown_stable": markdown == md.html_to_markdown(restored), "web_ui_wrapper_match": None}
+        if web:
+            fragment = '<article id="probe-body">' + source + "</article>"
+            page = web.render_document(trusted_html=fragment, css="#probe-body { color: #abcdef; }",
+                                       stylesheets=web.shared_stylesheets("/assets"), scripts=web.shared_scripts("/assets"))
+            row["web_ui_wrapper_match"] = html_content(fragment, ["#probe-body"])["body"] == html_content(page, ["#probe-body"])["body"]
+        cases.append(row)
+    return {"schema": "gh-identity-html-roundtrip/1",
+            "markdown_sha256": hashlib.sha256(markdown_module.read_bytes()).hexdigest(),
+            "web_ui_sha256": hashlib.sha256(Path(web_ui_module).read_bytes()).hexdigest() if web_ui_module else None,
+            "ok": all(c["semantic_match"] and c["markdown_stable"] and c["web_ui_wrapper_match"] is not False for c in cases),
+            "cases": cases}
+
+
 def overview():
  """Best-effort read-only snapshot; unknown is never confused with zero."""
  out={"schema":"gh-identity-overview/1","environment":{"python":sys.version.split()[0],
@@ -6314,6 +6755,11 @@ def overview():
   except (OSError,ValueError,Error,GitInspectionError):pass
  return out
 
+
+
+# ---------------------------------------------------------------------------
+# 🔤 Files named after their repository, across the owner's repositories
+# ---------------------------------------------------------------------------
 REPO_NAME_EXTENSIONS = (".py", ".js", ".mjs", ".sh", ".dart")
 REPO_NAME_FLAGS = ("unregistered_source", "catalog_default_mismatch", "consumed_uncatalogued",
                    "fleet_missing", "needs_bundle")
@@ -6536,6 +6982,11 @@ def repo_name_files(owner, repos=None, *, parent=None, parent_ref="main", includ
             "observed_at": now()}
 
 
+
+
+# ---------------------------------------------------------------------------
+# ⌨️ CLI
+# ---------------------------------------------------------------------------
 _CLI_PARSER=None
 def _argv_transport(argv):
  transport="auto"
@@ -6550,6 +7001,12 @@ def _cli_parser():
  global _CLI_PARSER
  if _CLI_PARSER is not None:return _CLI_PARSER
  a=argparse.ArgumentParser(allow_abbrev=False,epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
+ def positive(value):
+  number=int(value)
+  if number<1:raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+  return number
+ x=s.add_parser("repo-overview",help="📖 bounded text orientation of any local checkout: about, key files, file list (--stats, --churn)");x.add_argument("root",nargs="?",default=".",help="repository directory (default: .)");x.add_argument("--max-lines",type=positive,default=120,help="lines shown per file");x.add_argument("--max-files",type=positive,default=400,help="paths listed");x.add_argument("--no-files",action="store_true",help="skip the file list");x.add_argument("--include",action="append",default=[],metavar="GLOB",help="extra key-file glob relative to ROOT (repeatable)");x.add_argument("--stats",action="store_true",help="per-extension file/line/byte stats");x.add_argument("--churn",type=positive,default=0,metavar="N",help="top N files by commit count (git work trees only)");x.add_argument("--since",metavar="WHEN",help="limit --churn to commits after WHEN, e.g. '3 months ago'")
+ x=s.add_parser("html-roundtrip",help="🔁 HTML→Markdown→HTML through a trusted markdown.py (optionally PySaiyanWeBoo wrapping); exit 1 on drift");x.add_argument("markdown_module");x.add_argument("--web-ui-module",help="trusted web_ui.py / pysaiyanweboo.py for the wrapper check")
  x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
  x=s.add_parser("capabilities",help="local tool facts; --rate-limit adds the API quota (remaining, reset)");x.add_argument("--rate-limit",action="store_true",help="one network read; shows whether a 403 is the quota or a permission")
  s.add_parser("overview",help="best-effort local and GitHub workspace summary (default)")
@@ -6720,6 +7177,8 @@ def _main(argv=None):
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport,kind=ns.kind)
   elif ns.cmd=="repo-inventory":o=repository_inventory(ns.owner,fields=ns.fields,sort=ns.sort,order=ns.order,max_repos=ns.max_repos,max_pages=ns.page_limit,transport=transport,kind=ns.kind,include_archived=ns.include_archived)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="repo-overview":o=repo_overview(ns.root,max_lines=ns.max_lines,max_files=ns.max_files,files=not ns.no_files,include=ns.include,show_stats=ns.stats,churn_top=ns.churn,since=ns.since)
+  elif ns.cmd=="html-roundtrip":o=html_roundtrip(ns.markdown_module,ns.web_ui_module)
   elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes,ns.include_controls)
   elif ns.cmd=="content":
    identifier=ns.identifier if ns.kind=="commit" else int(ns.identifier)
@@ -6768,9 +7227,10 @@ def _main(argv=None):
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error,OSError,GitInspectionError) as e:
-  detail={"detail":str(e)} if isinstance(e,PinInputError) else {}
+  detail={"detail":str(e)} if isinstance(e,PinInputError) or ns.cmd=="repo-overview" else {}
   print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument"),**detail}),file=sys.stderr);return 2
- if ns.cmd=="git-status" and not ns.json:
+ if ns.cmd=="repo-overview":print(o)
+ elif ns.cmd=="git-status" and not ns.json:
   text=render_git_status(o)
   if text:print(text)
  elif ns.cmd in ("read-comment","review","inline-comment") and not ns.json:print(o["body"])
@@ -6800,6 +7260,7 @@ def _main(argv=None):
  elif ns.cmd=="merge-readiness" and ns.text:print(render_merge_readiness(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd=="html-roundtrip":return 0 if o["ok"] else 1
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
  if ns.cmd=="repo-name-files":return 0 if o["complete"] else 1
  if ns.cmd=="pin-audit":return 0 if o["ok"] else 1
