@@ -7,8 +7,8 @@ check; callers should use a reusable collection for multiple repositories.
 No dependencies, schema changes or GitHub requests added.
 
 ```sh
-python -S -m unittest discover -s tests -p test_fleet_ignore_reuse.py
-python -S -m scripts.benchmark_ignore_filter
+python -m pytest -q tests/test_fleet.py -k IgnoreReuse
+python -S -c "import runpy; runpy.run_path('tests/test_core.py')['main']()"  # = ignore_filter_benchmark
 ```
 
 The regression checks two mocked repository responses, one ignore iteration per

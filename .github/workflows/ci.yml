@@ -211,6 +211,9 @@ jobs:
         run: python -c "import gh_identity"
       - name: CLI smoke
         run: python gh_identity.py --help
+      # The runtime stays stdlib-only: the core file must pass with no site-packages at all.
+      - name: Core without site-packages
+        run: python -S -m unittest discover -s tests -p test_core.py -v
       - name: Tests with JUnit
         run: python -m pytest -q tests --junitxml=reports/junit.xml
       - name: Preserve JUnit report

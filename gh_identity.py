@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gh_identity: stdlib-only GitHub operations with gh-first/urllib fallback."""
 from __future__ import annotations
-import argparse, base64, contextlib, contextvars, fnmatch, functools, hashlib, http.client, inspect, io, json, math, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
+import argparse, base64, contextlib, contextvars, fnmatch, functools, hashlib, http.client, importlib.util, inspect, io, json, math, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
 from collections import Counter; from datetime import datetime, timezone; from html.parser import HTMLParser; from pathlib import Path, PurePosixPath
 API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
 class Error(RuntimeError):
@@ -5919,8 +5919,31 @@ def render_git_activity(o):
 
 
 @contextlib.contextmanager
-def request_stub(handler):
-    """Temporarily replace GitHub `request` for tests (stdlib ContextVar)."""
+def request_stub(handler, calls=None):
+    """Temporarily replace GitHub `request` for tests (stdlib ContextVar).
+
+    handler is a callable shaped like `request`, or a routes dict {path: value} for
+    GET reads: an Exception value is raised, a missing path is Error(not_found_or_inaccessible).
+    calls, when a list, receives every requested path in order.
+    """
+    if isinstance(handler, dict):
+        routes = handler
+
+        def handler(method, path, **kwargs):
+            if method != "GET":
+                raise AssertionError(f"routes stub is read-only: {method} {path}")
+            if path not in routes:
+                raise Error("not_found_or_inaccessible")
+            value = routes[path]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+    if calls is not None:
+        inner = handler
+
+        def handler(method, path, **kwargs):
+            calls.append(path)
+            return inner(method, path, **kwargs)
     token = _REQUEST.set(handler)
     try:
         yield
@@ -6274,6 +6297,335 @@ def write_repository_metadata(record, output_dir):
     return {"json": "repository-metadata.json", "jsonl": "repository-metadata.jsonl"}
 
 
+# Repository orientation (was scripts/repo_overview.py, from browser-test-kit 61872b2d):
+# about, key files, then the file list, each bounded so the text fits a log or an agent context.
+OVERVIEW_KEY_FILES = (
+    "README*", "CLAUDE.md", "AGENTS.md", "CONTRIBUTING*",
+    "package.json", "pyproject.toml", "setup.cfg", "setup.py", "requirements*.txt", "Pipfile", "tox.ini",
+    "noxfile.py", "Makefile", "Dockerfile*", "docker-compose*.y*ml", "compose*.y*ml",
+    "playwright.config.*", "tsconfig.json", "vite.config.*", "go.mod", "Cargo.toml",
+    ".tool-versions", ".python-version", ".nvmrc", ".github/workflows/*.y*ml",
+)
+OVERVIEW_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache",
+                                ".pytest_cache", ".ruff_cache", "dist", "build", "test-results", "playwright-report"})
+_OV_BADGE = re.compile(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)")
+
+
+def _ov_skipped(relative):
+    return any(part in OVERVIEW_SKIP_DIRS for part in Path(relative).parts[:-1])
+
+
+def _ov_inside(root, path):
+    """True when ``path`` (symlinks resolved) stays under ``root``."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return True
+
+
+def _ov_package_description(root):
+    path = root / "package.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    description = data.get("description") if isinstance(data, dict) else None
+    return description.strip() if isinstance(description, str) and description.strip() else None
+
+
+def _ov_pyproject_description(root):
+    path = root / "pyproject.toml"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r'^\s*description\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    return match.group(1).strip() if match and match.group(1).strip() else None
+
+
+def _ov_readme_paragraphs(text):
+    """README lines grouped into paragraphs; blank and heading lines (ATX or setext) separate them."""
+    def heading(line):
+        stripped = line.lstrip()
+        return stripped.startswith("#") or (len(stripped) >= 3 and set(stripped) <= {"=", "-"})
+    paragraphs = [[]]
+    for line in text.splitlines():
+        if not line.strip() or heading(line):
+            if paragraphs[-1]:
+                paragraphs.append([])
+        else:
+            paragraphs[-1].append(line.strip())
+    return [paragraph for paragraph in paragraphs if paragraph]
+
+
+def _ov_readme_paragraph(root, max_chars=300):
+    text = None
+    for path in sorted(root.glob("README*")):
+        if not path.is_file() or not _ov_inside(root, path):
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in data[:4096]:
+            continue
+        text = data.decode("utf-8", "replace")
+        break
+    if text is None:
+        return None
+    for paragraph in _ov_readme_paragraphs(text):
+        if all(_OV_BADGE.sub("", line).strip() == "" for line in paragraph):
+            continue
+        return " ".join(paragraph)[:max_chars]
+    return None
+
+
+def repo_overview_about(root):
+    """The ``=== about ===`` section (package.json / pyproject.toml / README opening), or None."""
+    root = Path(root)
+    lines = [f"{label}: {text}" for label, text in (("package.json", _ov_package_description(root)),
+                                                     ("pyproject.toml", _ov_pyproject_description(root)),
+                                                     ("README", _ov_readme_paragraph(root))) if text]
+    return "\n".join(["=== about ===", *lines]) if lines else None
+
+
+def repo_overview_files(root):
+    """Repository files relative to ``root``, sorted, without dependency/cache/result directories."""
+    root = Path(root)
+    try:
+        inventory = git_ls_files(root, include_untracked=True)
+    except GitInspectionError:
+        files = set()
+        for directory, subdirs, names in os.walk(root):
+            subdirs[:] = [name for name in subdirs if name not in OVERVIEW_SKIP_DIRS]
+            files.update(Path(directory, name).relative_to(root).as_posix() for name in names)
+    else:
+        if inventory["truncated"]:
+            # A walk would include ignored files; never substitute it for a
+            # successful but incomplete Git observation or hide partial output.
+            raise RuntimeError("repository file inventory exceeds shared inspector limits")
+        files = set(inventory["paths"])
+    return sorted(path for path in files
+                  if not _ov_skipped(path) and (root / path).is_file() and _ov_inside(root, root / path))
+
+
+def _ov_glob_inside(pattern):
+    if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+        raise ValueError(f"key-file glob must stay inside ROOT: {pattern}")
+
+
+def _ov_key_files(root, patterns):
+    found = []
+    for pattern in patterns:
+        _ov_glob_inside(pattern)
+        for path in sorted(root.glob(pattern)):
+            relative = path.relative_to(root).as_posix()
+            if path.is_file() and _ov_inside(root, path) and relative not in found and not _ov_skipped(relative):
+                found.append(relative)
+    return found
+
+
+def _ov_render_file(root, relative, max_lines):
+    data = (root / relative).read_bytes()
+    if b"\0" in data[:4096]:
+        return f"=== {relative} (binary, {len(data)} bytes; not shown) ==="
+    lines = data.decode("utf-8", "replace").splitlines()
+    body = lines[:max_lines]
+    if len(lines) > max_lines:
+        body.append(f"[... truncated: showing {max_lines} of {len(lines)} lines (--max-lines)]")
+    return "\n".join([f"=== {relative} ({_ov_plural(len(lines), 'line')}) ===", *body])
+
+
+def _ov_plural(count, word):
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def _ov_human_bytes(size):
+    for unit, threshold in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if size >= threshold:
+            return f"{round(size / threshold)} {unit}"
+    return f"{size} B"
+
+
+def _ov_stats_row(label, files, lines, size):
+    return f"{label}  {_ov_plural(files, 'file')}  {_ov_plural(lines, 'line')}  {_ov_human_bytes(size)}"
+
+
+def repo_overview_stats(root, top=15):
+    """The ``=== stats ===`` section: totals, then the top extensions by lines."""
+    root = Path(root)
+    per_extension = {}
+    total_files = total_lines = total_bytes = 0
+    for relative in repo_overview_files(root):
+        try:
+            data = (root / relative).read_bytes()
+        except OSError:
+            continue
+        entry = per_extension.setdefault(Path(relative).suffix or "(none)", {"files": 0, "lines": 0, "bytes": 0})
+        entry["files"] += 1
+        entry["bytes"] += len(data)
+        total_files += 1
+        total_bytes += len(data)
+        if b"\0" not in data[:4096]:
+            line_count = len(data.decode("utf-8", "replace").splitlines())
+            entry["lines"] += line_count
+            total_lines += line_count
+    ranked = sorted(per_extension.items(), key=lambda kv: (-kv[1]["lines"], kv[0]))
+    rows = ["=== stats ===", _ov_stats_row("total", total_files, total_lines, total_bytes)]
+    rows += [_ov_stats_row(extension, c["files"], c["lines"], c["bytes"]) for extension, c in ranked[:top]]
+    if len(ranked) > top:
+        rows.append(f"[... {len(ranked) - top} more extensions (top {top} shown)]")
+    return "\n".join(rows)
+
+
+def _ov_churn_path(path):
+    """Keep one display row per path; ordinary/Unicode paths stay readable."""
+    if any(ord(char) < 32 or ord(char) == 127 for char in path):
+        return json.dumps(path, ensure_ascii=False)
+    return path
+
+
+def repo_overview_churn(root, top, *, since=None):
+    """The ``=== churn ===`` section (top files by commit count), or a one-line note outside a work tree.
+
+    Commit count only approximates "important, recently touched": a file edited in many
+    tiny commits ranks above one rewritten once.
+    """
+    try:
+        history = git_log_numstat(Path(root), since=since or None)
+    except GitInspectionError:
+        return "not a git work tree; skipping --churn"
+    per_file = {}
+    for commit in history["commits"]:
+        date = commit["date"]
+        for file in commit["files"]:
+            added, deleted, path = file["added"], file["deleted"], file["path"]
+            if added is None or deleted is None:
+                continue
+            # Attribute a rename to its destination, without merging old-path
+            # history: the shared API retains orig_path for other consumers.
+            entry = per_file.setdefault(path, {"commits": 0, "added": 0, "deleted": 0, "last": date})
+            entry["commits"] += 1
+            entry["added"] += added
+            entry["deleted"] += deleted
+            entry["last"] = max(entry["last"], date)
+    ranked = sorted(per_file.items(), key=lambda kv: (-kv[1]["commits"], kv[0]))
+    rows = [f"=== churn ({_ov_plural(len(history['commits']), 'commit')} scanned) ==="]
+    rows += [f"  {_ov_plural(e['commits'], 'commit')}  +{e['added']}/-{e['deleted']}  {e['last']}  {_ov_churn_path(path)}"
+             for path, e in ranked[:top]]
+    if len(ranked) > top:
+        rows.append(f"[... {len(ranked) - top} more files (--churn {top} shows the top {top})]")
+    if history["truncated"]:
+        rows.append("[... history truncated by shared inspector limits "
+                    "(10,000 commits / 1,000,000 bytes); ranking covers complete scanned commits only]")
+    return "\n".join(rows)
+
+
+def repo_overview(root=".", *, max_lines=120, max_files=400, files=True, include=(), show_stats=False,
+                  churn_top=0, since=None):
+    """Bounded text orientation of any local checkout (yours or another project's).
+
+    ``=== about ===``, then key files (README, agent notes, build/test configuration) each
+    capped at max_lines, then up to max_files paths; optional stats and churn sections.
+    Raises ValueError for a missing directory, ``since`` without ``churn_top`` or a glob leaving ROOT.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        raise ValueError(f"not a directory: {root}")
+    if type(max_lines) is not int or type(max_files) is not int or max_lines < 1 or max_files < 1 or churn_top < 0:
+        raise ValueError("max_lines and max_files must be at least 1")
+    if since is not None and not churn_top:
+        raise ValueError("--since needs --churn")
+    include = tuple(include)
+    for pattern in include:
+        _ov_glob_inside(pattern)
+    root = root.resolve()
+    sections = [x for x in (repo_overview_about(root),) if x]
+    sections += [_ov_render_file(root, relative, max_lines) for relative in _ov_key_files(root, OVERVIEW_KEY_FILES + include)]
+    if files:
+        paths = repo_overview_files(root)
+        shown = paths[:max_files]
+        if len(paths) > max_files:
+            shown.append(f"[... {len(paths) - max_files} more files (--max-files)]")
+        sections.append("\n".join([f"=== files ({len(paths)}) ===", *shown]))
+    if show_stats:
+        sections.append(repo_overview_stats(root))
+    if churn_top:
+        sections.append(repo_overview_churn(root, churn_top, since=since))
+    return "\n\n".join(sections)
+
+
+def _html_roundtrip_signature(node, pre=False):
+    # Formatting whitespace outside pre is not semantic; inline spacing is kept.
+    if node.kind == "text":
+        text = node.text if pre else re.sub(r"\s+", " ", node.text)
+        return ("text", text) if text.strip() or pre else None
+    pre = pre or node.tag == "pre"
+    children = [s for child in node.children or [] if (s := _html_roundtrip_signature(child, pre)) is not None]
+    # Table section wrappers are optional in HTML; compare cells and rows.
+    if node.tag in ("thead", "tbody", "tfoot"):
+        return ("group", children)
+    flat = []
+    for child in children:
+        flat.extend(child[1] if child[0] == "group" else [child])
+    attrs = {k: v for k, v in (node.attrs or {}).items() if k in ("href", "src", "alt", "start", "type", "checked")}
+    return (node.tag or "root", attrs, flat)
+
+
+HTML_ROUNDTRIP_CASES = {
+    "paragraph_link": '<p>日本語 &amp; <a href="https://github.com/example/repo">リンク</a></p>',
+    "heading_emphasis": "<h2>見出し</h2><p><strong>重要</strong>と<em>補足</em></p>",
+    "code": '<pre><code>def main():\n    return "#CSS &amp; HTML"\n</code></pre>',
+    "list": "<ul><li>一つ目</li><li>二つ目</li></ul>",
+    "quote": "<blockquote><p>引用です</p></blockquote>",
+    "table": "<table><thead><tr><th>名前</th><th>値</th></tr></thead><tbody><tr><td>A</td><td>10</td></tr></tbody></table>",
+}
+
+
+def html_roundtrip(markdown_module, web_ui_module=None):
+    """HTML → Markdown → HTML through another project's markdown.py (and optionally PySaiyanWeBoo).
+
+    Loads the explicitly supplied, trusted modules (no network). Per case: semantic_match
+    (structure, links, pre whitespace), markdown_stable (second conversion equal), and with
+    web_ui_module whether GHI extraction is unchanged after PySaiyanWeBoo wraps the fragment.
+    Not a byte-for-byte reversibility claim or a live GitHub layout test.
+    """
+    def load(name, file):
+        spec = importlib.util.spec_from_file_location(name, file)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"not a Python module: {file}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    markdown_module = Path(markdown_module)
+    md = load("roundtrip_markdown", markdown_module)
+    web = load("roundtrip_web_ui", Path(web_ui_module)) if web_ui_module else None
+    cases = []
+    for name, source in HTML_ROUNDTRIP_CASES.items():
+        markdown = md.html_to_markdown(source)
+        restored = md.markdown_to_html(markdown)
+        row = {"case": name,
+               "semantic_match": _html_roundtrip_signature(md.parse_html_dom(source)) == _html_roundtrip_signature(md.parse_html_dom(restored)),
+               "markdown_stable": markdown == md.html_to_markdown(restored), "web_ui_wrapper_match": None}
+        if web:
+            fragment = '<article id="probe-body">' + source + "</article>"
+            page = web.render_document(trusted_html=fragment, css="#probe-body { color: #abcdef; }",
+                                       stylesheets=web.shared_stylesheets("/assets"), scripts=web.shared_scripts("/assets"))
+            row["web_ui_wrapper_match"] = html_content(fragment, ["#probe-body"])["body"] == html_content(page, ["#probe-body"])["body"]
+        cases.append(row)
+    return {"schema": "gh-identity-html-roundtrip/1",
+            "markdown_sha256": hashlib.sha256(markdown_module.read_bytes()).hexdigest(),
+            "web_ui_sha256": hashlib.sha256(Path(web_ui_module).read_bytes()).hexdigest() if web_ui_module else None,
+            "ok": all(c["semantic_match"] and c["markdown_stable"] and c["web_ui_wrapper_match"] is not False for c in cases),
+            "cases": cases}
+
+
 def overview():
  """Best-effort read-only snapshot; unknown is never confused with zero."""
  out={"schema":"gh-identity-overview/1","environment":{"python":sys.version.split()[0],
@@ -6550,6 +6902,12 @@ def _cli_parser():
  global _CLI_PARSER
  if _CLI_PARSER is not None:return _CLI_PARSER
  a=argparse.ArgumentParser(allow_abbrev=False,epilog="Global options: --transport auto|gh|urllib, --max-pages N (100), --max-items N (10000), --max-bytes N (10000000), --timeout SECONDS (30). Limits are cumulative per operation.");s=a.add_subparsers(dest="cmd",required=True)
+ def positive(value):
+  number=int(value)
+  if number<1:raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+  return number
+ x=s.add_parser("repo-overview",help="📖 bounded text orientation of any local checkout: about, key files, file list (--stats, --churn)");x.add_argument("root",nargs="?",default=".",help="repository directory (default: .)");x.add_argument("--max-lines",type=positive,default=120,help="lines shown per file");x.add_argument("--max-files",type=positive,default=400,help="paths listed");x.add_argument("--no-files",action="store_true",help="skip the file list");x.add_argument("--include",action="append",default=[],metavar="GLOB",help="extra key-file glob relative to ROOT (repeatable)");x.add_argument("--stats",action="store_true",help="per-extension file/line/byte stats");x.add_argument("--churn",type=positive,default=0,metavar="N",help="top N files by commit count (git work trees only)");x.add_argument("--since",metavar="WHEN",help="limit --churn to commits after WHEN, e.g. '3 months ago'")
+ x=s.add_parser("html-roundtrip",help="🔁 HTML→Markdown→HTML through a trusted markdown.py (optionally PySaiyanWeBoo wrapping); exit 1 on drift");x.add_argument("markdown_module");x.add_argument("--web-ui-module",help="trusted web_ui.py / pysaiyanweboo.py for the wrapper check")
  x=s.add_parser("html-content");x.add_argument("file");x.add_argument("--selector",action="append",required=True);x.add_argument("--source-kind",choices=("html","dom"),default="html");x.add_argument("--input-bytes",type=int,default=10_000_000);x.add_argument("--include-controls",action="store_true")
  x=s.add_parser("capabilities",help="local tool facts; --rate-limit adds the API quota (remaining, reset)");x.add_argument("--rate-limit",action="store_true",help="one network read; shows whether a 403 is the quota or a permission")
  s.add_parser("overview",help="best-effort local and GitHub workspace summary (default)")
@@ -6720,6 +7078,8 @@ def _main(argv=None):
   elif ns.cmd=="repos":o=repositories(ns.owner,transport=transport,kind=ns.kind)
   elif ns.cmd=="repo-inventory":o=repository_inventory(ns.owner,fields=ns.fields,sort=ns.sort,order=ns.order,max_repos=ns.max_repos,max_pages=ns.page_limit,transport=transport,kind=ns.kind,include_archived=ns.include_archived)
   elif ns.cmd=="issue":o=issue(ns.repo,ns.number,transport=transport)
+  elif ns.cmd=="repo-overview":o=repo_overview(ns.root,max_lines=ns.max_lines,max_files=ns.max_files,files=not ns.no_files,include=ns.include,show_stats=ns.stats,churn_top=ns.churn,since=ns.since)
+  elif ns.cmd=="html-roundtrip":o=html_roundtrip(ns.markdown_module,ns.web_ui_module)
   elif ns.cmd=="html-content":o=_html_content_file(ns.file,ns.selector,ns.source_kind,ns.input_bytes,ns.include_controls)
   elif ns.cmd=="content":
    identifier=ns.identifier if ns.kind=="commit" else int(ns.identifier)
@@ -6768,9 +7128,10 @@ def _main(argv=None):
    marker=f"<!-- gh-identity:{ns.operation_key} -->" if ns.operation_key else None
    o=post_comment(ns.repo,ns.number,ns.body,ns.write,marker,transport,sanitize_mentions=ns.sanitize_mentions)
  except (ValueError,Error,OSError,GitInspectionError) as e:
-  detail={"detail":str(e)} if isinstance(e,PinInputError) else {}
+  detail={"detail":str(e)} if isinstance(e,PinInputError) or ns.cmd=="repo-overview" else {}
   print(json.dumps({"status":"error","error":getattr(e,"code","git_inspection_failed" if isinstance(e,GitInspectionError) else "invalid_argument"),**detail}),file=sys.stderr);return 2
- if ns.cmd=="git-status" and not ns.json:
+ if ns.cmd=="repo-overview":print(o)
+ elif ns.cmd=="git-status" and not ns.json:
   text=render_git_status(o)
   if text:print(text)
  elif ns.cmd in ("read-comment","review","inline-comment") and not ns.json:print(o["body"])
@@ -6800,6 +7161,7 @@ def _main(argv=None):
  elif ns.cmd=="merge-readiness" and ns.text:print(render_merge_readiness(o))
  elif ns.cmd=="duplicate-files" and ns.markdown:print(render_duplicates_markdown(o,top=ns.top))
  else:print(json.dumps(o,ensure_ascii=False))
+ if ns.cmd=="html-roundtrip":return 0 if o["ok"] else 1
  if ns.cmd=="duplicate-files":return 0 if o["complete"] else 1
  if ns.cmd=="repo-name-files":return 0 if o["complete"] else 1
  if ns.cmd=="pin-audit":return 0 if o["ok"] else 1

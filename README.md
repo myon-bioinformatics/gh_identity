@@ -466,13 +466,12 @@ See the [GitHub search contract](https://docs.github.com/en/rest/search/search#s
 
 ### Full-response CLI replay
 
-Six recorded public PR/Issue/commit REST responses are retained in
-`tests/fixtures/content_snapshots`. Run
-`python scripts/check_content_snapshots.py tests/fixtures/content_snapshots`
-to compare full and body-selected CLI output against their exact body strings.
-The stdlib POSIX runner reports hashes and exits 0 on agreement, 1 on CLI/output
-mismatch, or 2 on invalid evidence/runner failure. A temporary recorded `gh`
-process supplies the saved responses; this does not certify live connectivity.
+Six recorded public PR/Issue/commit REST responses are retained under
+`content_snapshots` in `tests/fixtures.json` (full returned JSON text, with provenance
+under `_about`). `python -m pytest tests/test_content.py -k recorded_public_content`
+compares full and body-selected CLI output against their exact body strings, one
+case per response (POSIX). A temporary recorded `gh` executable supplies the saved
+responses; this does not certify live connectivity.
 See the fixture README for capture endpoints and fresh-capture instructions.
 
 ### Saved HTML / serialized DOM body text
@@ -514,47 +513,29 @@ still outstanding: the capture connector converts GitHub page URLs to REST JSON.
 Saving HTML once allows repeated extraction without repeat requests; fetching an
 HTML page is not necessarily smaller than fetching its API representation.
 
-### HTML / Markdown round-trip probe
+### HTML / Markdown round-trip probe (`html-roundtrip`)
 
 ```sh
-python scripts/check_html_roundtrip.py /path/to/vendor/markdown.py
+python gh_identity.py html-roundtrip /path/to/vendor/markdown.py
+python gh_identity.py html-roundtrip /path/to/vendor/markdown.py --web-ui-module /path/to/web_ui.py
 ```
 
-This optional stdlib probe loads the explicitly supplied, trusted markdown module;
-it adds no runtime vendor dependency. Six CSS-free HTML examples are converted to
-Markdown, back to HTML, then Markdown again. It checks both normalized structural
-content (including links and preformatted whitespace) and Markdown stability.
-It is not a byte-for-byte HTML reversibility claim or a live GitHub layout test.
-The plain-text `html-content` output is not the round-trip input: text extraction
-already discards links/formatting. Retain the original HTML for this purpose.
+Looks across projects without adding a dependency: it loads the explicitly supplied,
+trusted markdown module (and optionally PySaiyanWeBoo), no network. Six CSS-free HTML
+examples go HTML → Markdown → HTML → Markdown. Per case: `semantic_match` (normalized
+structure, links, preformatted whitespace), `markdown_stable`, and with
+`--web-ui-module` `web_ui_wrapper_match`: GHI extraction is unchanged after
+PySaiyanWeBoo's `render_document` wraps the fragment with inline CSS and shared
+CSS/script references. One JSON object with module SHA-256 identities; exit 0 all
+matched, 1 drift, 2 runner error. Python: `html_roundtrip(markdown_module, web_ui_module=None)`.
+Not a byte-for-byte reversibility claim, a live GitHub layout test, or a CSS/JS check.
+The plain-text `html-content` output is not the round-trip input; keep the original HTML.
 
-Observed with mcp-toolcall-lab's locked markdown.py from
-`c3063e0887c6eb6a531ee774793682ceff8a164d` on 2026-10-09:
-paragraph/link, heading/emphasis, list, quote and table matched; code failed.
-`<pre><code>x\n</code></pre>` gains a trailing newline in the conversion path.
-All six Markdown representations stabilized, demonstrating why stability alone
-is insufficient. The probe intentionally exits 1 for that source-preservation
-failure; it is not included as a green CI gate. Exit 2 indicates runner failure.
-That result applies to the recorded converter pin; it is not a claim about every
-newer markdown revision. A canonical converter fix is being validated separately;
-rerun the same probe with the exact adopted file before changing this baseline.
-
-For optional cross-project wrapper checks, supply an existing trusted PySaiyanWeBoo module:
-
-```sh
-python scripts/check_html_roundtrip.py /path/to/vendor/markdown.py \
-  --web-ui-module /path/to/web_ui.py
-```
-
-This reuses PySaiyanWeBoo's `render_document`, `shared_stylesheets`, and `shared_scripts`
-to wrap each fragment with inline CSS, shared CSS references and opt-in module
-script references. GHI extraction before/after wrapping must match exactly.
-It prints module SHA-256 identities, requires no vendor changes, and performs no
-network requests. CSS rendering and JS execution are not tested. With PySaiyanWeBoo PR
-#43 at `9ee0232494cb124ed24b79ef87980630bc550e31`, all six wrapper cases matched;
-the independent Markdown code-newline failure still correctly yields exit 1.
-This optional composition keeps rendering in PySaiyanWeBoo, conversion in markdown,
-and extraction in GHI; consumers can use the same runner with their adopted files.
+Observed with mcp-toolcall-lab's locked markdown.py `c3063e0887c6eb6a531ee774793682ceff8a164d`
+(2026-10-09): all cases matched except code (`<pre><code>x\n</code></pre>` gains a trailing
+newline), while all six Markdown forms stabilized, which is why stability alone is
+insufficient. With PySaiyanWeBoo PR #43 (`9ee0232494cb124ed24b79ef87980630bc550e31`) all six
+wrapper cases matched. Both results apply to those pins; rerun with the adopted files.
 
 Page-family regressions now model Wiki plus sidebar, file code plus controls,
 PR/Issue description plus replies, commit message plus diff statistics, release
@@ -568,7 +549,7 @@ leading/trailing newlines instead of trimming them as block boundaries.
 
 Live-browser DOM evidence now exists for two code blocks in the public GHI
 README file preview, captured once on 2026-10-09. See
-`tests/fixtures/browser_dom/file-code.json` and `tests/test_browser_dom.py`.
+`browser_dom/file-code` in `tests/fixtures.json` and `tests/test_content.py`.
 The saved `outerHTML` includes actual nested GitHub syntax-highlight spans;
 CLI extraction is compared exactly with the browser's recorded `innerText`.
 No repeated network access is needed for replay. Scope is these two observed
@@ -576,51 +557,28 @@ file-preview fragments, not the whole page, file Code tab, or all GitHub layouts
 No login interaction was performed. This does not resolve the separate Markdown
 round-trip newline drift or establish CSS/JS equivalence for arbitrary pages.
 
-### Optional internal reproduction when a site cannot be inspected
+### Reproducing a page that cannot be inspected
 
-`scripts/gh_identity_serve_dom_lab.py` provides an optional local Gradio fixture renderer.
-Use it to separate local rendering/extraction behavior from an inaccessible site's
-network or access failure; it is not a replacement for live-site evidence or a
-CORS bypass. It does not fetch remote pages and binds only to 127.0.0.1, with public
-sharing disabled. Supply an existing trusted markdown.py:
-
-```sh
-python scripts/gh_identity_serve_dom_lab.py /path/to/vendor/markdown.py
-```
-
-Install Gradio separately in a disposable test environment if needed; it is not
-a GHI runtime dependency. Inspect `#dom-lab-body` in the rendered page and save
-its DOM for offline comparison. For fixture-only generation without Gradio:
-
-```sh
-python scripts/gh_identity_serve_dom_lab.py /path/to/vendor/markdown.py --export-html fixture.html
-python gh_identity.py html-content fixture.html --selector '#dom-lab-body'
-```
-
-At the initial capture, only the export/extraction path was exercised because
-Gradio was unavailable. Later, PySaiyanWeBoo PR #43 at `8ff5bfb` added and passed a
-local Gradio + Chromium DOM integration test
-([CI evidence](https://github.com/myon-bioinformatics/PySaiyanWeBoo/actions/runs/37887560280)).
-That validates PySaiyanWeBoo's shared reproduction path, not this GHI-specific
-`gh_identity_serve_dom_lab.py` server path, which remains unverified.
-The built-in representative fixture does not reproduce an arbitrary site's DOM,
-computed CSS, JavaScript state, authentication, or network restrictions.
+Local rendering lives in PySaiyanWeBoo, whose Gradio + Chromium DOM integration test passed
+in PR #43 at `8ff5bfb` ([CI evidence](https://github.com/myon-bioinformatics/PySaiyanWeBoo/actions/runs/37887560280)).
+Save the rendered DOM there and extract it here with `html-content FILE --selector ...`.
+That reproduces local rendering only, not a site's computed CSS, JavaScript state,
+authentication or network restrictions, and it is no CORS workaround.
 
 A live OBS Studio Wiki inspection on 2026-10-09 also exposed an important scope
 boundary: `#wiki-body` contains the "Add a custom footer" edit affordance, while
 its `.markdown-body` child contains the article. Do not infer that a body-named
-ID excludes all UI. The first article paragraph DOM is retained in
-`tests/fixtures/browser_dom/wiki-paragraph.html` and matched to observed browser
-text. Source: https://github.com/obsproject/obs-studio/wiki (public, no login).
+ID excludes all UI. The first article paragraph DOM is rebuilt in memory by `tests/test_content.py`
+(no .html file) and matched to observed browser text. Source: https://github.com/obsproject/obs-studio/wiki (public, no login).
 This is a paragraph-level capture, not whole-Wiki certification. Selected `pre`
 regressions cover zero, one and two trailing newlines, leading newlines, tabs,
 indentation and Japanese text, independently of the Markdown converter.
-The same capture also retains the four-link help sublist (`wiki-links.html`).
+The same capture also yields the four-link help sublist (`WIKI_LINKS`, rendered by `wiki_links_html()`).
 Its text/order is compared after whitespace normalization, explicitly excluding
 browser-generated list markers and layout spacing from that claim.
 
 Additional live DOM probes outside GitHub (2026-10-09) are in
-`tests/fixtures/browser_dom/simple-sites.json`. Abe Hiroshi's official top page
+`browser_dom/simple-sites` in `tests/fixtures.json`. Abe Hiroshi's official top page
 uses Shift_JIS (observed `document.characterSet`), legacy font/table layout and
 an entry frameset referring to `menu.htm` and `top.htm`. The child heading was
 captured from the observed `top.htm` reference. Browser-serialized DOM is already
@@ -638,7 +596,7 @@ specific tag patterns, not complete extraction or CSS fidelity for either site.
 Global-site variation: small live Google company-info and Apple accessibility DOM
 captures (2026-10-09) now cover colored inline spans with U+200B zero-width spaces,
 a nested card with decorative SVG, and a paragraph with NBSP and JSON-valued data
-attributes. See `global-sites.json` and `test_global_site_dom.py`. The CLI is
+attributes. See `browser_dom/global-sites` in `tests/fixtures.json` and `tests/test_content.py`. The CLI is
 exercised against saved fragments without repeat HTTP access. Google inline text
 matches exactly and retains U+200B. Card/Apple comparisons explicitly normalize
 whitespace: GHI collapses NBSP outside pre, so these are not byte-exact browser
@@ -725,20 +683,28 @@ Parent execution location does not imply parent ownership of this implementation
 A parent compatibility adapter can expose the old function names over these APIs
 once its consumer lock explicitly selects this revision.
 
-### Repository orientation (`scripts/repo_overview.py`)
+### Repository orientation (`repo-overview`)
 
-Bounded, human-oriented repository summary (stdlib-only, `python -S`), migrated
-from BrowserTestKit (provenance in the file header). It prints about/README
-excerpt, key config files, a file list via `git_ls_files` from this repo's
-`gh_identity.py`, and optional `--stats` / `--churn`. It is not merged into
-`gh_identity.py`.
+Bounded, human-oriented summary of any local checkout, yours or another project's
+(stdlib-only, `python -S`; from BrowserTestKit 61872b2d). `=== about ===`
+(package.json / pyproject.toml description, README opening), key files (README, agent
+notes, build/test configuration) capped at `--max-lines`, then up to `--max-files`
+paths from `git_ls_files` (directory walk outside Git; dependency/cache/result
+directories skipped). `--stats` adds per-extension totals; `--churn N` the top N files
+by commit count (an approximation: many tiny commits outrank one rewrite). Symlinks
+resolving outside ROOT are neither shown nor counted. Exit 2: ROOT is not a directory,
+`--since` without `--churn`, or an `--include` glob leaving ROOT.
+Python: `repo_overview(root, ...)`, `repo_overview_about`, `repo_overview_files`,
+`repo_overview_stats`, `repo_overview_churn`.
 
 ```bash
-python -S scripts/repo_overview.py --stats --churn 10
+python -S gh_identity.py repo-overview --stats --churn 10
+python -S gh_identity.py repo-overview ../other-repo --max-lines 40 --no-files --include 'docs/*.md'
+python -S gh_identity.py repo-overview --churn 10 --since '3 months ago'
 ```
 
-The built-in `overview` command remains the JSON workspace summary; `repo_overview.py`
-is the log-friendly orientation format previously shipped from BrowserTestKit.
+The built-in `overview` command remains the JSON workspace summary; `repo-overview`
+is the log-friendly text orientation.
 
 ## Local branch switching (`git-switch`)
 
@@ -1458,7 +1424,7 @@ remain separate from thread node IDs. None of the other Issue #20 checkboxes is
 completed by this feature. Guarded workflow dispatch/other writes remain outside
 this read-only slice (those writes were tracked in Issue #2, which is now closed).
 
-Fixtures in `tests/fixtures/review_observations` are synthetic offline contracts,
+Fixtures under `review_observations/responses` in `tests/fixtures.json` are synthetic offline contracts,
 not live captures or validation of particular gh versions. The existing CI tests
 these cases with pytest/JUnit on Python 3.11–3.14 and latest stable (`3.x`).
 
@@ -1616,25 +1582,43 @@ Exit 0 idle, 3 busy.
 Multi-file commits through the Git Data API are a write, so they live in the parent
 `gh_ops.py` (`commit-files`), not here.
 
+## Tests
+
+One file per purpose; cross-repository observation is the largest.
+
+| File | Covers |
+| --- | --- |
+| 🌐 `tests/test_fleet.py` | across repositories and accounts: the parent's shared checks (`vendor/fleet_check.py`: locks, pins, CI setup, benchmark, Node entry), fleet status, inventories, repository facts, vendor / pin / parent, subtree sync, trees, `repo-overview` |
+| 🔀 `tests/test_pr.py` | pull requests: status, checks, reviews and comments, merge preview / readiness, labels, write receipts |
+| ⚙️ `tests/test_actions.py` | Actions: runs, head gates, job logs, artifacts |
+| 🌿 `tests/test_git.py` | local Git: inspection, position, switch, work, merge trials, transports |
+| 📄 `tests/test_content.py` | REST bodies, recorded responses, search, HTML/DOM extraction, `html-roundtrip` |
+| 🧱 `tests/test_core.py` | CLI, transports, limits, identity API, the ignore-filter benchmark; stdlib only (also run under `python -S`) |
+
+`tests/conftest.py` holds the shared helpers (`ROOT`, `SHA`, `FIXTURES`, `_git`,
+`_git_tester`); request doubles come from `gh_identity.request_stub({path: value}, calls)`.
+`tests/fixtures.json` is the single data file (recorded and synthetic observations,
+provenance under `_about`); HTML fixtures are built in Python. Select an area with
+`-k`, e.g. `python -m pytest tests/test_fleet.py -k subtree`.
+
 ## Runtime and development Python policy
 
 The standard-library runtime, including standalone and vendored copies, supports
 Python 3.11+. This is the supported/tested floor, not a claim that older
-interpreters cannot execute any part of the module. The separate
-`runtime-compatibility` CI lane executes
-behavior tests with `python -S`, without installing pytest or any third-party
-package. Development/test environments use Python 3.11+ and a committed uv lock:
+interpreters cannot execute any part of the module. Each CI `test` matrix lane first runs
+the core tests with `python -S` (no site-packages, so no pytest or any third-party
+package), then the full pytest suite. Development/test environments use Python 3.11+ and a committed uv lock:
 
 ```sh
 uv sync --locked --python 3.11
 uv run --locked python -m pytest
-python -S -m unittest discover -s tests -p test_gh_identity.py -v
+python -S -m unittest discover -s tests -p test_core.py -v
 ```
 
 `pyproject.toml` is the canonical Python requirement and development dependency
 definition: `project.requires-python = ">=3.11"` applies to source runtime support
 as well as development. The runtime has no third-party dependencies, and
-`tests/requirements.txt` lists only the test-only tools. A copied `.py` file does
+the `dev` dependency group lists the only test tool (pytest). A copied `.py` file does
 not read this project metadata; consumers must select Python 3.11+ themselves.
 This policy does not update consumers' vendored files or interpreter settings.
 CI gets Python from setup-uv
