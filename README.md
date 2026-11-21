@@ -1092,36 +1092,45 @@ States:
 * `ok`        on the default-branch first-parent line (`+N` since the pin);
 * `not_final` merged, but a PR head was pinned — `final` is the merge commit to pin;
 * `drift`     pinned source files differ between the pin and the default-branch tip;
-* `not_merge` with `--require-merge-commit` when a first-parent pin has fewer than two parents (a squash or other single-parent commit, or the root);
-* `unknown_parents` with `--require-merge-commit` when the parent count of a first-parent pin cannot be determined;
+* `not_merge` only with `--require-merge-commit`: the pin is on the first-parent line but `parent_count < 2` (a squash or other single-parent commit, or the root);
+* `unknown_parents` only with `--require-merge-commit`: the pin is on the first-parent line but the parent count could not be read (for example `git cat-file -p` failed). This is not ok. Without the flag, an unknown parent count stays `ok` or `drift`;
 * `unmerged`  not reachable from the default branch;
 * `unavailable` the remote could not be read without credentials (name redacted).
 
 `--require-merge-commit` does not change the default. Without it, a squash-style
-single-parent commit or a commit with an unknown parent count on the
-first-parent line is still `ok` or `drift`.
+single-parent commit on the first-parent line is still `ok` or `drift`.
 `--repo OWNER/REPO` (repeatable) limits the audit to those repositories. Values
 are stripped; a blank value is unset and ignored. `--only OWNER` still filters
 by owner and combines with `--repo`.
 
 `--include-markdown` also reads `README.md` (checkout root only) and
-`docs/**/*.md`. Use 40 lowercase hex digits in one of these forms:
+`docs/**/*.md`. Nothing else is markdown, and `.github/workflows` is never read
+by this rule, so action `uses:` SHAs stay on the workflow scanner only. Hex is
+lowercase, 40 digits, the same as every other pin. The exact match is:
 
-1. A standalone `OWNER/REPO@SHA` or a GitHub commit URL such as
-   `https://github.com/OWNER/REPO/commit/SHA`.
-2. A standalone SHA on the same or immediately adjacent line as
-   `Repo: OWNER/REPO`, `Repository: OWNER/REPO`, or a GitHub repository root
-   URL. The closest qualifier on the same line wins, followed by a qualifier
-   on an adjacent line. Equal distances prefer the earlier line, then the
-   earlier column. A blank line breaks adjacency.
+1. Explicit pin: a standalone plausible `OWNER/REPO@` plus 40 hex digits,
+   including inside a fenced block or inline code. The token must not continue
+   a longer path (`prefix/OWNER/REPO@…` does not match). A trailing `.git` on
+   the repo name is stripped.
+2. Qualified SHA: any other standalone 40-hex token **outside** a fence or
+   inline code. A bare `OWNER/REPO` qualifies a SHA only on the same line, so a
+   checksum on the next line is not a pin. A `github.com/OWNER/REPO` URL
+   (optional `http://` or `https://`, optional `www.`) also qualifies the
+   immediately previous or next line.
+   URLs whose path continues `/issues/`, `/pull/`, `/pulls/`, or
+   `/discussions/` are not qualifiers. The nearest allowed qualifier wins:
+   same line beats a neighbor; equal distance breaks toward the earlier line,
+   then the earlier column. A blank line is a real line and breaks adjacency.
 
-Matching skips fenced code, all-zero SHAs, ordinary paths such as `docs/guide.md`,
-and issue or pull request URLs. A trailing `.git` on the repository name is
-stripped. Both name segments must differ from `.` and `..`. Action `uses:` pins
-are collected by the workflow scanner.
+A name is plausible when it is a GitHub owner and repository (no `.`, `..`,
+extra slash, or trailing `.git`) and neither segment is a common prose or
+directory word (`and`, `or`, `docs`, …), and the repository is not a file name
+with a documentation, data, or image extension (`guide.md`). The all-zero SHA,
+a bare 40-hex string in prose, uppercase hex, and a longer hex run are not pins.
+A name that fails the GitHub owner/repo check is dropped before it is joined
+onto a git remote.
 
-Exit 0 when every pin is `ok`, 1 when a pin needs attention (including
-`not_merge` and `unknown_parents`),
+Exit 0 when every pin is `ok`, 1 when a pin needs attention (`not_merge` and `unknown_parents` included),
 and 2 for input errors. Malformed or unreadable selected JSON fails with its
 checkout-relative filename; unrelated JSON is ignored and valid inputs with no
 pins succeed. A selected markdown file that cannot be decoded fails the same way.
@@ -1130,11 +1139,14 @@ lock / catalog / materialize / auto-fix stay in the parent `vendor_sync.py`.
 
 日本語の要点: `pin-audit` は読み取り専用です。各結果に `parent_count` と `kind`
 （`merge` / `single` / `root` / `unknown`）が付きます。`--require-merge-commit`
-を付けると、first-parent 上で親が 2 未満のピンは `not_merge`、親数が不明なピンは
-`unknown_parents` になり、終了コードは 1 です。`--include-markdown` はルートの
-`README.md` と `docs/**/*.md` を読みます。`OWNER/REPO@SHA`、GitHub のコミット URL、
-またはリポジトリのルート URL や `Repo: OWNER/REPO` と同じ行か隣の行にある SHA が
-対象です。Git で読めないリポジトリの名前は秘匿します。
+を付けたとき、first-parent 上で親が 2 未満なら `not_merge`、親の数が読めなければ
+`unknown_parents` になり、どちらも終了コード 1 です。付けなければ親の数が不明でも
+従来どおり `ok` または `drift` です。`--include-markdown` はルートの `README.md` と
+`docs/**/*.md` だけを見ます。コードフェンスとインラインコードでは
+`OWNER/REPO@40桁` だけを取り、地の文の SHA は GitHub の名前として尤もらしい
+`OWNER/REPO` か `github.com/OWNER/REPO`（`/issues/` と `/pull/` は除く）が
+同じ行か隣の行にあるときだけです。`and/or` や `docs/guide.md`、40 個の `0` は
+取りません。`.` や `..` を含む名前は git の remote に渡しません。
 
 ## GitHub identity (`repo-identity`, `owner-repositories`, `pr-identity`, `commit-pulls`, `first-parent`)
 

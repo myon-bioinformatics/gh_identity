@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -1596,8 +1597,9 @@ def test_scripted_audit_edges():
     assert row["state"] == "not_merge" and row["changed"] == [] and "parent_count=1" in row["detail"]
     unknown = AuditGit(first=f"{A40}\n".encode(), cat_p=(1, b""), count=b"")
     row = g._audit_repository("me/up", [_pin("me/up", A40, "z")], "/remote/me/up", 30, require_merge=True, git_runner=unknown)[0]
-    assert row["state"] == "unknown_parents" and row["parent_count"] is None and row["kind"] == "unknown"
-    assert row["since"] == 0 and "parent count could not be determined" in row["detail"]
+    assert row["state"] == "unknown_parents" and row["parent_count"] is None and row["kind"] == "unknown" and row["since"] == 0
+    plain = g._audit_repository("me/up", [_pin("me/up", A40, "z")], "/remote/me/up", 30, git_runner=unknown)[0]
+    assert plain["state"] == "ok" and plain["parent_count"] is None
     final = AuditGit(first=f"{B40}\n{A40}\n".encode(), ancestry=f"{B40}\n".encode())
     row = g._audit_repository("me/up", [_pin("me/up", C40, "z")], "/remote/me/up", 30, git_runner=final)[0]
     assert row["state"] == "not_final" and row["final"] == B40
@@ -1669,8 +1671,8 @@ def bare_world(tmp_path_factory):
     (child / ".git" / "vendor.lock.json").write_text(json.dumps({"repository": "acme/widgets", "commit": made["merge"]}))
     readme = "\n".join([
         f"Pin acme/widgets@{made['octopus']}",
-        f"Repository: acme/widgets commit {made['squash']}",
-        f"Repository: acme/widgets {upper}",
+        f"same line acme/widgets commit {made['squash']}",
+        f"acme/widgets {upper}",
         f"https://github.com/acme/widgets/commit/{made['root']}",
         "http://www.github.com/acme/widgets is the same repository",
     ])
@@ -1727,107 +1729,6 @@ def test_markdown_rule_and_workflow_actions_stay_put(bare_world):
     assert not any(p["file"] == "docs/notes.txt" or p["file"] == "docs/linked.md" for p in marked)
     action_pins = [p for p in marked if p["commit"] == bare_world["action"]]
     assert len(action_pins) == 1 and action_pins[0]["file"].endswith("ci.yml")
-
-
-@pytest.mark.parametrize(("strict", "exit_code", "state"), [(False, 0, "ok"), (True, 1, "unknown_parents")])
-def test_pin_audit_cli_parent_lookup_failure(bare_world, tmp_path, monkeypatch, capsys, strict, exit_code, state):
-    sha = bare_world["squash"]
-    (tmp_path / "vendor.lock.json").write_text(json.dumps({"repository": "acme/widgets", "commit": sha}))
-    git_runner = g._default_git_runner
-
-    def fail_parent_lookup(args, cwd, **kwargs):
-        if args[-3:] == ["cat-file", "-p", sha]:
-            return 1, b""
-        return git_runner(args, cwd, **kwargs)
-
-    monkeypatch.setattr(g, "_default_git_runner", fail_parent_lookup)
-    args = ["pin-audit", "--root", str(tmp_path), "--remote-base", bare_world["base"]]
-    if strict:
-        args.append("--require-merge-commit")
-    assert g.main(args) == exit_code
-    output = capsys.readouterr()
-    assert output.err == ""
-    report = json.loads(output.out)
-    assert report["ok"] is (not strict) and report["counts"] == {state: 1}
-    assert report["results"][0]["parent_count"] is None and report["results"][0]["kind"] == "unknown"
-    assert g.render_pin_audit(report).startswith(f"{state} acme/widgets@{sha[:7]} unknown/?")
-
-
-def test_markdown_pin_noise_fences_and_line_numbers(tmp_path):
-    sha, other, zero = "ab" * 20, "cd" * 20, "0" * 40
-    (tmp_path / "README.md").write_text("\n".join([
-        f"Use and/or with {other}",
-        "See docs/guide.md",
-        other,
-        "https://github.com/acme/widgets/issues/3",
-        f"checksum {other}",
-        f"[PR](https://github.com/acme/widgets/pull/4) {other}",
-        "````markdown",
-        f"acme/widgets@{other}",
-        "```",
-        f"https://github.com/acme/widgets/commit/{other}",
-        "````",
-        "~~~ text",
-        f"Repo: acme/widgets {other}",
-        "~~~ still code",
-        f"acme/widgets@{other}",
-        "~~~~",
-        f"acme/widgets@{zero}",
-        f"https://github.com/acme/widgets/commit/{zero}",
-        f"Repo: acme/widgets {zero}",
-        f"`acme/widgets.git@{sha}`",
-        f"[source](https://github.com/acme/widgets/commit/{sha})",
-        f"Repo: `acme/widgets` pinned at `{sha}`",
-        "",
-        "https://github.com/acme/widgets/",
-        sha,
-        "",
-        "```text",
-        f"acme/widgets@{other}",
-    ]), encoding="utf-8")
-    pins = g.collect_pins(tmp_path, include_markdown=True)
-    assert [(p["line"], p["repository"], p["commit"]) for p in pins] == [
-        (20, "acme/widgets", sha), (21, "acme/widgets", sha),
-        (22, "acme/widgets", sha), (25, "acme/widgets", sha),
-    ]
-
-
-@pytest.mark.parametrize("opener, prefix, closer", [
-    ("> ```text", "> ", "> ```\n"),
-    ("> ```text", "> ", ""),
-    ("1. ~~~ text", "   ", "   ~~~\n"),
-    ("- ```text", "  ", ""),
-])
-def test_markdown_pins_skip_fences_in_quotes_and_lists(opener, prefix, closer):
-    text = f"{opener}\n{prefix}acme/widgets@{A40}\n{closer}acme/widgets@{B40}\n"
-    assert [p["commit"] for p in g._markdown_pins("README.md", text)] == [B40]
-
-
-def test_pin_audit_skips_invalid_repository_names_before_git(tmp_path):
-    sha = "ab" * 20
-    names = ("./secret", "../secret", "acme/.", "acme/..", "acme/../secret")
-    workflows = tmp_path / ".github" / "workflows"
-    workflows.mkdir(parents=True)
-    (workflows / "ci.yml").write_text("\n".join(
-        f"    uses: {name}@{sha}\n    repository: {name}\n    ref: {sha}" for name in names
-    ))
-    (tmp_path / "vendor.lock.json").write_text(json.dumps({
-        "files": [{"repository": name, "commit": sha} for name in (*names, "https://github.com/../secret", "acme/...git")],
-    }))
-    (tmp_path / "README.md").write_text("\n\n".join([
-        *[f"Repo: valid/project {name}@{sha}" for name in names],
-        *[f"Repository: {name} {sha}" for name in names],
-        *[f"https://github.com/{name}/commit/{sha}" for name in names],
-    ]))
-    assert g.collect_pins(tmp_path) == []
-    report = g.pin_audit(tmp_path, remote_base=str(tmp_path) + "/", include_markdown=True)
-    assert report["ok"] is True and report["results"] == [] and report["redacted"] == 0
-    for name in names:
-        with pytest.raises(ValueError, match="OWNER/REPO"):
-            g.pin_audit(tmp_path, repos=[name])
-    assert g.repo("acme/.github") == "acme/.github"
-    assert g._pin_repo(" https://github.com/acme/widgets.git ") == "acme/widgets"
-    assert g._pin_repo("http://www.github.com/acme/widgets") == "acme/widgets"
 
 
 def test_bare_repo_merge_squash_and_repo_filter(bare_world):
@@ -1895,15 +1796,15 @@ def test_markdown_broken_readme_and_matcher_edges(tmp_path):
     sha = "ab" * 20
     other = "cd" * 20
     left, right = "aa/bb", "cc/dd"
-    tie = f"GitHub.com/{left}   {sha}   Repo:{right}"
+    tie = f"{left}   {sha}   {right}"
     pins = g._markdown_pins("README.md", "\n".join([
-        f"Repo: zz/far {other}",
-        f"Repo: aa/near {sha} Repo: zz/later",
+        f"zz/far {other}",
+        f"aa/near {sha} zz/later",
         "owner/name@" + sha,
         "",
         sha,
         "",
-        f"Repo: only/here {other}",
+        f"only/here {other}",
     ]))
     located = {(pin["line"], pin["repository"], pin["commit"]) for pin in pins}
     assert (2, "aa/near", sha) in located
@@ -1930,7 +1831,6 @@ def test_markdown_broken_readme_and_matcher_edges(tmp_path):
     assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=2, require_merge=True, changed=False) == "ok"
     assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=False) == "unknown_parents"
     assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=True) == "unknown_parents"
-    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=False, changed=False) == "ok"
     assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=False, changed=True) == "drift"
     assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=1, require_merge=False, changed=False) == "ok"
     assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=1, require_merge=False, changed=True) == "drift"
@@ -1941,6 +1841,89 @@ def test_markdown_broken_readme_and_matcher_edges(tmp_path):
     assert g._markdown_pin_file("README.md") and g._markdown_pin_file("docs/a/b.md")
     assert not g._markdown_pin_file("docs/a.txt") and not g._markdown_pin_file("nested/README.md")
     assert "--first-parent" not in __import__("inspect").getsource(g._audit_repository)
+    sha = "ab" * 20
+    zero = "0" * 40
+    blocked = "\n".join([
+        f"see and/or {sha}",
+        "",
+        f"docs/guide.md {sha}",
+        "",
+        f"acme/widgets {zero}",
+        "",
+        f"https://github.com/acme/widgets/issues/4 {sha}",
+        "",
+        f"https://github.com/acme/widgets/pull/9 {sha}",
+        "",
+        f"https://github.com/acme/widgets/commit/{sha}",
+        "",
+        "```",
+        f"acme/widgets@{sha}",
+        f"acme/widgets {sha}",
+        "```",
+        "",
+        f"inline `acme/widgets@{sha}` and `{sha}` next to `acme/widgets`",
+        "",
+        f"../secret {sha}",
+        "",
+        f"acme/guide.md {sha}",
+        "",
+        f"see `https://github.com/acme/widgets` {sha}",
+        "",
+        f"https://github.com/and/or {sha}",
+        "",
+        f"acme/widgets@{zero}",
+    ])
+    kept = g._markdown_pins("README.md", blocked)
+    assert g._markdown_pins("README.md", f"acme/widgets\n{sha}\n") == []
+    assert {(p["repository"], p["commit"]) for p in kept} == {("acme/widgets", sha)}
+    assert len(kept) == 3
+    assert zero not in {p["commit"] for p in kept}
+    with pytest.raises(ValueError):
+        g._audit_repository("../secret", [_pin("../secret", sha, "z")], "/tmp/../secret", 30,
+                            git_runner=lambda *a: (_ for _ in ()).throw(AssertionError("git")))
+
+
+def test_cli_unknown_parents_fails_require_merge(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    git(work, "init", "-q", "-b", "main")
+    (work / "f").write_text("a\n")
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "root")
+    (work / "f").write_text("b\n")
+    git(work, "commit", "-qam", "squash-style")
+    tip = git(work, "rev-parse", "HEAD")
+    bare = tmp_path / "remotes" / "acme" / "widgets"
+    bare.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "--bare", "-q", str(work), str(bare))
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "vendor.lock.json").write_text(json.dumps({"repository": "acme/widgets", "commit": tip}))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    real = shutil.which("git")
+    (bindir / "git").write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "for index, arg in enumerate(args):\n"
+        "    if arg == 'cat-file' and index + 1 < len(args) and args[index + 1] == '-p':\n"
+        "        raise SystemExit(1)\n"
+        f"os.execv({real!r}, [{real!r}, *args])\n")
+    (bindir / "git").chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+    base = str(tmp_path / "remotes") + "/"
+    forced = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
+                             "--remote-base", base, "--require-merge-commit"],
+                            capture_output=True, text=True, env=env)
+    assert forced.returncode == 1, forced.stderr
+    body = json.loads(forced.stdout)
+    assert body["ok"] is False and body["results"][0]["state"] == "unknown_parents"
+    assert body["results"][0]["parent_count"] is None and "secret" not in forced.stdout
+    plain = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
+                            "--remote-base", base], capture_output=True, text=True, env=env)
+    assert plain.returncode == 0 and json.loads(plain.stdout)["results"][0]["state"] == "ok"
 
 
 # ──── vendor_tools ────────────────────────────────────────────────

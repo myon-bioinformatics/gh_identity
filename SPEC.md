@@ -323,12 +323,17 @@ Repository health combines check runs with the combined legacy commit status on 
 `ok`, `drift`, `not_final`, `unmerged`, `unavailable`. Every result also carries
 `parent_count` (int or null) and `kind`: `merge` when `parent_count >= 2`,
 `single` when it is 1, `root` when it is 0, `unknown` otherwise.
-`--require-merge-commit` / `require_merge=True` is opt-in. For a pin on the
-default-branch first-parent line, fewer than two parents yields `not_merge`
-and a null parent count yields `unknown_parents`. Either state sets `ok` to
-`false` and makes the process exit 1.
+`--require-merge-commit` / `require_merge=True` is opt-in. A pin that is on the
+default-branch first-parent line and whose `parent_count` is an int `< 2`
+becomes `not_merge` instead of `ok` or `drift`. A pin on that line whose
+`parent_count` is null becomes `unknown_parents` (fail closed: not ok, exit 1).
+Without the flag, a null parent count stays `ok` or `drift`.
 Unreadable remotes stay `unavailable` with a null repository, commit, and parent
-count; private names are not printed.
+count; private names are not printed. A declared repository is accepted only as
+a bare OWNER/REPO or a github.com URL of that repository. A name may start with
+`.` (for example `acme/.github`). A segment that is exactly `.` or `..`, a
+backslash, a second slash, a non-GitHub URL, or an absolute path is rejected
+before `remote_base + repository` is passed to git; it is not trimmed or omitted.
 
 The first-parent list is `_exact_first_parent_lines`, the exact-git half of
 `first_parent_check`. API history remains `_first_parent_contains`. Pin audit
@@ -336,24 +341,29 @@ does not keep a second `git rev-list --first-parent` walk. Parent count on that
 path is `git cat-file -p` (header lines `parent ` before the blank line).
 
 `--include-markdown` reads only `README.md` at the checkout root and
-`docs/**/*.md`. Pin forms are `OWNER/REPO@SHA`, a GitHub commit URL, or a standalone
-SHA with a `Repo: OWNER/REPO` label, `Repository: OWNER/REPO` label, or GitHub
-repository root URL on the same or immediately adjacent line. Same-line qualifiers
-take precedence. Ties in distance prefer the earlier line, then the earlier
-column. Blank lines break adjacency. SHAs must be 40 lowercase hex digits with
-at least one nonzero digit. The parser ignores fenced code and treats GitHub
-issue and pull request URLs as ordinary links. Repository names cannot contain
-`.` or `..` as either segment. A trailing `.git` is stripped from Markdown and
-JSON names before validation. The workflow scanner handles `uses:` pins.
+`docs/**/*.md`. A pin is either a standalone plausible `OWNER/REPO@` + 40
+lowercase hex digits (not a longer path; trailing `.git` stripped; allowed
+inside fenced and inline code) or another standalone 40-lowercase-hex token
+outside fences and inline code. A bare `OWNER/REPO` qualifies a SHA only on
+the same line, so a checksum on the neighbouring line is not a pin. A
+`github.com/OWNER/REPO` URL also qualifies the immediately previous or next
+line. URLs continuing `/issues/`, `/pull/`, `/pulls/`, or `/discussions/`
+are not qualifiers. Same line beats a neighbor; ties break toward the earlier
+line, then the earlier column. A blank line breaks adjacency. The all-zero SHA,
+bare prose SHAs, uppercase hex, longer hex runs, common-word pairs (`and/or`),
+and file-like names (`docs/guide.md`) are not matches. Workflow files are not
+read here. Action `uses:` SHAs stay on the workflow scanner only.
 
 `--repo` is repeatable. Values are stripped; blank is unset. The audit keeps
 pins whose repository is in the remaining set. It combines with `--only`.
 
-`commit_classify` / `commit-classify` is read-only. It calls `first_parent_check`
-and `commit_pulls` and does not add a walker. `on_first_parent` is that check's
-`contains` (null when the API walk stops for `max_pages`). `parent_count` is
-`git cat-file -p` when `exact=True` and `GET repos/{r}/commits/{sha}` otherwise
-(null when the commit is missing or `parents` is not a list). `kind` uses
+`commit_classify` / `commit-classify` is read-only. API mode calls
+`first_parent_check` and `commit_pulls`. Exact mode calls `_exact_open` once
+(the same bare session as `first_parent_check`: one branch fetch, then
+`git cat-file -p`) and `commit_pulls`. It does not add a walker.
+`on_first_parent` is null when the API walk stops for `max_pages`. `parent_count`
+is that cat-file result when `exact=True` and `GET repos/{r}/commits/{sha}`
+otherwise (null when the commit is missing or `parents` is not a list). `kind` uses
 `squash_or_single` for one parent. `pulls` are sorted by integer `number`,
 non-integers last, with `is_merge_commit` (`sha == merge_commit_sha`), `is_head`
 (`sha == head_sha`), and `base_ref`. Repository, sha, and branch are stripped;
@@ -361,6 +371,7 @@ empty sha or repository is rejected; empty branch is unset. CLI JSON uses
 `sort_keys`. `--text` prints `render_commit_classify`. Exit 0 on success, 2 on
 bad input.
 
-日本語: `--require-merge-commit` を指定すると、first-parent 上のピンは親数が
-2 未満なら `not_merge`、不明なら `unknown_parents` となり、終了コードは 1。
-`commit-classify` は既存の first-parent と commit-pulls を利用する。
+日本語: 既定の pin-audit の状態は変えない。`--require-merge-commit` のとき、
+first-parent 上で親が 2 未満なら `not_merge`、親の数が不明なら `unknown_parents`
+で失敗させる。markdown から拾う SHA は上の規則だけ。`commit-classify --exact` は
+一時 bare リポジトリを 1 回だけ使う。

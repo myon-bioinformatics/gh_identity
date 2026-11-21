@@ -202,6 +202,16 @@ def _when(value):
  if not isinstance(value,str):return None
  try:return datetime.fromisoformat(value.replace("Z","+00:00"))
  except ValueError:return None
+_GH_OWNER=re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
+_GH_REPO=re.compile(r"[A-Za-z0-9._-]{1,100}")
+def _github_full_name_ok(value):
+ """GitHub OWNER/REPO. Rejects a segment that is exactly '.' or '..', a backslash, a second slash, and a trailing .git name. A repository may start with '.' (for example .github)."""
+ if not isinstance(value,str) or value.count("/")!=1 or "\\" in value:
+  return False
+ owner,name=value.split("/",1)
+ if owner in (".","..") or name in (".","..") or name.lower().endswith(".git"):
+  return False
+ return _GH_OWNER.fullmatch(owner) is not None and _GH_REPO.fullmatch(name) is not None
 def repo(x):
  if not isinstance(x,str) or not REPO.fullmatch(x): raise ValueError("repo must be OWNER/REPO")
  return x
@@ -5150,41 +5160,60 @@ def enrollment_progress(owner, *, provider="myon-bioinformatics/gh_identity", so
 _PIN_USES = re.compile(r"uses:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?P<path>/[^@\s'\"]*)?@(?P<sha>[0-9a-f]{40})\b")
 _PIN_CHECKOUT_REPO = re.compile(r"^\s+repository:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)['\"]?\s*$")
 _PIN_CHECKOUT_REF = re.compile(r"^\s+ref:\s*['\"]?(?P<sha>[0-9a-f]{40})['\"]?\s*$")
-_MD_START = r"(?<![\w./@\\-])"
-_MD_NAME = r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
-_MD_REPO_END = r"(?![\w./@\\?#%=-])"
-_PIN_GITHUB_URL = rf"(?i:(?:https?://)?(?:www\.)?github\.com/){_MD_NAME}"
-_MD_GITHUB = rf"{_MD_START}{_PIN_GITHUB_URL}"
-_MD_COMMIT = r"(?P<sha>[0-9a-f]{40})(?![\w/\\-])"
-_MD_EXPLICIT = re.compile(rf"{_MD_START}{_MD_NAME}@{_MD_COMMIT}")
-_MD_COMMIT_URL = re.compile(rf"{_MD_GITHUB}/commit/{_MD_COMMIT}")
-_MD_SHA = re.compile(rf"{_MD_START}{_MD_COMMIT}")
-_MD_REPO = re.compile(rf"{_MD_START}(?i:repo(?:sitory)?):[ \t]*(?P<tick>`?){_MD_NAME}{_MD_REPO_END}(?P=tick)")
-_MD_URL = re.compile(rf"{_MD_GITHUB}/?{_MD_REPO_END}")
-_MD_QUOTE_PREFIX = re.compile(r"^(?:[ \t]*>[ \t]?)+")
-_MD_FENCE = re.compile(r"^[ \t]*(?P<item>(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+# Markdown pins: standalone OWNER/REPO@<40 lowercase hex>, or a standalone 40-hex
+# token tied to a qualifier. Workflow files are not matched here.
+_MD_EXPLICIT = re.compile(
+    r"(?<![A-Za-z0-9_.-/])(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?P<sha>[0-9a-f]{40})(?![0-9a-f])")
+_MD_SHA = re.compile(r"(?<![0-9a-f])(?P<sha>[0-9a-f]{40})(?![0-9a-f])")
+_MD_REPO = re.compile(
+    r"(?<![A-Za-z0-9_.-/])(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-/])")
+_MD_URL = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])(?:https?://)?(?:www\.)?github\.com/"
+    r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?P<rest>/[^\s)]*)?")
+_MD_ISSUE_PULL = re.compile(r"(?i)^/(?:issues|pull|pulls|discussions)(?:/|$)")
+_MD_STOP = frozenset({
+    "a", "an", "and", "or", "the", "of", "to", "in", "for", "on", "with", "by", "from", "as", "at",
+    "is", "it", "be", "if", "not", "but", "this", "that", "are", "was", "via", "per", "vs", "into",
+    "over", "than", "then", "so", "docs", "doc", "src", "lib", "test", "tests", "images", "assets", "img",
+})
+_MD_EXT = frozenset({
+    "md", "markdown", "txt", "rst", "yml", "yaml", "json", "html", "htm", "svg", "png", "jpg", "jpeg",
+    "gif", "css", "toml", "csv", "xml", "lock",
+})
 PIN_JSON_GLOBS = ("vendor.lock.json", "**/vendor.lock.json", "**/publication.json", "**/parent-pr.ref.json",
                   "child-heads.json")
 
 
+_PIN_GITHUB_URL = re.compile(
+    r"(?i)(?:https?://)?(?:www\.)?github\.com/(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?/?$")
+
+
 def _pin_repo(value):
-    value = value.strip()
-    url = re.fullmatch(_PIN_GITHUB_URL, value)
-    value = (url["repo"] if url else value).removesuffix(".git")
-    if not value.isascii() or not REPO.fullmatch(value):
+    """Bare OWNER/REPO, or a github.com URL of that repository. Anything else is rejected."""
+    if not isinstance(value, str):
         raise ValueError("not an OWNER/REPO")
-    return value
+    value = value.strip()
+    url = _PIN_GITHUB_URL.fullmatch(value)
+    if url:
+        full = url["owner"] + "/" + url["name"]
+    elif value.count("/") == 1 and "://" not in value and not value.startswith(("/", "\\")):
+        full = value[:-4] if value.lower().endswith(".git") else value
+    else:
+        raise ValueError("not an OWNER/REPO")
+    if not _github_full_name_ok(full):
+        raise ValueError("not an OWNER/REPO")
+    return full
 
 
 def _workflow_pins(path, text):
     pins, lines = [], text.splitlines()
     for number, line in enumerate(lines, 1):
         m = _PIN_USES.search(line)
-        if m and REPO.fullmatch(m["repo"]):
+        if m and _github_full_name_ok(m["repo"]):
             pins.append({"repository": m["repo"], "commit": m["sha"], "file": path, "line": number,
                          "entry": m["repo"] + (m["path"] or ""), "paths": []})
         r = _PIN_CHECKOUT_REPO.match(line)
-        if r and REPO.fullmatch(r["repo"]):
+        if r and _github_full_name_ok(r["repo"]):
             for later in range(number, min(number + 12, len(lines))):
                 ref = _PIN_CHECKOUT_REF.match(lines[later])
                 if ref:
@@ -5202,9 +5231,12 @@ def _json_pins(path, document):
             repository = node.get("repository") or key
             if isinstance(repository, str) and _is_sha(commit) \
                     and set(commit) != {"0"}:
+                declared = node.get("repository") if isinstance(node.get("repository"), str) else None
                 try:
                     name = _pin_repo(repository)
                 except ValueError:
+                    if declared is not None and declared.strip():
+                        raise PinInputError(f"{path}: invalid_repository")
                     name = None
                 if name:
                     source = node.get("source") or node.get("source_path")
@@ -5244,14 +5276,79 @@ def _md_repo(value):
         return None
 
 
+def _plausible_pin_repo(value):
+    """OWNER/REPO that can be a markdown pin: GitHub names, not prose words or file paths."""
+    name = _md_repo(value)
+    if name is None:
+        return None
+    owner, repo_name = name.split("/", 1)
+    if owner.lower() in _MD_STOP or repo_name.lower() in _MD_STOP:
+        return None
+    if "." in repo_name and repo_name.rsplit(".", 1)[-1].lower() in _MD_EXT:
+        return None
+    return name
+
+
+def _inline_code_spans(line):
+    """Half-open spans of inline code (backtick runs). Unclosed backticks do not open a span."""
+    spans, index = [], 0
+    while index < len(line):
+        if line[index] != "`":
+            index += 1
+            continue
+        ticks = index
+        while ticks < len(line) and line[ticks] == "`":
+            ticks += 1
+        marker = "`" * (ticks - index)
+        close = line.find(marker, ticks)
+        if close == -1:
+            break
+        spans.append((index, close + len(marker)))
+        index = close + len(marker)
+    return spans
+
+
+def _span_inside(spans, start, end):
+    return any(left <= start and end <= right for left, right in spans)
+
+
+def _fenced_lines(lines):
+    """Lines inside a CommonMark fence, including the fence lines themselves."""
+    masked = [False] * len(lines)
+    open_fence = None
+    for index, line in enumerate(lines):
+        match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})", line)
+        if open_fence is None:
+            if match:
+                open_fence = (match.group(1)[0], len(match.group(1)))
+                masked[index] = True
+            continue
+        masked[index] = True
+        if match and match.group(1)[0] == open_fence[0] and len(match.group(1)) >= open_fence[1] \
+                and line.strip() == match.group(1):
+            open_fence = None
+    return masked
+
+
 def _markdown_qualifiers(line):
-    """(start, end, OWNER/REPO) for labelled names and GitHub repository root URLs."""
+    """(start, end, OWNER/REPO) outside inline code. Issue and pull URLs are not qualifiers."""
+    hidden = _inline_code_spans(line)
     found = []
-    for pattern in (_MD_URL, _MD_REPO):
-        for match in pattern.finditer(line):
-            name = _md_repo(match.group("repo"))
-            if name:
-                found.append((match.start(), match.end(), name))
+    for match in _MD_URL.finditer(line):
+        if _span_inside(hidden, match.start(), match.end()):
+            continue
+        rest = match.group("rest") or ""
+        if _MD_ISSUE_PULL.match(rest):
+            continue
+        name = _plausible_pin_repo(match.group("repo"))
+        if name:
+            found.append((match.start(), match.end(), name, True))
+    for match in _MD_REPO.finditer(line):
+        if _span_inside(hidden, match.start(), match.end()):
+            continue
+        name = _plausible_pin_repo(match.group("repo"))
+        if name:
+            found.append((match.start(), match.end(), name, False))
     return found
 
 
@@ -5267,7 +5364,9 @@ def _nearest_markdown_repo(qualifiers, index, sha_start, sha_end):
         other = index + delta
         if other < 0 or other >= len(qualifiers):
             continue
-        for start, end, name in qualifiers[other]:
+        for start, end, name, adjacent_ok in qualifiers[other]:
+            if delta != 0 and not adjacent_ok:
+                continue
             if end <= sha_start:
                 gap = sha_start - end
             else:
@@ -5278,56 +5377,56 @@ def _nearest_markdown_repo(qualifiers, index, sha_start, sha_end):
     return None if best is None else best[4]
 
 
-def _markdown_prose_lines(text):
-    """Blank out fenced code while preserving line numbers and adjacency."""
-    fence = None
-    fence_depth = item_indent = 0
-    for line in text.splitlines():
-        quote = _MD_QUOTE_PREFIX.match(line)
-        depth = quote[0].count(">") if quote else 0
-        content = line[quote.end():] if quote else line
-        if fence is not None and depth < fence_depth:
-            fence = None
-        if fence is not None and item_indent and depth == fence_depth:
-            expanded = content.expandtabs(4)
-            stripped = expanded.lstrip(" ")
-            if stripped and len(expanded) - len(stripped) < item_indent:
-                fence = None
-        match = _MD_FENCE.match(content)
-        if fence is None:
-            if not match or (match["marker"][0] == "`" and "`" in match["info"]):
-                yield line
-                continue
-            fence = match["marker"]
-            fence_depth = depth
-            item_indent = len(content[:match.start("marker")].expandtabs(4)) if match["item"] else 0
-        elif (depth == fence_depth and match and not match["item"]
-              and match["marker"].startswith(fence) and not match["info"].strip()):
-            fence = None
-        yield ""
-
-
 def _markdown_pins(path, text):
-    """Read explicit pins, GitHub commit URLs and SHAs next to a repository qualifier."""
-    lines = list(_markdown_prose_lines(text))
-    qualifiers = [_markdown_qualifiers(line) for line in lines]
-    zero = "0" * 40
+    """Commit pins in one markdown document.
+
+    Exact rule (lowercase hex only, same as the rest of this file):
+
+    * Explicit pin: a standalone plausible ``OWNER/REPO@`` plus exactly 40
+      lowercase hex digits, including inside fenced or inline code. The token
+      must not continue a longer path. A trailing ``.git`` is stripped. The
+      all-zero SHA is not a pin.
+    * Qualified SHA: any other standalone 40-lowercase-hex token outside fenced
+      blocks and inline code. A bare ``OWNER/REPO`` qualifies a SHA only on the
+      same line. A ``github.com/OWNER/REPO`` URL (not ``/issues/``, ``/pull/``,
+      ``/pulls/``, or ``/discussions/``) also qualifies the immediately previous
+      or next line. A checksum on the
+      neighbouring line of a bare name is not a pin. The nearest allowed
+      qualifier wins, as in ``_nearest_markdown_repo``.
+    * A name is plausible when it is a GitHub owner/repo and neither segment is
+      a common prose or directory word, and the repo is not a file name whose
+      extension is documentation, data, or an image.
+    * Rejected: a bare 40-hex string, uppercase hex, a longer hex run, ``0``*40,
+      and anything outside ``README.md`` and ``docs/**/*.md``. Workflow files
+      are not read here.
+    """
+    lines = text.splitlines()
+    fenced = _fenced_lines(lines)
+    qualifiers = [[] if fenced[index] else _markdown_qualifiers(line) for index, line in enumerate(lines)]
+    consumed = set()
     found = []
     for index, line in enumerate(lines):
-        for pattern in (_MD_EXPLICIT, _MD_COMMIT_URL):
-            for match in pattern.finditer(line):
-                sha = match["sha"]
-                name = _md_repo(match["repo"])
-                if name and sha != zero:
-                    found.append((index, match.start("sha"), name, sha))
+        inline = _inline_code_spans(line)
+        for match in _MD_EXPLICIT.finditer(line):
+            if set(match.group("sha")) == {"0"}:
+                continue
+            name = _plausible_pin_repo(match.group("repo"))
+            if name is None:
+                continue
+            consumed.add((index, match.start("sha"), match.end("sha")))
+            found.append((index, match.start("sha"), name, match.group("sha")))
+        if fenced[index]:
+            continue
         for match in _MD_SHA.finditer(line):
-            sha = match["sha"]
-            if sha == zero:
+            if set(match.group("sha")) == {"0"} or _span_inside(inline, match.start(), match.end()):
+                continue
+            span = (index, match.start(), match.end())
+            if span in consumed:
                 continue
             name = _nearest_markdown_repo(qualifiers, index, match.start(), match.end())
             if name is None:
                 continue
-            found.append((index, match.start(), name, sha))
+            found.append((index, match.start(), name, match.group("sha")))
     found.sort()
     return [{"repository": name, "commit": sha, "file": path, "line": index + 1,
              "entry": f"{name}@{sha}", "paths": []}
@@ -5357,16 +5456,15 @@ def _commit_kind(parent_count, *, single="single"):
 
 
 def _pin_result_state(*, present, ancestor, on_line, parent_count, require_merge, changed):
-    """Apply the parent-count requirement only to first-parent pins in strict mode."""
+    """Pin state. With require_merge, a missing parent count fails closed."""
     if not present or not ancestor:
         return "unmerged"
     if not on_line:
         return "not_final"
-    if require_merge:
-        if parent_count is None:
-            return "unknown_parents"
-        if parent_count < 2:
-            return "not_merge"
+    if require_merge and parent_count is None:
+        return "unknown_parents"
+    if require_merge and parent_count < 2:
+        return "not_merge"
     if changed:
         return "drift"
     return "ok"
@@ -5381,7 +5479,9 @@ def _selected_repos(repos):
         text = _blank_to_none(item)
         if text is None:
             continue
-        selected.add(repo(text))
+        if not _github_full_name_ok(text):
+            raise ValueError("repo must be OWNER/REPO")
+        selected.add(text)
     return selected or None
 
 
@@ -5411,6 +5511,8 @@ def collect_pins(root=".", json_globs=PIN_JSON_GLOBS, *, include_markdown=False)
                 elif include_markdown and _markdown_pin_file(rel):
                     with open(full, encoding="utf-8") as stream:
                         pins += _markdown_pins(rel, stream.read(4 * 1024 * 1024))
+            except PinInputError:
+                raise
             except (OSError, ValueError) as error:
                 if isinstance(error, UnicodeDecodeError) and _markdown_pin_file(rel):
                     reason = "read_error"
@@ -5424,11 +5526,14 @@ def collect_pins(root=".", json_globs=PIN_JSON_GLOBS, *, include_markdown=False)
 
 def _audit_repository(repository, items, remote, timeout, *, require_merge=False, git_runner=None):
     """Check all pins of one repository with the exact-git path of ``first_parent_check``.
+    A name that is not OWNER/REPO never reaches git.
 
     The first-parent list comes from ``_exact_first_parent_lines`` (one walk).
     Parent count is ``git cat-file -p`` on that same bare repository. Git never
     receives credentials: the shared session disables credential helpers.
     """
+    if not _github_full_name_ok(repository):
+        raise ValueError("not an OWNER/REPO")
     if git_runner is None:
         git_runner = lambda args, cwd: _default_git_runner(args, cwd, timeout=timeout)
     with _exact_git(git_runner) as git:
@@ -5473,7 +5578,7 @@ def _audit_repository(repository, items, remote, timeout, *, require_merge=False
             if state == "not_merge":
                 detail = f"on {branch} first-parent but parent_count={row['parent_count']} is not a 2-parent merge"
             elif state == "unknown_parents":
-                detail = f"on {branch} first-parent but parent count could not be determined"
+                detail = f"on {branch} first-parent but the parent count is unknown"
             elif state == "drift":
                 detail = f"{len(changed)} pinned file(s) changed on {branch}"
             else:
@@ -5489,9 +5594,14 @@ def pin_audit(root=".", *, json_globs=PIN_JSON_GLOBS, only_owners=None, remote_b
     States: ok, drift (pinned files changed on the default branch), not_final
     (merged but not on the default branch first-parent line: a PR head was
     pinned; `final` is the merge commit to pin), unmerged, unavailable.
-    With require_merge, a pin that is on the first-parent line but has
-    parent_count < 2 is `not_merge`; a missing count is `unknown_parents`.
-    A repository that cannot be fetched without credentials is reported without its name.
+    With require_merge, a pin on the first-parent line with parent_count < 2 is
+    `not_merge`. A pin on that line whose parent count cannot be read is
+    `unknown_parents`. Both are not ok. Without require_merge, an unknown parent
+    count stays ok or drift. A repository that cannot be fetched without
+    credentials is reported without its name (it may be private). A declared
+    repository that is not a bare OWNER/REPO or a github.com URL fails the
+    input instead of being trimmed or omitted. A repository may be named
+    ``.github``; a segment that is exactly ``.`` or ``..`` is rejected.
 
     repos, when set, limits the audit to those OWNER/REPO pins. Blank entries
     are unset. include_markdown adds README.md and docs/**/*.md (see ``_markdown_pins``).
@@ -6470,6 +6580,30 @@ def _exact_first_parent_lines(git, branch):
     return listed.split()
 
 
+def _exact_observe(git, remote, commit, branch):
+    """One fetched branch: first-parent membership and ``git cat-file -p`` parent count."""
+    branch = _exact_fetch_branch(git, remote, branch)
+    if not _exact_has_commit(git, remote, commit):
+        return branch, False, "commit_not_found", None
+    lines = _exact_first_parent_lines(git, branch)
+    code, text = git("cat-file", "-p", commit)
+    parent_count = _parent_count_text(text) if code == 0 else None
+    return branch, commit in set(lines), None, parent_count
+
+
+def _exact_open(repository, commit, *, branch, remote, remote_base, git_runner, timeout):
+    """Open one credential-free bare repository and observe `commit` on its first-parent line."""
+    remote = _remote_for(repository, remote, remote_base)
+    if branch is not None and (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or branch.startswith("-")):
+        raise ValueError("invalid branch")
+    if git_runner is None:
+        git_runner = lambda args, cwd: _default_git_runner(args, cwd, timeout=timeout)
+    if not callable(git_runner):
+        raise TypeError("git_runner must be callable")
+    with _exact_git(git_runner) as git:
+        return _exact_observe(git, remote, commit, branch)
+
+
 def _exact_parent_count(repository, sha, *, remote, remote_base, git_runner, timeout):
     """Parent count via ``git cat-file -p`` (exact mode). None when the object cannot be read."""
     remote = _remote_for(repository, remote, remote_base)
@@ -6537,33 +6671,22 @@ def first_parent_check(repository, commit, *, branch=None, exact=False, transpor
         result = _first_parent_contains(r, commit, branch=branch, transport=transport, timeout=timeout, max_pages=max_pages)
         return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
                 "branch": branch, "exact": False, "contains": result, "reason": None if result is not None else "history_truncated"}
-    remote = _remote_for(r, remote, remote_base)
-    if branch is not None and (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or branch.startswith("-")):
-        raise ValueError("invalid branch")
-    if git_runner is None:
-        git_runner = lambda args, cwd: _default_git_runner(args, cwd, timeout=timeout)
-    if not callable(git_runner):
-        raise TypeError("git_runner must be callable")
-    def result(contains, reason, branch):
-        return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
-                "branch": branch, "exact": True, "contains": contains, "reason": reason}
-    with _exact_git(git_runner) as git:
-        branch = _exact_fetch_branch(git, remote, branch)
-        if not _exact_has_commit(git, remote, commit):
-            return result(False, "commit_not_found", branch)
-        lines = _exact_first_parent_lines(git, branch)
-        return result(commit in set(lines), None, branch)
+    branch, contains, reason, _parents = _exact_open(r, commit, branch=branch, remote=remote, remote_base=remote_base,
+                                                     git_runner=git_runner, timeout=timeout)
+    return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
+            "branch": branch, "exact": True, "contains": contains, "reason": reason}
 
 
 def commit_classify(repository, sha, *, branch=None, exact=False, transport="auto", timeout=30,
                     max_pages=10, remote_base="https://github.com/", remote=None, git_runner=None):
     """Classify one commit: first-parent membership, parent count, and associated pulls.
 
-    Composes ``first_parent_check`` and ``commit_pulls``. There is no second
-    first-parent walker. Parent count is ``git cat-file -p`` when exact=True and
-    the commits API otherwise. ``on_first_parent`` is null when the API walk is
-    truncated. ``kind`` is merge (2+ parents), squash_or_single (1), root (0),
-    or unknown. Pulls are sorted by number. Read-only.
+    API mode composes ``first_parent_check`` and ``commit_pulls``. Exact mode uses
+    one bare fetch (``_exact_open``, the same session as ``first_parent_check``)
+    for first-parent membership and ``git cat-file -p``, then ``commit_pulls``.
+    There is no second history walker. ``on_first_parent`` is null when the API
+    walk is truncated. ``kind`` is merge (2+ parents), squash_or_single (1),
+    root (0), or unknown. Pulls are sorted by number. Read-only.
 
     Text inputs are stripped; empty or whitespace-only branch is unset (the
     default branch). repository and sha are required.
@@ -6573,24 +6696,24 @@ def commit_classify(repository, sha, *, branch=None, exact=False, transport="aut
     branch = _blank_to_none(branch)
     if not _is_sha(sha):
         raise ValueError("sha must be 40 hex")
-    if not exact and branch is None:
-        info = request("GET", f"repos/{repository}", transport=transport, timeout=timeout)
-        if isinstance(info, dict):
-            found = info.get("default_branch")
-            if isinstance(found, str) and found.strip():
-                branch = found.strip()
-    checked = first_parent_check(repository, sha, branch=branch, exact=exact, transport=transport,
-                                 timeout=timeout, max_pages=max_pages, remote_base=remote_base,
-                                 remote=remote, git_runner=git_runner)
     if exact:
-        parent_count = _exact_parent_count(repository, sha, remote=remote, remote_base=remote_base,
-                                           git_runner=git_runner, timeout=timeout)
+        resolved, contains, _reason, parent_count = _exact_open(
+            repository, sha, branch=branch, remote=remote, remote_base=remote_base, git_runner=git_runner, timeout=timeout)
     else:
+        if branch is None:
+            info = request("GET", f"repos/{repository}", transport=transport, timeout=timeout)
+            if isinstance(info, dict):
+                found = info.get("default_branch")
+                if isinstance(found, str) and found.strip():
+                    branch = found.strip()
+        checked = first_parent_check(repository, sha, branch=branch, exact=False, transport=transport,
+                                     timeout=timeout, max_pages=max_pages, remote_base=remote_base, remote=remote)
         parent_count = _api_parent_count(repository, sha, transport=transport, timeout=timeout)
+        contains = checked["contains"]
+        resolved = checked.get("branch") or branch
     pulls = commit_pulls(repository, sha, transport=transport, timeout=timeout)["pulls"]
-    resolved = checked.get("branch") or branch
     return {"schema": "gh-identity-commit-classify/1", "write": False, "repository": repository, "sha": sha,
-            "branch": resolved, "on_first_parent": checked["contains"], "parent_count": parent_count,
+            "branch": resolved, "on_first_parent": contains, "parent_count": parent_count,
             "kind": _commit_kind(parent_count, single="squash_or_single"),
             "pulls": _classify_pull_rows(pulls, sha)}
 
@@ -7432,7 +7555,7 @@ def _cli_parser():
  x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH");x.add_argument("--heads",help="child-heads.json: read locks at the recorded commits")
  x=s.add_parser("enrollment-progress",help="per public consumer: provider file in vendor lock, pin, stale, first-parent (read-only)");x.add_argument("--owner",required=True);x.add_argument("--provider",default="myon-bioinformatics/gh_identity");x.add_argument("--source",default="gh_identity.py");x.add_argument("--repos");x.add_argument("--heads");x.add_argument("--include-forks",action="store_true")
  x=s.add_parser("duplicate-files",help="same basename across an owner's repositories, with vendor-lock provenance (read-only)");x.add_argument("--owner",required=True);x.add_argument("--repos",help="comma-separated names (default: public, non-archived, non-fork repos owned by --owner)");x.add_argument("--ignore",action="append",default=[],metavar="GLOB",help="additional basename/path patterns to ignore");x.add_argument("--no-default-ignore",action="store_true");x.add_argument("--include-forks",action="store_true");x.add_argument("--min-repos",type=int,default=2);x.add_argument("--heads",help="child-heads.json: scan the recorded commits");x.add_argument("--markdown",action="store_true",help="Markdown summary (for GITHUB_STEP_SUMMARY) instead of JSON");x.add_argument("--top",type=int,default=30,help="groups shown with --markdown")
- x=s.add_parser("pin-audit",help="audit commit pins (workflows, vendor locks, parent-pr.ref.json; optional markdown) with plain git (read-only, no token)");x.add_argument("--root",default=".");x.add_argument("--json",action="append",dest="json_globs",metavar="GLOB");x.add_argument("--only",action="append",metavar="OWNER");x.add_argument("--repo",action="append",default=None,metavar="OWNER/REPO",help="only pins of these repositories (repeatable; blank is unset)");x.add_argument("--require-merge-commit",action="store_true",help="require at least two known parents for first-parent pins");x.add_argument("--include-markdown",action="store_true",help="also read README.md and docs/**/*.md for explicitly qualified pins");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true",help="one line per pinned commit")
+ x=s.add_parser("pin-audit",help="audit commit pins (workflows, vendor locks, parent-pr.ref.json; optional markdown) with plain git (read-only, no token)");x.add_argument("--root",default=".");x.add_argument("--json",action="append",dest="json_globs",metavar="GLOB");x.add_argument("--only",action="append",metavar="OWNER");x.add_argument("--repo",action="append",default=None,metavar="OWNER/REPO",help="only pins of these repositories (repeatable; blank is unset)");x.add_argument("--require-merge-commit",action="store_true",help="first-parent pin must be a merge; unknown parent count is unknown_parents");x.add_argument("--include-markdown",action="store_true",help="also read README.md and docs/**/*.md for SHAs tied to OWNER/REPO");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true",help="one line per pinned commit")
  x=s.add_parser("repo-identity",help="public repository id, visibility, default branch, head SHA (read-only)");x.add_argument("repository")
  x=s.add_parser("owner-repositories",help="public repositories of a user or org (read-only; no hard-coded names)");x.add_argument("owner");x.add_argument("--kind",choices=("auto","user","org"),default="auto");x.add_argument("--include-forks",action="store_true");x.add_argument("--include-archived",action="store_true")
  x=s.add_parser("pr-identity",help="PR state, head/base SHAs, merge_commit_sha, repository_id (read-only)");x.add_argument("repository");x.add_argument("number",type=int)
