@@ -87,6 +87,28 @@
               "text": "$ python gh_identity.py merge-preview OWNER/REPO --all-open"
             }
           ]
+        },
+        {
+          "type": "card",
+          "title": "📌 ピンがマージコミットか",
+          "text": "pin-audit は読み取り専用です。--require-merge-commit を付けると、first-parent 上で親が 2 未満のピンは not_merge、親数が不明なピンは unknown_parents となり、終了コードは 1 です。--include-markdown は README.md と docs/**/*.md の OWNER/REPO@SHA、GitHub のコミット URL、またはリポジトリのルート URL や Repo: OWNER/REPO と同じ行か隣の行にある SHA を拾います。コードフェンス内と全ゼロ SHA は除外します。読めないリポジトリの名前は秘匿します。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python gh_identity.py pin-audit --require-merge-commit --include-markdown --repo OWNER/REPO"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "title": "🧭 コミットの分類",
+          "text": "commit-classify は first-parent に乗っているか、親の数、紐づく PR をまとめて返します。履歴の歩き方は first-parent の API と --exact だけで、新しい walker はありません。--exact の親の数は git cat-file、それ以外は API です。",
+          "blocks": [
+            {
+              "type": "output",
+              "text": "$ python gh_identity.py commit-classify OWNER/REPO SHA --exact --text"
+            }
+          ]
         }
       ]
     },

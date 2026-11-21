@@ -1308,6 +1308,258 @@ def test_first_parent_exact_local_remote(tmp_path):
     assert g.first_parent_check("me/up", main1, exact=True, remote_base=base)["contains"] is True
 
 
+def _words(args):
+    words, index = [], 0
+    while index < len(args):
+        if args[index] == "-c":
+            index += 2
+            continue
+        words.append(args[index])
+        index += 1
+    return words
+
+
+class DispatchGit:
+    def __init__(self, **kw):
+        self.calls, self.kw = [], kw
+
+    def __call__(self, args, cwd):
+        self.calls.append(list(args))
+        words = _words(args)
+        verb = words[0]
+        if verb == "init":
+            return self.kw.get("init", (0, b""))
+        if verb == "ls-remote":
+            return self.kw.get("ls", (0, b"ref: refs/heads/trunk\tHEAD\n" + M3.encode() + b"\tHEAD\n"))
+        if verb == "fetch":
+            return self.kw.get("fetch", (0, b""))
+        if verb == "rev-list":
+            return self.kw.get("rev", (0, (M3 + "\n").encode()))
+        if verb == "cat-file" and "-p" in words:
+            return self.kw.get("cat_p", (0, b"tree t\nparent a\nparent b\n\n"))
+        if verb == "cat-file":
+            return self.kw.get("cat_e", (0, b""))
+        return 0, b""
+
+
+def test_exact_git_failure_modes():
+    with pytest.raises(g.Error) as init_error:
+        g.first_parent_check("me/a", M3, exact=True, git_runner=DispatchGit(init=(1, b"")))
+    assert init_error.value.code == "git_failed"
+    with pytest.raises(g.Error) as fetch_error:
+        g.first_parent_check("me/a", M3, exact=True, git_runner=DispatchGit(fetch=(1, b"")))
+    assert fetch_error.value.code == "git_remote_unavailable"
+    with pytest.raises(g.Error) as rev_error:
+        g.first_parent_check("me/a", M3, exact=True, git_runner=DispatchGit(rev=(1, b"")))
+    assert rev_error.value.code == "git_failed"
+    with pytest.raises(TypeError):
+        g.first_parent_check("me/a", M3, exact=True, git_runner=object())
+    with pytest.raises(ValueError):
+        g.first_parent_check("me/a", M3, exact=True, remote_base="ssh://github.com/")
+    # Commit-not-found needs the branch fetch to succeed and the sha fetch to fail.
+
+    def staged(args, cwd):
+        words = _words(args)
+        if words[0] == "fetch" and not any("refs/heads/" in word for word in words):
+            return 1, b""
+        if words[0] == "cat-file":
+            return 1, b""
+        if words[0] == "ls-remote":
+            return 0, b"abc\tHEAD\n"
+        if words[0] == "rev-list":
+            return 0, b"\n"
+        return 0, b""
+
+    out = g.first_parent_check("me/a", M3, exact=True, git_runner=staged)
+    assert out["contains"] is False and out["reason"] == "commit_not_found" and out["branch"] == "main"
+    dev = DispatchGit()
+    assert g.first_parent_check("me/a", M3, exact=True, branch="dev", git_runner=dev)["contains"] is True
+    fetched = " ".join(" ".join(call) for call in dev.calls)
+    assert "refs/heads/dev" in fetched and "refs/heads/trunk" not in fetched
+    found = DispatchGit(cat_e=(1, b""), rev=(0, b"dddddddddddddddddddddddddddddddddddddddd\n"))
+    # sha fetch succeeds (default), object was absent, commit is not on the listed line
+    assert g.first_parent_check("me/a", M3, exact=True, git_runner=found)["contains"] is False
+    assert g._exact_parent_count("me/a", M3, remote="https://github.com/me/a", remote_base="https://github.com/",
+                                 git_runner=DispatchGit(cat_p=(0, b"tree t\nparent a\nparent b\nparent c\n\n")),
+                                 timeout=30) == 3
+    assert g._exact_parent_count("me/a", M3, remote=None, remote_base="https://github.com/",
+                                 git_runner=DispatchGit(cat_e=(1, b""), fetch=(1, b"")), timeout=30) is None
+    assert g._exact_parent_count("me/a", M3, remote="https://github.com/me/a", remote_base="https://github.com/",
+                                 git_runner=DispatchGit(cat_p=(1, b"")), timeout=30) is None
+    with pytest.raises(TypeError):
+        g._exact_parent_count("me/a", M3, remote="https://github.com/me/a", remote_base="https://github.com/",
+                              git_runner=object(), timeout=30)
+
+
+def _page(n=100):
+    rows = []
+    for index in range(n):
+        rows.append({"sha": f"{index:040x}", "parents": [{"sha": f"{index + 1:040x}"}]})
+    return rows
+
+
+def test_commit_classify_exact_local_and_missing_default(tmp_path):
+    up = tmp_path / "up"
+    up.mkdir()
+
+    def run(*args):
+        return subprocess.run(["git", "-C", str(up), "-c", "user.email=t@e", "-c", "user.name=t", *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    run("init", "-q", "-b", "main")
+    (up / "f").write_text("1\n")
+    run("add", "-A")
+    run("commit", "-qm", "root")
+    root = run("rev-parse", "HEAD")
+    run("switch", "-q", "-c", "pr")
+    (up / "g").write_text("2\n")
+    run("add", "-A")
+    run("commit", "-qm", "pr")
+    run("switch", "-q", "main")
+    run("merge", "-q", "--no-ff", "-m", "m", "pr")
+    merge = run("rev-parse", "HEAD")
+
+    def pulls(method, path, **kw):
+        if path.endswith("/pulls?per_page=100"):
+            return [{"number": 9, "merged_at": "t", "merge_commit_sha": merge,
+                     "head": {"sha": root}, "base": {"ref": "main"}}]
+        raise g.Error("not_found_or_inaccessible")
+
+    with g.request_stub(pulls):
+        out = g.commit_classify("me/a", " " + merge + " ", exact=True, remote=str(up), branch=" main ")
+    assert out["on_first_parent"] is True and out["parent_count"] == 2 and out["kind"] == "merge"
+    assert out["branch"] == "main" and out["pulls"][0]["is_merge_commit"] is True and out["pulls"][0]["is_head"] is False
+    with g.request_stub(pulls):
+        missing = g.commit_classify("me/a", "ab" * 20, exact=True, remote=str(up), branch="main")
+    assert missing["on_first_parent"] is False and missing["parent_count"] is None and missing["kind"] == "unknown"
+
+    def no_default(method, path, **kw):
+        if path == "repos/me/a":
+            return ["nope"]
+        if path.startswith("repos/me/a/commits?"):
+            return [{"sha": "1" * 40, "parents": []}]
+        if path == f"repos/me/a/commits/{merge}":
+            return {"parents": []}
+        if path.endswith("/pulls?per_page=100"):
+            return []
+        raise g.Error("not_found_or_inaccessible")
+
+    with g.request_stub(no_default):
+        odd = g.commit_classify("me/a", merge)
+    assert odd["branch"] is None and odd["parent_count"] == 0 and odd["kind"] == "root"
+    assert odd["on_first_parent"] is None
+
+
+def test_commit_classify_api_and_cli():
+    sha = "ab" * 20
+    pulls = [
+        {"number": 3, "state": "open", "merge_commit_sha": "ff" * 20, "head": {"sha": sha}, "base": {"ref": "dev"}},
+        {"number": None, "state": "closed"},
+        {"number": 1, "merged_at": "t", "merge_commit_sha": sha, "head": {"sha": "ee" * 20}, "base": {"ref": "main"}},
+    ]
+
+    def fake(method, path, **kw):
+        if path == "repos/me/r":
+            return {"default_branch": "  trunk  "}
+        if path.startswith("repos/me/r/commits?sha="):
+            return [ {"sha": sha, "parents": [{"sha": "1" * 40}, {"sha": "2" * 40}]} ] if path.endswith("page=1") else []
+        if path == f"repos/me/r/commits/{sha}":
+            return {"sha": sha, "parents": [{"sha": "1" * 40}]}
+        if path == f"repos/me/r/commits/{sha}/pulls?per_page=100":
+            return pulls
+        raise g.Error("not_found_or_inaccessible")
+
+    with g.request_stub(fake):
+        out = g.commit_classify("  me/r  ", "  " + sha + "  ", branch="   ")
+    assert out["repository"] == "me/r" and out["sha"] == sha and out["branch"] == "trunk"
+    assert out["on_first_parent"] is True and out["parent_count"] == 1 and out["kind"] == "squash_or_single"
+    assert [p["number"] for p in out["pulls"]] == [1, 3, None]
+    assert out["pulls"][0]["is_merge_commit"] is True and out["pulls"][0]["is_head"] is False
+    assert out["pulls"][1]["is_merge_commit"] is False and out["pulls"][1]["is_head"] is True
+    assert out["pulls"][2]["base_ref"] is None
+    assert out["write"] is False and out["schema"] == "gh-identity-commit-classify/1"
+    text = g.render_commit_classify(out)
+    assert "on_first_parent=yes" in text and "kind=squash_or_single" in text and "#1 merged" in text
+    assert "merge_commit=yes" in text and "head=yes" in text and "head=no" in text and "base=?" in text
+
+    def missing_branch(method, path, **kw):
+        if path == "repos/me/r":
+            return {"default_branch": "   "}
+        if path.startswith("repos/me/r/commits?sha="):
+            return _page()
+        if path == f"repos/me/r/commits/{sha}":
+            return {"parents": "nope"}
+        if path.endswith("/pulls?per_page=100"):
+            return []
+        raise g.Error("permission_or_rate_limit")
+
+    with g.request_stub(missing_branch):
+        truncated = g.commit_classify("me/r", sha, max_pages=1)
+    assert truncated["on_first_parent"] is None and truncated["branch"] is None
+    assert truncated["parent_count"] is None and truncated["kind"] == "unknown" and truncated["pulls"] == []
+    assert "on_first_parent=unknown" in g.render_commit_classify(truncated)
+    assert "branch=?" in g.render_commit_classify(truncated) and "parent_count=?" in g.render_commit_classify(truncated)
+
+    def not_dict(method, path, **kw):
+        if path == "repos/me/r":
+            return ["nope"]
+        if path.startswith("repos/me/r/commits?sha="):
+            return [{"sha": "1" * 40, "parents": []}]
+        if path == f"repos/me/r/commits/{sha}":
+            return ["nope"]
+        if path.endswith("/pulls?per_page=100"):
+            return []
+        raise g.Error("not_found_or_inaccessible")
+
+    with g.request_stub(not_dict):
+        odd = g.commit_classify("me/r", sha, branch="main")
+    assert odd["on_first_parent"] is False and odd["parent_count"] is None and odd["branch"] == "main"
+
+    def denied(method, path, **kw):
+        if path == f"repos/me/r/commits/{sha}":
+            raise g.Error("permission_or_rate_limit")
+        if path.startswith("repos/me/r/commits?sha=") or path == "repos/me/r":
+            return {"default_branch": "main"} if path == "repos/me/r" else []
+        raise g.Error("not_found_or_inaccessible")
+
+    with g.request_stub(denied), pytest.raises(g.Error) as denied_error:
+        g.commit_classify("me/r", sha)
+    assert denied_error.value.code == "permission_or_rate_limit"
+
+    def absent(method, path, **kw):
+        if path == "repos/me/r":
+            return {"default_branch": "main"}
+        if path.startswith("repos/me/r/commits?sha="):
+            return [{"sha": "1" * 40, "parents": []}]
+        if path == f"repos/me/r/commits/{sha}":
+            raise g.Error("not_found_or_inaccessible")
+        if path.endswith("/pulls?per_page=100"):
+            return []
+        raise g.Error("not_found_or_inaccessible")
+
+    with g.request_stub(absent):
+        assert g.commit_classify("me/r", sha)["parent_count"] is None
+    with pytest.raises(ValueError):
+        g.commit_classify("me/r", "  nope  ")
+    with pytest.raises(ValueError):
+        g.commit_classify("   ", sha)
+    proc = subprocess.run([sys.executable, str(Path(g.__file__)), "commit-classify", "me/r", "nope"],
+                          capture_output=True, text=True)
+    exact = subprocess.run([sys.executable, str(Path(g.__file__)), "commit-classify", "me/r", "nope", "--exact",
+                            "--branch", "  "], capture_output=True, text=True)
+    assert proc.returncode == 2 and exact.returncode == 2 and not proc.stdout and not exact.stdout
+    with g.request_stub(fake):
+        with contextlib.redirect_stdout(io.StringIO()) as text_out:
+            assert g.main(["commit-classify", "me/r", sha, "--text"]) == 0
+        assert "on_first_parent=yes" in text_out.getvalue()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            assert g.main(["commit-classify", " me/r ", " " + sha + " ", "--branch", " main "]) == 0
+    payload = json.loads(buffer.getvalue())
+    assert list(payload) == sorted(payload) and payload["kind"] == "squash_or_single"
+    assert payload["on_first_parent"] is True
+
+
 def test_cli_repo_identity():
     with g.request_stub(lambda m, p, **k: {"id": 1, "visibility": "public", "archived": False, "fork": False,
                                             "default_branch": "main", "owner": {"type": "User"}, "private": False}

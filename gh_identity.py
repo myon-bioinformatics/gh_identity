@@ -29,7 +29,7 @@ from collections import Counter; from datetime import datetime, timezone; from h
 # ---------------------------------------------------------------------------
 # Transport and budgets: request (gh first, urllib fallback), pagination, operation limits
 # ---------------------------------------------------------------------------
-API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
+API="https://api.github.com"; REPO=re.compile(r"^(?!\.{1,2}/)[\w.-]+/(?!\.{1,2}$)[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
 
@@ -5150,29 +5150,41 @@ def enrollment_progress(owner, *, provider="myon-bioinformatics/gh_identity", so
 _PIN_USES = re.compile(r"uses:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?P<path>/[^@\s'\"]*)?@(?P<sha>[0-9a-f]{40})\b")
 _PIN_CHECKOUT_REPO = re.compile(r"^\s+repository:\s*['\"]?(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)['\"]?\s*$")
 _PIN_CHECKOUT_REF = re.compile(r"^\s+ref:\s*['\"]?(?P<sha>[0-9a-f]{40})['\"]?\s*$")
+_MD_START = r"(?<![\w./@\\-])"
+_MD_NAME = r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
+_MD_REPO_END = r"(?![\w./@\\?#%=-])"
+_PIN_GITHUB_URL = rf"(?i:(?:https?://)?(?:www\.)?github\.com/){_MD_NAME}"
+_MD_GITHUB = rf"{_MD_START}{_PIN_GITHUB_URL}"
+_MD_COMMIT = r"(?P<sha>[0-9a-f]{40})(?![\w/\\-])"
+_MD_EXPLICIT = re.compile(rf"{_MD_START}{_MD_NAME}@{_MD_COMMIT}")
+_MD_COMMIT_URL = re.compile(rf"{_MD_GITHUB}/commit/{_MD_COMMIT}")
+_MD_SHA = re.compile(rf"{_MD_START}{_MD_COMMIT}")
+_MD_REPO = re.compile(rf"{_MD_START}(?i:repo(?:sitory)?):[ \t]*(?P<tick>`?){_MD_NAME}{_MD_REPO_END}(?P=tick)")
+_MD_URL = re.compile(rf"{_MD_GITHUB}/?{_MD_REPO_END}")
+_MD_QUOTE_PREFIX = re.compile(r"^(?:[ \t]*>[ \t]?)+")
+_MD_FENCE = re.compile(r"^[ \t]*(?P<item>(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
 PIN_JSON_GLOBS = ("vendor.lock.json", "**/vendor.lock.json", "**/publication.json", "**/parent-pr.ref.json",
                   "child-heads.json")
 
 
 def _pin_repo(value):
     value = value.strip()
-    if value.endswith(".git"):
-        value = value[:-4]
-    m = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$", value.replace("https://github.com/", ""))
-    if not m:
+    url = re.fullmatch(_PIN_GITHUB_URL, value)
+    value = (url["repo"] if url else value).removesuffix(".git")
+    if not value.isascii() or not REPO.fullmatch(value):
         raise ValueError("not an OWNER/REPO")
-    return m.group(1)
+    return value
 
 
 def _workflow_pins(path, text):
     pins, lines = [], text.splitlines()
     for number, line in enumerate(lines, 1):
         m = _PIN_USES.search(line)
-        if m:
+        if m and REPO.fullmatch(m["repo"]):
             pins.append({"repository": m["repo"], "commit": m["sha"], "file": path, "line": number,
                          "entry": m["repo"] + (m["path"] or ""), "paths": []})
         r = _PIN_CHECKOUT_REPO.match(line)
-        if r:
+        if r and REPO.fullmatch(r["repo"]):
             for later in range(number, min(number + 12, len(lines))):
                 ref = _PIN_CHECKOUT_REF.match(lines[later])
                 if ref:
@@ -5212,9 +5224,174 @@ class PinInputError(ValueError):
     """An audit input could not be read or decoded; message uses checkout-relative paths."""
 
 
-def collect_pins(root=".", json_globs=PIN_JSON_GLOBS):
+def _blank_to_none(value):
+    """Strip text inputs. None stays None; empty or whitespace-only becomes None (unset)."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _markdown_pin_file(rel):
+    """README.md at the checkout root, and any docs/**/*.md (posix, case-sensitive)."""
+    return rel == "README.md" or (rel.startswith("docs/") and rel.endswith(".md"))
+
+
+def _md_repo(value):
+    try:
+        return _pin_repo(value)
+    except ValueError:
+        return None
+
+
+def _markdown_qualifiers(line):
+    """(start, end, OWNER/REPO) for labelled names and GitHub repository root URLs."""
+    found = []
+    for pattern in (_MD_URL, _MD_REPO):
+        for match in pattern.finditer(line):
+            name = _md_repo(match.group("repo"))
+            if name:
+                found.append((match.start(), match.end(), name))
+    return found
+
+
+def _nearest_markdown_repo(qualifiers, index, sha_start, sha_end):
+    """Nearest qualifier on this line or the immediately previous/next line.
+
+    Distance is (line distance, character gap, line index, column). The same line
+    beats a neighbor. Equal gaps break toward the earlier line, then the earlier
+    column. A blank line is a real line and breaks adjacency.
+    """
+    best = None
+    for delta in (-1, 0, 1):
+        other = index + delta
+        if other < 0 or other >= len(qualifiers):
+            continue
+        for start, end, name in qualifiers[other]:
+            if end <= sha_start:
+                gap = sha_start - end
+            else:
+                gap = max(0, start - sha_end)
+            candidate = (abs(delta), gap, other, start, name)
+            if best is None or candidate < best:
+                best = candidate
+    return None if best is None else best[4]
+
+
+def _markdown_prose_lines(text):
+    """Blank out fenced code while preserving line numbers and adjacency."""
+    fence = None
+    fence_depth = item_indent = 0
+    for line in text.splitlines():
+        quote = _MD_QUOTE_PREFIX.match(line)
+        depth = quote[0].count(">") if quote else 0
+        content = line[quote.end():] if quote else line
+        if fence is not None and depth < fence_depth:
+            fence = None
+        if fence is not None and item_indent and depth == fence_depth:
+            expanded = content.expandtabs(4)
+            stripped = expanded.lstrip(" ")
+            if stripped and len(expanded) - len(stripped) < item_indent:
+                fence = None
+        match = _MD_FENCE.match(content)
+        if fence is None:
+            if not match or (match["marker"][0] == "`" and "`" in match["info"]):
+                yield line
+                continue
+            fence = match["marker"]
+            fence_depth = depth
+            item_indent = len(content[:match.start("marker")].expandtabs(4)) if match["item"] else 0
+        elif (depth == fence_depth and match and not match["item"]
+              and match["marker"].startswith(fence) and not match["info"].strip()):
+            fence = None
+        yield ""
+
+
+def _markdown_pins(path, text):
+    """Read explicit pins, GitHub commit URLs and SHAs next to a repository qualifier."""
+    lines = list(_markdown_prose_lines(text))
+    qualifiers = [_markdown_qualifiers(line) for line in lines]
+    zero = "0" * 40
+    found = []
+    for index, line in enumerate(lines):
+        for pattern in (_MD_EXPLICIT, _MD_COMMIT_URL):
+            for match in pattern.finditer(line):
+                sha = match["sha"]
+                name = _md_repo(match["repo"])
+                if name and sha != zero:
+                    found.append((index, match.start("sha"), name, sha))
+        for match in _MD_SHA.finditer(line):
+            sha = match["sha"]
+            if sha == zero:
+                continue
+            name = _nearest_markdown_repo(qualifiers, index, match.start(), match.end())
+            if name is None:
+                continue
+            found.append((index, match.start(), name, sha))
+    found.sort()
+    return [{"repository": name, "commit": sha, "file": path, "line": index + 1,
+             "entry": f"{name}@{sha}", "paths": []}
+            for index, _start, name, sha in found]
+
+
+def _parent_count_text(text):
+    """Count ``parent `` headers in a ``git cat-file -p`` commit. The blank line ends headers."""
+    count = 0
+    for line in text.splitlines():
+        if line == "":
+            break
+        if line.startswith("parent "):
+            count += 1
+    return count
+
+
+def _commit_kind(parent_count, *, single="single"):
+    """``merge`` for 2+ parents, the ``single`` name for one parent, ``root`` for zero, else ``unknown``."""
+    if parent_count is None:
+        return "unknown"
+    if parent_count >= 2:
+        return "merge"
+    if parent_count == 1:
+        return single
+    return "root"
+
+
+def _pin_result_state(*, present, ancestor, on_line, parent_count, require_merge, changed):
+    """Apply the parent-count requirement only to first-parent pins in strict mode."""
+    if not present or not ancestor:
+        return "unmerged"
+    if not on_line:
+        return "not_final"
+    if require_merge:
+        if parent_count is None:
+            return "unknown_parents"
+        if parent_count < 2:
+            return "not_merge"
+    if changed:
+        return "drift"
+    return "ok"
+
+
+def _selected_repos(repos):
+    """Normalized OWNER/REPO set from repeated inputs. Blank entries are unset. None if nothing remains."""
+    if not repos:
+        return None
+    selected = set()
+    for item in repos:
+        text = _blank_to_none(item)
+        if text is None:
+            continue
+        selected.add(repo(text))
+    return selected or None
+
+
+def collect_pins(root=".", json_globs=PIN_JSON_GLOBS, *, include_markdown=False):
     """Commit pins in a checkout: workflow `uses: OWNER/REPO@sha`, checkout `repository:`+`ref: sha`,
-    and JSON objects with `repository`+`commit` (vendor.lock.json, parent-pr.ref.json, ...)."""
+    and JSON objects with `repository`+`commit` (vendor.lock.json, parent-pr.ref.json, ...).
+
+    include_markdown also reads README.md and docs/**/*.md under the exact rule of ``_markdown_pins``.
+    Workflow files are unchanged: action SHAs come only from the workflow scanner.
+    """
     root = os.path.abspath(os.fspath(root))
     pins = []
     for directory, dirs, files in os.walk(root):
@@ -5231,79 +5408,119 @@ def collect_pins(root=".", json_globs=PIN_JSON_GLOBS):
                 elif name.endswith(".json") and any(fnmatch.fnmatch(rel, g) for g in json_globs):
                     with open(full, encoding="utf-8") as stream:
                         pins += _json_pins(rel, json.loads(stream.read(8 * 1024 * 1024)))
+                elif include_markdown and _markdown_pin_file(rel):
+                    with open(full, encoding="utf-8") as stream:
+                        pins += _markdown_pins(rel, stream.read(4 * 1024 * 1024))
             except (OSError, ValueError) as error:
-                reason = "read_error" if isinstance(error, OSError) else "invalid_json_or_encoding"
+                if isinstance(error, UnicodeDecodeError) and _markdown_pin_file(rel):
+                    reason = "read_error"
+                elif isinstance(error, OSError):
+                    reason = "read_error"
+                else:
+                    reason = "invalid_json_or_encoding"
                 raise PinInputError(f"{rel}: {reason}") from error
     return pins
 
 
-def _audit_repository(repository, items, remote, timeout):
-    """Check all pins of one repository in a temporary bare repository (blob-less full history).
-    Git never receives credentials: credential helpers are disabled for these calls."""
-    nocred = ["-c", "credential.helper=", "-c", "http.extraHeader="]
-    with tempfile.TemporaryDirectory(prefix="ghi-pin-audit-") as bare:
-        subprocess.run(["git", "init", "-q", "--bare", bare], check=True, capture_output=True, timeout=60)
-        def git(*args, ok=(0,)):
-            raw, _, code = _git_run(bare, [*nocred, *args], max_bytes=64 * 1024 * 1024, ok=ok, timeout=timeout)
-            return _git_decode(raw), code
-        head, _ = git("ls-remote", "--symref", "--", remote, "HEAD")
-        m = re.search(r"ref: refs/heads/(\S+)\s+HEAD", head)
-        branch = m.group(1) if m else "main"
-        git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, f"+refs/heads/{branch}:refs/heads/{branch}")
-        first_parent = git("rev-list", "--first-parent", branch)[0].split()
+def _audit_repository(repository, items, remote, timeout, *, require_merge=False, git_runner=None):
+    """Check all pins of one repository with the exact-git path of ``first_parent_check``.
+
+    The first-parent list comes from ``_exact_first_parent_lines`` (one walk).
+    Parent count is ``git cat-file -p`` on that same bare repository. Git never
+    receives credentials: the shared session disables credential helpers.
+    """
+    if git_runner is None:
+        git_runner = lambda args, cwd: _default_git_runner(args, cwd, timeout=timeout)
+    with _exact_git(git_runner) as git:
+        def run(*args, ok=(0,)):
+            code, out = git(*args)
+            if code not in ok:
+                raise Error("git_failed")
+            return out, code
+        branch = _exact_fetch_branch(git, remote, None)
+        first_parent = _exact_first_parent_lines(git, branch)
         tip = first_parent[0] if first_parent else None
         on_line = set(first_parent)
         rows = []
         for commit in sorted({p["commit"] for p in items}):
             pins = [p for p in items if p["commit"] == commit]
-            row = {"repository": repository, "commit": commit, "branch": branch, "pins": pins, "final": None}
-            if git("cat-file", "-e", commit + "^{commit}", ok=(0, 1, 128))[1] != 0:
-                if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, commit, ok=(0, 1, 128))[1] != 0:
-                    rows.append({**row, "state": "unmerged", "detail": "commit not found on the remote"})
-                    continue
-            if git("merge-base", "--is-ancestor", commit, branch, ok=(0, 1))[1] != 0:
+            row = {"repository": repository, "commit": commit, "branch": branch, "pins": pins, "final": None,
+                   "parent_count": None, "kind": "unknown"}
+            present = _exact_has_commit(git, remote, commit)
+            if present:
+                code, text = git("cat-file", "-p", commit)
+                if code == 0:
+                    row["parent_count"] = _parent_count_text(text)
+                row["kind"] = _commit_kind(row["parent_count"])
+            if not present:
+                rows.append({**row, "state": "unmerged", "detail": "commit not found on the remote"})
+                continue
+            if run("merge-base", "--is-ancestor", commit, branch, ok=(0, 1))[1] != 0:
                 rows.append({**row, "state": "unmerged", "detail": f"not reachable from {branch}"})
                 continue
-            since = int(git("rev-list", "--count", f"{commit}..{branch}")[0].strip() or 0)
+            since_text = run("rev-list", "--count", f"{commit}..{branch}")[0].strip()
+            since = int(since_text or "0")
             if commit not in on_line:
-                descendants = set(git("rev-list", "--ancestry-path", f"{commit}..{branch}")[0].split())
+                descendants = set(run("rev-list", "--ancestry-path", f"{commit}..{branch}")[0].split())
                 merge = next((c for c in reversed(first_parent) if c in descendants), tip)
                 rows.append({**row, "state": "not_final", "final": merge, "since": since,
                              "detail": "merged; pin the first-parent merge commit instead"})
                 continue
             paths = sorted({p for pin in pins for p in pin["paths"] if isinstance(p, str)})
-            changed = git("diff", "--name-only", commit, branch, "--", *paths)[0].split() if paths else []
-            rows.append({**row, "state": "drift" if changed else "ok", "since": since, "changed": changed[:20],
-                         "detail": f"{len(changed)} pinned file(s) changed on {branch}" if changed else f"+{since} on {branch}"})
+            changed = run("diff", "--name-only", commit, branch, "--", *paths)[0].split() if paths else []
+            state = _pin_result_state(present=True, ancestor=True, on_line=True, parent_count=row["parent_count"],
+                                      require_merge=require_merge, changed=bool(changed))
+            if state == "not_merge":
+                detail = f"on {branch} first-parent but parent_count={row['parent_count']} is not a 2-parent merge"
+            elif state == "unknown_parents":
+                detail = f"on {branch} first-parent but parent count could not be determined"
+            elif state == "drift":
+                detail = f"{len(changed)} pinned file(s) changed on {branch}"
+            else:
+                detail = f"+{since} on {branch}"
+            rows.append({**row, "state": state, "since": since, "changed": changed[:20], "detail": detail})
         return rows
 
 
-def pin_audit(root=".", *, json_globs=PIN_JSON_GLOBS, only_owners=None, remote_base="https://github.com/", timeout=300):
+def pin_audit(root=".", *, json_globs=PIN_JSON_GLOBS, only_owners=None, remote_base="https://github.com/",
+              timeout=300, require_merge=False, include_markdown=False, repos=None):
     """Audit commit pins of a checkout with plain git against public remotes (no API token).
 
     States: ok, drift (pinned files changed on the default branch), not_final
     (merged but not on the default branch first-parent line: a PR head was
-    pinned; `final` is the merge commit to pin), unmerged, unavailable. A
-    repository that cannot be fetched without credentials is reported without
-    its name (it may be private).
+    pinned; `final` is the merge commit to pin), unmerged, unavailable.
+    With require_merge, a pin that is on the first-parent line but has
+    parent_count < 2 is `not_merge`; a missing count is `unknown_parents`.
+    A repository that cannot be fetched without credentials is reported without its name.
+
+    repos, when set, limits the audit to those OWNER/REPO pins. Blank entries
+    are unset. include_markdown adds README.md and docs/**/*.md (see ``_markdown_pins``).
+    Each result includes parent_count and kind (merge for 2+ parents, single, root, unknown).
     """
     if not isinstance(remote_base, str) or not remote_base.startswith(("https://", "file://", "/")):
         raise ValueError("remote_base must be https://, file:// or an absolute path")
-    pins = collect_pins(root, tuple(json_globs))
+    pins = collect_pins(root, tuple(json_globs), include_markdown=include_markdown)
     if only_owners:
-        pins = [p for p in pins if p["repository"].split("/")[0] in set(only_owners)]
+        owners = set(only_owners)
+        pins = [p for p in pins if p["repository"].split("/")[0] in owners]
+    selected = _selected_repos(repos)
+    if selected is not None:
+        pins = [p for p in pins if p["repository"] in selected]
     by_repo = {}
     for p in pins:
         by_repo.setdefault(p["repository"], []).append(p)
     rows, redacted = [], 0
     for repository in sorted(by_repo):
         try:
-            rows += _audit_repository(repository, by_repo[repository], remote_base + repository, timeout)
-        except (GitInspectionError, subprocess.SubprocessError, OSError):
+            rows += _audit_repository(repository, by_repo[repository], remote_base + repository, timeout,
+                                      require_merge=require_merge)
+        except (GitInspectionError, subprocess.SubprocessError, Error, OSError):
             redacted += 1
             for p in by_repo[repository]:
-                rows.append({"repository": None, "commit": None, "branch": None, "final": None, "state": "unavailable",
-                             "pins": [{"file": p["file"], "line": p["line"]}], "detail": "remote not readable without credentials"})
+                rows.append({"repository": None, "commit": None, "branch": None, "final": None,
+                             "parent_count": None, "kind": "unknown", "state": "unavailable",
+                             "pins": [{"file": p["file"], "line": p["line"]}],
+                             "detail": "remote not readable without credentials"})
     counts = dict(Counter(r["state"] for r in rows))
     return {"schema": "gh-identity-pin-audit/1", "write": False, "pins": len(pins), "results": rows,
             "counts": counts, "redacted": redacted, "ok": all(r["state"] == "ok" for r in rows)}
@@ -5316,7 +5533,9 @@ def render_pin_audit(o):
         more = f" +{len(where) - 2} more" if len(where) > 2 else ""
         name = f"{r['repository']}@{r['commit'][:7]}" if r["repository"] else "(redacted)"
         final = f" -> {r['final']}" if r.get("final") else ""
-        lines.append(f"{r['state']} {name}{final} {r['detail']}  [{len(r['pins'])} pin(s): {', '.join(where[:2])}{more}]")
+        parents = "?" if r.get("parent_count") is None else str(r["parent_count"])
+        extra = f" {r['kind']}/{parents}"
+        lines.append(f"{r['state']} {name}{final}{extra} {r['detail']}  [{len(r['pins'])} pin(s): {', '.join(where[:2])}{more}]")
     lines.append(f"pins={o['pins']} " + " ".join(f"{k}={v}" for k, v in sorted(o["counts"].items())))
     return "\n".join(lines)
 
@@ -6199,13 +6418,111 @@ def _validate_remote(remote):
     return remote
 
 
+def _remote_for(repository, remote, remote_base):
+    """Full remote URL or absolute path. Credentials and option-like values are rejected."""
+    if remote is None:
+        if not isinstance(remote_base, str) or not remote_base.startswith(("https://", "file://", "/")):
+            raise ValueError("remote_base must be https://, file:// or an absolute path")
+        remote = remote_base + repository
+    return _validate_remote(remote)
+
+
+@contextlib.contextmanager
+def _exact_git(git_runner):
+    """Bare repository whose git(*args) -> (code, text) never receives credentials.
+
+    This is the exact-git session shared by ``first_parent_check`` and pin-audit.
+    """
+    with tempfile.TemporaryDirectory(prefix="ghi-fp-") as bare:
+        def git(*args):
+            code, out = git_runner([*_GIT_NO_CREDENTIALS, *args], bare)
+            return code, (out or b"").decode("utf-8", "replace")
+        if git("init", "-q", "--bare")[0] != 0:
+            raise Error("git_failed")
+        yield git
+
+
+def _exact_fetch_branch(git, remote, branch):
+    """Resolve the default branch (unless branch is set) and fetch it blob-less. Returns the branch name."""
+    code, head = git("ls-remote", "--symref", "--", remote, "HEAD")
+    if code != 0:
+        raise Error("git_remote_unavailable")
+    matched = re.search(r"ref: refs/heads/(\S+)\s+HEAD", head)
+    branch = branch or (matched.group(1) if matched else "main")
+    if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote,
+           f"+refs/heads/{branch}:refs/heads/{branch}")[0] != 0:
+        raise Error("git_remote_unavailable")
+    return branch
+
+
+def _exact_has_commit(git, remote, commit):
+    """True when the commit object is present, fetching that one SHA if the branch fetch missed it."""
+    if git("cat-file", "-e", commit + "^{commit}")[0] == 0:
+        return True
+    return git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, commit)[0] == 0
+
+
+def _exact_first_parent_lines(git, branch):
+    """SHAs on ``refs/heads/<branch>`` first-parent history, newest first. The one walker."""
+    code, listed = git("rev-list", "--first-parent", f"refs/heads/{branch}")
+    if code != 0:
+        raise Error("git_failed")
+    return listed.split()
+
+
+def _exact_parent_count(repository, sha, *, remote, remote_base, git_runner, timeout):
+    """Parent count via ``git cat-file -p`` (exact mode). None when the object cannot be read."""
+    remote = _remote_for(repository, remote, remote_base)
+    if git_runner is None:
+        git_runner = lambda args, cwd: _default_git_runner(args, cwd, timeout=timeout)
+    if not callable(git_runner):
+        raise TypeError("git_runner must be callable")
+    with _exact_git(git_runner) as git:
+        if not _exact_has_commit(git, remote, sha):
+            return None
+        code, text = git("cat-file", "-p", sha)
+        if code != 0:
+            return None
+        return _parent_count_text(text)
+
+
+def _api_parent_count(repository, sha, *, transport, timeout):
+    """Parent count from the commits API. None when the commit is missing or the body has no parent list."""
+    try:
+        row = request("GET", f"repos/{repository}/commits/{sha}", transport=transport, timeout=timeout)
+    except Error as error:
+        if error.code == "not_found_or_inaccessible":
+            return None
+        raise
+    if not isinstance(row, dict):
+        return None
+    parents = row.get("parents")
+    if not isinstance(parents, list):
+        return None
+    return len(parents)
+
+
+def _classify_pull_rows(pulls, sha):
+    """Pull rows for commit-classify, sorted by number (non-integers last)."""
+    rows = []
+    for pull in pulls:
+        number = pull.get("number")
+        rows.append({"number": number, "state": pull.get("state"),
+                     "is_merge_commit": pull.get("merge_commit_sha") == sha,
+                     "is_head": pull.get("head_sha") == sha,
+                     "base_ref": pull.get("base_ref")})
+    rows.sort(key=lambda item: (0, item["number"]) if isinstance(item["number"], int) else (1, 0))
+    return rows
+
+
 def first_parent_check(repository, commit, *, branch=None, exact=False, transport="auto", timeout=30,
                        max_pages=10, remote_base="https://github.com/", remote=None, git_runner=None):
     """Whether `commit` is on the default-branch (or `branch`) first-parent history.
 
     exact=False uses the commits API (may return None when history is longer than
     max_pages). exact=True uses a temporary bare fetch with --filter=blob:none and
-    credential helpers disabled; True/False only.
+    credential helpers disabled; True/False only. Both modes share no other walker:
+    API history is ``_first_parent_contains``; exact history is ``_exact_first_parent_lines``.
 
     remote: full remote URL/path (default remote_base + repository). URLs carrying
     credentials are rejected; tokens never appear in git arguments.
@@ -6220,11 +6537,7 @@ def first_parent_check(repository, commit, *, branch=None, exact=False, transpor
         result = _first_parent_contains(r, commit, branch=branch, transport=transport, timeout=timeout, max_pages=max_pages)
         return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
                 "branch": branch, "exact": False, "contains": result, "reason": None if result is not None else "history_truncated"}
-    if remote is None:
-        if not isinstance(remote_base, str) or not remote_base.startswith(("https://", "file://", "/")):
-            raise ValueError("remote_base must be https://, file:// or an absolute path")
-        remote = remote_base + r
-    remote = _validate_remote(remote)
+    remote = _remote_for(r, remote, remote_base)
     if branch is not None and (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or branch.startswith("-")):
         raise ValueError("invalid branch")
     if git_runner is None:
@@ -6234,27 +6547,65 @@ def first_parent_check(repository, commit, *, branch=None, exact=False, transpor
     def result(contains, reason, branch):
         return {"schema": "gh-identity-first-parent/1", "write": False, "repository": r, "commit": commit,
                 "branch": branch, "exact": True, "contains": contains, "reason": reason}
-    with tempfile.TemporaryDirectory(prefix="ghi-fp-") as bare:
-        def git(*args):
-            code, out = git_runner([*_GIT_NO_CREDENTIALS, *args], bare)
-            return code, (out or b"").decode("utf-8", "replace")
-        if git("init", "-q", "--bare")[0] != 0:
-            raise Error("git_failed")
-        code, head = git("ls-remote", "--symref", "--", remote, "HEAD")
-        if code != 0:
-            raise Error("git_remote_unavailable")
-        m = re.search(r"ref: refs/heads/(\S+)\s+HEAD", head)
-        branch = branch or (m.group(1) if m else "main")
-        if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote,
-               f"+refs/heads/{branch}:refs/heads/{branch}")[0] != 0:
-            raise Error("git_remote_unavailable")
-        if git("cat-file", "-e", commit + "^{commit}")[0] != 0:
-            if git("fetch", "-q", "--no-tags", "--filter=blob:none", "--", remote, commit)[0] != 0:
-                return result(False, "commit_not_found", branch)
-        code, listed = git("rev-list", "--first-parent", f"refs/heads/{branch}")
-        if code != 0:
-            raise Error("git_failed")
-        return result(commit in set(listed.split()), None, branch)
+    with _exact_git(git_runner) as git:
+        branch = _exact_fetch_branch(git, remote, branch)
+        if not _exact_has_commit(git, remote, commit):
+            return result(False, "commit_not_found", branch)
+        lines = _exact_first_parent_lines(git, branch)
+        return result(commit in set(lines), None, branch)
+
+
+def commit_classify(repository, sha, *, branch=None, exact=False, transport="auto", timeout=30,
+                    max_pages=10, remote_base="https://github.com/", remote=None, git_runner=None):
+    """Classify one commit: first-parent membership, parent count, and associated pulls.
+
+    Composes ``first_parent_check`` and ``commit_pulls``. There is no second
+    first-parent walker. Parent count is ``git cat-file -p`` when exact=True and
+    the commits API otherwise. ``on_first_parent`` is null when the API walk is
+    truncated. ``kind`` is merge (2+ parents), squash_or_single (1), root (0),
+    or unknown. Pulls are sorted by number. Read-only.
+
+    Text inputs are stripped; empty or whitespace-only branch is unset (the
+    default branch). repository and sha are required.
+    """
+    repository = repo(_blank_to_none(repository) or "")
+    sha = _blank_to_none(sha)
+    branch = _blank_to_none(branch)
+    if not _is_sha(sha):
+        raise ValueError("sha must be 40 hex")
+    if not exact and branch is None:
+        info = request("GET", f"repos/{repository}", transport=transport, timeout=timeout)
+        if isinstance(info, dict):
+            found = info.get("default_branch")
+            if isinstance(found, str) and found.strip():
+                branch = found.strip()
+    checked = first_parent_check(repository, sha, branch=branch, exact=exact, transport=transport,
+                                 timeout=timeout, max_pages=max_pages, remote_base=remote_base,
+                                 remote=remote, git_runner=git_runner)
+    if exact:
+        parent_count = _exact_parent_count(repository, sha, remote=remote, remote_base=remote_base,
+                                           git_runner=git_runner, timeout=timeout)
+    else:
+        parent_count = _api_parent_count(repository, sha, transport=transport, timeout=timeout)
+    pulls = commit_pulls(repository, sha, transport=transport, timeout=timeout)["pulls"]
+    resolved = checked.get("branch") or branch
+    return {"schema": "gh-identity-commit-classify/1", "write": False, "repository": repository, "sha": sha,
+            "branch": resolved, "on_first_parent": checked["contains"], "parent_count": parent_count,
+            "kind": _commit_kind(parent_count, single="squash_or_single"),
+            "pulls": _classify_pull_rows(pulls, sha)}
+
+
+def render_commit_classify(o):
+    shown = {True: "yes", False: "no", None: "unknown"}[o["on_first_parent"]]
+    parents = "?" if o["parent_count"] is None else str(o["parent_count"])
+    lines = [f"{o['repository']}@{o['sha']} branch={o['branch'] or '?'} on_first_parent={shown} "
+             f"parent_count={parents} kind={o['kind']}"]
+    for pull in o["pulls"]:
+        base = pull["base_ref"] or "?"
+        lines.append(f"#{pull['number']} {pull['state']} base={base} "
+                     f"merge_commit={'yes' if pull['is_merge_commit'] else 'no'} "
+                     f"head={'yes' if pull['is_head'] else 'no'}")
+    return "\n".join(lines)
 
 
 
@@ -7081,12 +7432,13 @@ def _cli_parser():
  x=s.add_parser("vendor-matrix",help="who vendors whom at which commit across repositories (read-only)");x.add_argument("owner");x.add_argument("--repos",help="comma-separated repository names (default: all non-archived)");x.add_argument("--lock-path",action="append",metavar="PATH");x.add_argument("--heads",help="child-heads.json: read locks at the recorded commits")
  x=s.add_parser("enrollment-progress",help="per public consumer: provider file in vendor lock, pin, stale, first-parent (read-only)");x.add_argument("--owner",required=True);x.add_argument("--provider",default="myon-bioinformatics/gh_identity");x.add_argument("--source",default="gh_identity.py");x.add_argument("--repos");x.add_argument("--heads");x.add_argument("--include-forks",action="store_true")
  x=s.add_parser("duplicate-files",help="same basename across an owner's repositories, with vendor-lock provenance (read-only)");x.add_argument("--owner",required=True);x.add_argument("--repos",help="comma-separated names (default: public, non-archived, non-fork repos owned by --owner)");x.add_argument("--ignore",action="append",default=[],metavar="GLOB",help="additional basename/path patterns to ignore");x.add_argument("--no-default-ignore",action="store_true");x.add_argument("--include-forks",action="store_true");x.add_argument("--min-repos",type=int,default=2);x.add_argument("--heads",help="child-heads.json: scan the recorded commits");x.add_argument("--markdown",action="store_true",help="Markdown summary (for GITHUB_STEP_SUMMARY) instead of JSON");x.add_argument("--top",type=int,default=30,help="groups shown with --markdown")
- x=s.add_parser("pin-audit",help="audit commit pins (workflows, vendor locks, parent-pr.ref.json) with plain git: ok/drift/not_final/unmerged (read-only, no token)");x.add_argument("--root",default=".");x.add_argument("--json",action="append",dest="json_globs",metavar="GLOB");x.add_argument("--only",action="append",metavar="OWNER");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true",help="one line per pinned commit")
+ x=s.add_parser("pin-audit",help="audit commit pins (workflows, vendor locks, parent-pr.ref.json; optional markdown) with plain git (read-only, no token)");x.add_argument("--root",default=".");x.add_argument("--json",action="append",dest="json_globs",metavar="GLOB");x.add_argument("--only",action="append",metavar="OWNER");x.add_argument("--repo",action="append",default=None,metavar="OWNER/REPO",help="only pins of these repositories (repeatable; blank is unset)");x.add_argument("--require-merge-commit",action="store_true",help="require at least two known parents for first-parent pins");x.add_argument("--include-markdown",action="store_true",help="also read README.md and docs/**/*.md for explicitly qualified pins");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true",help="one line per pinned commit")
  x=s.add_parser("repo-identity",help="public repository id, visibility, default branch, head SHA (read-only)");x.add_argument("repository")
  x=s.add_parser("owner-repositories",help="public repositories of a user or org (read-only; no hard-coded names)");x.add_argument("owner");x.add_argument("--kind",choices=("auto","user","org"),default="auto");x.add_argument("--include-forks",action="store_true");x.add_argument("--include-archived",action="store_true")
  x=s.add_parser("pr-identity",help="PR state, head/base SHAs, merge_commit_sha, repository_id (read-only)");x.add_argument("repository");x.add_argument("number",type=int)
  x=s.add_parser("commit-pulls",help="pull requests associated with a commit (read-only)");x.add_argument("repository");x.add_argument("sha")
  x=s.add_parser("first-parent",help="is commit on the default-branch first-parent history (API or exact git)");x.add_argument("repository");x.add_argument("commit");x.add_argument("--branch");x.add_argument("--exact",action="store_true",help="blob-less bare fetch (True/False only)");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300)
+ x=s.add_parser("commit-classify",help="classify a commit: first-parent, parent count, associated pulls (read-only)");x.add_argument("repository");x.add_argument("sha");x.add_argument("--branch",help="default branch when omitted or blank");x.add_argument("--exact",action="store_true",help="blob-less bare fetch for first-parent and parent count");x.add_argument("--remote-base",default="https://github.com/");x.add_argument("--git-timeout",type=float,default=300);x.add_argument("--text",action="store_true")
  x=s.add_parser("repo-metadata",help="checkout repository metadata (v2 minimal, or v1 compatibility)");x.add_argument("--root",default=".");x.add_argument("--repository",default=os.environ.get("GITHUB_REPOSITORY"));x.add_argument("--format",choices=("v2","v1"),default="v2");x.add_argument("--source-sha");x.add_argument("--expected-sha");x.add_argument("--generated-at");x.add_argument("--tool",action="append",default=[],metavar="NAME",help="v1 only: observe an allowlisted tool version (python, git, gh, node, npm, npx)");x.add_argument("--output-dir")
  x=s.add_parser("repo",help="one repository: licence (SPDX), stars, forks, topics, language, dates; --include adds health, fork-diff, languages, contributors, community, releases");x.add_argument("repo");x.add_argument("--include",action="append",default=[],choices=("all",)+REPO_INCLUDES,metavar="SECTION",help="repeatable; extra sections (extra requests): all "+" ".join(REPO_INCLUDES));x.add_argument("--stale-days",type=int,default=365,help="health: days without a push before status is stale");x.add_argument("--text",action="store_true")
  x=s.add_parser("releases",help="newest releases (with assets) and tags of one repository (read-only)");x.add_argument("repo");x.add_argument("--limit",type=int,default=10);x.add_argument("--text",action="store_true")
@@ -7190,7 +7542,8 @@ def _main(argv=None):
   elif ns.cmd=="pr-identity":o=pr_identity(ns.repository,ns.number,transport=transport)
   elif ns.cmd=="commit-pulls":o=commit_pulls(ns.repository,ns.sha,transport=transport)
   elif ns.cmd=="first-parent":o=first_parent_check(ns.repository,ns.commit,branch=ns.branch,exact=ns.exact,transport=transport,timeout=ns.git_timeout if ns.exact else 30,remote_base=ns.remote_base)
-  elif ns.cmd=="pin-audit":o=pin_audit(ns.root,json_globs=tuple(ns.json_globs) if ns.json_globs else PIN_JSON_GLOBS,only_owners=ns.only,remote_base=ns.remote_base,timeout=ns.git_timeout)
+  elif ns.cmd=="commit-classify":o=commit_classify(ns.repository,ns.sha,branch=ns.branch,exact=ns.exact,transport=transport,timeout=ns.git_timeout if ns.exact else 30,remote_base=ns.remote_base)
+  elif ns.cmd=="pin-audit":o=pin_audit(ns.root,json_globs=tuple(ns.json_globs) if ns.json_globs else PIN_JSON_GLOBS,only_owners=ns.only,remote_base=ns.remote_base,timeout=ns.git_timeout,require_merge=ns.require_merge_commit,include_markdown=ns.include_markdown,repos=ns.repo)
   elif ns.cmd=="vendor-lock-check":o=vendor_lock_check(ns.root,ns.lock,ns.rules,ns.parent_ref)
   elif ns.cmd=="vendor-lock-verify-remote":o=vendor_lock_verify_remote(ns.root,ns.lock,upstream=ns.upstream,first_parent=ns.first_parent,check_parent_ref=ns.check_parent_ref,parent_ref=ns.parent_ref,transport=transport)
   elif ns.cmd=="vendor-plan":o=vendor_plan(ns.root,ns.candidate,ns.rules,transport=transport)
@@ -7289,6 +7642,8 @@ def _main(argv=None):
  elif ns.cmd=="releases" and ns.text:print(render_releases(o))
  elif ns.cmd in ("vendor-lock-check","vendor-lock-verify-remote") and ns.markdown:print(render_vendor_markdown(o))
  elif ns.cmd=="pin-audit" and ns.text:print(render_pin_audit(o))
+ elif ns.cmd=="commit-classify" and ns.text:print(render_commit_classify(o))
+ elif ns.cmd=="commit-classify":print(json.dumps(o,ensure_ascii=False,sort_keys=True))
  elif ns.cmd=="merge-preview" and ns.text:print(render_merge_preview(o))
  elif ns.cmd=="merge-trial" and ns.text:print(render_merge_trial(o))
  elif ns.cmd=="git-activity" and ns.text:print(render_git_activity(o))
@@ -7362,7 +7717,7 @@ for _name in ("_gh","_url","request","pages","repository","repositories","reposi
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
               "resolve_ref","tree","source_identity","remote_file","get","checks_for_sha","observe_pr","workflow","workflows","run","jobs","job_log","failed_job_logs","artifacts","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
-               "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","repo_name_files"):
+               "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","commit_classify","repo_name_files"):
  globals()[_name]=_bounded(globals()[_name])
 # Capture the final bounded function, so injected request replacements are respected.
 _DEFAULT_REQUEST = request

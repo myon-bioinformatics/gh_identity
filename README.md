@@ -1072,28 +1072,69 @@ provider's first-parent history.
 ## Pin audit (`pin-audit`)
 
 ```bash
-python gh_identity.py pin-audit [--root .] [--json GLOB ...] [--only OWNER] [--remote-base https://github.com/] [--text]
+python gh_identity.py pin-audit [--root .] [--json GLOB ...] [--only OWNER] [--repo OWNER/REPO ...] \
+  [--require-merge-commit] [--include-markdown] [--remote-base https://github.com/] [--text]
 ```
 
 Read-only. Collects commit pins from workflow `uses: OWNER/REPO@sha` and
 checkout `repository:`+`ref:`, and from JSON objects with `repository`+`commit`
 (vendor.lock.json, parent-pr.ref.json, child-heads.json, publication.json).
-Each distinct (repository, commit) is checked with plain git against the public
-remote (no API token; credential helpers disabled): a temporary bare repository
-fetches the default branch with `--filter=blob:none` (full history, no file
-contents — a shallow fetch cannot prove ancestry). States:
+Each distinct (repository, commit) is checked with the same credential-free
+exact git path as `first-parent --exact` (one first-parent walk per repository,
+not a second walker): a temporary bare repository fetches the default branch
+with `--filter=blob:none` (full history, no file contents — a shallow fetch
+cannot prove ancestry). Parent count is `git cat-file -p` on that repository.
+Every result includes `parent_count` and `kind`: `merge` (2 or more parents),
+`single` (one parent), `root` (zero), or `unknown`.
+
+States:
 
 * `ok`        on the default-branch first-parent line (`+N` since the pin);
 * `not_final` merged, but a PR head was pinned — `final` is the merge commit to pin;
 * `drift`     pinned source files differ between the pin and the default-branch tip;
+* `not_merge` with `--require-merge-commit` when a first-parent pin has fewer than two parents (a squash or other single-parent commit, or the root);
+* `unknown_parents` with `--require-merge-commit` when the parent count of a first-parent pin cannot be determined;
 * `unmerged`  not reachable from the default branch;
 * `unavailable` the remote could not be read without credentials (name redacted).
 
-Exit 0 when every pin is `ok`, 1 when a pin needs attention, and 2 for input
-errors. Malformed or unreadable selected JSON fails with its checkout-relative
-filename; unrelated JSON is ignored and valid inputs with no pins succeed.
+`--require-merge-commit` does not change the default. Without it, a squash-style
+single-parent commit or a commit with an unknown parent count on the
+first-parent line is still `ok` or `drift`.
+`--repo OWNER/REPO` (repeatable) limits the audit to those repositories. Values
+are stripped; a blank value is unset and ignored. `--only OWNER` still filters
+by owner and combines with `--repo`.
+
+`--include-markdown` also reads `README.md` (checkout root only) and
+`docs/**/*.md`. Use 40 lowercase hex digits in one of these forms:
+
+1. A standalone `OWNER/REPO@SHA` or a GitHub commit URL such as
+   `https://github.com/OWNER/REPO/commit/SHA`.
+2. A standalone SHA on the same or immediately adjacent line as
+   `Repo: OWNER/REPO`, `Repository: OWNER/REPO`, or a GitHub repository root
+   URL. The closest qualifier on the same line wins, followed by a qualifier
+   on an adjacent line. Equal distances prefer the earlier line, then the
+   earlier column. A blank line breaks adjacency.
+
+Matching skips fenced code, all-zero SHAs, ordinary paths such as `docs/guide.md`,
+and issue or pull request URLs. A trailing `.git` on the repository name is
+stripped. Both name segments must differ from `.` and `..`. Action `uses:` pins
+are collected by the workflow scanner.
+
+Exit 0 when every pin is `ok`, 1 when a pin needs attention (including
+`not_merge` and `unknown_parents`),
+and 2 for input errors. Malformed or unreadable selected JSON fails with its
+checkout-relative filename; unrelated JSON is ignored and valid inputs with no
+pins succeed. A selected markdown file that cannot be decoded fails the same way.
 Generic: any repository. Parent-specific
 lock / catalog / materialize / auto-fix stay in the parent `vendor_sync.py`.
+
+日本語の要点: `pin-audit` は読み取り専用です。各結果に `parent_count` と `kind`
+（`merge` / `single` / `root` / `unknown`）が付きます。`--require-merge-commit`
+を付けると、first-parent 上で親が 2 未満のピンは `not_merge`、親数が不明なピンは
+`unknown_parents` になり、終了コードは 1 です。`--include-markdown` はルートの
+`README.md` と `docs/**/*.md` を読みます。`OWNER/REPO@SHA`、GitHub のコミット URL、
+またはリポジトリのルート URL や `Repo: OWNER/REPO` と同じ行か隣の行にある SHA が
+対象です。Git で読めないリポジトリの名前は秘匿します。
 
 ## GitHub identity (`repo-identity`, `owner-repositories`, `pr-identity`, `commit-pulls`, `first-parent`)
 
@@ -1103,6 +1144,7 @@ python gh_identity.py owner-repositories OWNER [--kind auto|user|org] [--include
 python gh_identity.py pr-identity OWNER/REPO NUMBER
 python gh_identity.py commit-pulls OWNER/REPO SHA
 python gh_identity.py first-parent OWNER/REPO SHA [--exact] [--branch main]
+python gh_identity.py commit-classify OWNER/REPO SHA [--branch main] [--exact] [--text]
 ```
 
 Read-only, generic (no hard-coded repository names). Public archived repositories
@@ -1121,6 +1163,21 @@ accepts `remote=` (full URL or absolute path; URLs with credentials are rejected
 and `git_runner(args, cwd) -> (returncode, stdout)` so callers can run git with their
 own sanitized subprocess or an offline double. Arguments always start with
 `-c credential.helper= -c core.askPass= -c http.extraHeader=`; no token is ever passed to git.
+`pin-audit` uses that same exact-git session for its one first-parent walk.
+
+`commit-classify` composes `first_parent_check` and `commit_pulls` (it does not
+walk history itself). JSON is sorted and stable. Fields: `repository`, `sha`,
+`branch`, `on_first_parent` (`null` when the API walk is truncated), `parent_count`,
+`kind` (`merge` for 2+ parents, `squash_or_single` for one, `root` for zero,
+`unknown` otherwise), and `pulls` sorted by number. Each pull has `number`,
+`state`, `is_merge_commit` (`sha == merge_commit_sha`), `is_head` (`sha == head_sha`),
+and `base_ref`. `--exact` uses `git cat-file -p` for the parent count; without it
+the commits API is used. Text inputs are stripped; a blank `--branch` is unset
+and the default branch is used. `--text` prints one block instead of JSON.
+
+日本語: `commit-classify` は first-parent 判定と、そのコミットに紐づく PR を
+まとめて返します。履歴の歩き方は `first-parent` の API / `--exact` の二通りだけで、
+別の walker は作りません。親の数は `--exact` なら `git cat-file`、それ以外は API です。
 
 ## Repository metadata (`repo-metadata`)
 
