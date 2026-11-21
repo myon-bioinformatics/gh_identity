@@ -1357,6 +1357,21 @@ python gh_identity.py artifact-file OWNER/REPO ARTIFACT_ID MEMBER [--file-bytes 
   actual size exceeds the cap is reported `truncated` and never expanded.
 - Exit `0` only when the listing or member read is complete.
 
+Use `--format base64` to pipe a new binary member to the parent's
+`gh_ops.py commit-files --stdin-json`. Use `--format blob-sha` when the same bytes
+are already in the destination branch tree. Both modes read the artifact ZIP once
+to identify the member. The SHA mode emits just the destination path and Git blob
+ID. With a previously recorded blob SHA you can pass that row to the parent
+directly and skip the artifact download. An incomplete member produces no row.
+
+```sh
+python -S gh_identity.py artifact-file OWNER/REPO 123 evidence/output.pptx --format base64 --path docs/report.pptx |
+  python -S gh_ops.py commit-files OWNER/REPO --branch reports --stdin-json --message "Publish report"
+```
+
+The example produces a plan. Append `--write` to the second command to apply it.
+
+
 Example (verify a route receipt from a Refactor smoke run):
 
 ```bash

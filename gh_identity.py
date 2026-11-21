@@ -2494,13 +2494,15 @@ def artifacts(r, run_id, *, max_items=100, max_pages=10, transport="auto", timeo
             "count": len(rows), "complete": complete, "truncated": not complete, "observed_at": now()}
 
 
-def artifact_file(r, artifact_id, member, *, max_bytes=10_000_000, transport="auto", timeout=30):
+def artifact_file(r, artifact_id, member, *, output_format="metadata", max_bytes=10_000_000, transport="auto", timeout=30):
     """Read one member of an artifact zip under a byte cap, with its SHA-256.
 
     The zip is fetched through the bounded download worker (allow-listed
     redirects, no credentials sent to storage); the member's declared and
     actual sizes must both fit the cap, so a zip bomb cannot expand past it.
     """
+    if output_format not in ("metadata", "base64", "blob-sha"):
+        raise ValueError("invalid artifact output format")
     r = repo(r)
     artifact_id = _positive_identifier(artifact_id, "artifact")
     if not isinstance(member, str) or not member or member.startswith("/") or ".." in member.split("/"):
@@ -2535,13 +2537,19 @@ def artifact_file(r, artifact_id, member, *, max_bytes=10_000_000, transport="au
         raise Error("invalid_artifact_archive") from None
     if len(data) > max_bytes:
         raise Error("invalid_artifact_archive")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeError:
-        text = None
-    return {**base, "complete": True, "truncated": False, "size": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(), "zip_sha256": got["sha256"],
-            "text": text, "observed_at": now()}
+    result = {**base, "complete": True, "truncated": False, "size": len(data),
+              "sha256": hashlib.sha256(data).hexdigest(), "zip_sha256": got["sha256"],
+              "observed_at": now()}
+    if output_format == "base64":
+        result["content"] = base64.b64encode(data).decode("ascii")
+    elif output_format == "blob-sha":
+        result["blob_sha"] = git_blob_sha(data)
+    else:
+        try:
+            result["text"] = data.decode("utf-8")
+        except UnicodeError:
+            result["text"] = None
+    return result
 
 
 def _log_redact_env(names):
@@ -7592,6 +7600,8 @@ def _cli_parser():
  x=s.add_parser("head-runs");x.add_argument("repo");x.add_argument("head_sha");x.add_argument("--event");x.add_argument("--exclude-event",action="append",default=[],help="e.g. dynamic (Copilot code review runs)");x.add_argument("--limit",type=int,default=100);x.add_argument("--page-limit",type=int,default=10);x.add_argument("--text",action="store_true")
  x=s.add_parser("artifacts");x.add_argument("repo");x.add_argument("run_id",type=int)
  x=s.add_parser("artifact-file");x.add_argument("repo");x.add_argument("artifact_id",type=int);x.add_argument("member");x.add_argument("--file-bytes",type=int,default=10_000_000)
+ x.add_argument("--format",choices=("metadata","base64","blob-sha"),default="metadata",help="metadata receipt or commit-files JSON array")
+ x.add_argument("--path",help="destination repository path for a commit-files row (default: member name)")
  x=s.add_parser("checks",help="check-runs of one or more SHAs; --text prints only what needs attention");x.add_argument("repo");x.add_argument("sha",nargs="+");x.add_argument("--min-checks",type=int,default=1);x.add_argument("--text",action="store_true")
  x=s.add_parser("wait-checks",help="poll check-runs on a SHA until green/failed; progress on stderr");x.add_argument("repo");x.add_argument("sha");x.add_argument("--min-checks",type=int,default=1);x.add_argument("--interval",type=float,default=60);x.add_argument("--wait-timeout",type=float,default=900);x.add_argument("--ignore-check",action="append",default=[],metavar="NAME");x.add_argument("--poll-timeout",type=float,default=30,help=argparse.SUPPRESS)
  x=s.add_parser("observe-pr");x.add_argument("repo");x.add_argument("number",type=int);x.add_argument("--min-checks",type=int,default=1)
@@ -7719,7 +7729,9 @@ def _main(argv=None):
    if not re.fullmatch(r"[0-9a-fA-F]{40}",ns.head_sha):raise ValueError("invalid head_sha")
    o=run_history(ns.repo,max_items=ns.limit,max_pages=ns.page_limit,head_sha=ns.head_sha,event=ns.event,transport=transport,exclude_events=ns.exclude_event)
   elif ns.cmd=="artifacts":o=artifacts(ns.repo,ns.run_id,transport=transport)
-  elif ns.cmd=="artifact-file":o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport)
+  elif ns.cmd=="artifact-file":
+   if ns.path is not None and ns.format=="metadata":raise ValueError("--path requires base64 or blob-sha format")
+   o=artifact_file(ns.repo,ns.artifact_id,ns.member,max_bytes=ns.file_bytes,transport=transport,output_format=ns.format)
   elif ns.cmd=="get":o=get(ns.path,ns.query,ns.pick,transport)
   elif ns.cmd in ("read-comment","review","inline-comment"):o=read_comment(ns.targets,{"review":"review","inline-comment":"inline"}.get(ns.cmd),transport)
   elif ns.cmd=="checks":o=checks_for_shas(ns.repo,ns.sha,ns.min_checks,transport)
@@ -7755,6 +7767,14 @@ def _main(argv=None):
  elif ns.cmd=="pr-files" and ns.text:print(render_pr_files(o))
  elif ns.cmd=="search" and ns.text:print(render_search(o))
  elif ns.cmd=="compare" and ns.text:print(render_compare(o))
+ elif ns.cmd=="artifact-file" and ns.format!="metadata":
+  if not o["complete"]:
+   print(json.dumps(o),file=sys.stderr)
+   return 1
+  row={"path":ns.member if ns.path is None else ns.path}
+  if ns.format=="base64":row.update(encoding="base64",content=o["content"])
+  else:row["blob_sha"]=o["blob_sha"]
+  print(json.dumps([row]))
  elif ns.cmd=="file" and ns.text:print(render_remote_file(o),end="" if (o.get("text") or "").endswith("\n") else "\n")
  elif ns.cmd=="workflows" and ns.text:print(render_workflows(o))
  elif ns.cmd in ("runs","head-runs","workflow-runs") and ns.text:print(render_runs(o))
