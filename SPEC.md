@@ -329,9 +329,11 @@ becomes `not_merge` instead of `ok` or `drift`. A pin on that line whose
 `parent_count` is null becomes `unknown_parents` (fail closed: not ok, exit 1).
 Without the flag, a null parent count stays `ok` or `drift`.
 Unreadable remotes stay `unavailable` with a null repository, commit, and parent
-count; private names are not printed. A repository string that is not a GitHub
-OWNER/REPO (including `.`, `..`, a backslash, a second slash, or a trailing
-`.git` name) is dropped before `remote_base + repository` is passed to git.
+count; private names are not printed. A declared repository is accepted only as
+a bare OWNER/REPO or a github.com URL of that repository. A name may start with
+`.` (for example `acme/.github`). A segment that is exactly `.` or `..`, a
+backslash, a second slash, a non-GitHub URL, or an absolute path is rejected
+before `remote_base + repository` is passed to git; it is not trimmed or omitted.
 
 The first-parent list is `_exact_first_parent_lines`, the exact-git half of
 `first_parent_check`. API history remains `_first_parent_contains`. Pin audit
@@ -342,9 +344,10 @@ path is `git cat-file -p` (header lines `parent ` before the blank line).
 `docs/**/*.md`. A pin is either a standalone plausible `OWNER/REPO@` + 40
 lowercase hex digits (not a longer path; trailing `.git` stripped; allowed
 inside fenced and inline code) or another standalone 40-lowercase-hex token
-outside fences and inline code whose nearest plausible `OWNER/REPO` token or
-`github.com/OWNER/REPO` URL is on the same line or the immediately previous or
-next line. URLs continuing `/issues/`, `/pull/`, `/pulls/`, or `/discussions/`
+outside fences and inline code. A bare `OWNER/REPO` qualifies a SHA only on
+the same line, so a checksum on the neighbouring line is not a pin. A
+`github.com/OWNER/REPO` URL also qualifies the immediately previous or next
+line. URLs continuing `/issues/`, `/pull/`, `/pulls/`, or `/discussions/`
 are not qualifiers. Same line beats a neighbor; ties break toward the earlier
 line, then the earlier column. A blank line breaks adjacency. The all-zero SHA,
 bare prose SHAs, uppercase hex, longer hex runs, common-word pairs (`and/or`),

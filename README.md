@@ -1113,13 +1113,14 @@ lowercase, 40 digits, the same as every other pin. The exact match is:
    a longer path (`prefix/OWNER/REPO@…` does not match). A trailing `.git` on
    the repo name is stripped.
 2. Qualified SHA: any other standalone 40-hex token **outside** a fence or
-   inline code is kept only when a plausible `OWNER/REPO` token or a
-   `github.com/OWNER/REPO` URL (optional `http://` or `https://`, optional
-   `www.`) sits on the same line or the immediately previous or next line.
+   inline code. A bare `OWNER/REPO` qualifies a SHA only on the same line, so a
+   checksum on the next line is not a pin. A `github.com/OWNER/REPO` URL
+   (optional `http://` or `https://`, optional `www.`) also qualifies the
+   immediately previous or next line.
    URLs whose path continues `/issues/`, `/pull/`, `/pulls/`, or
-   `/discussions/` are not qualifiers. The nearest qualifier wins: same line
-   beats a neighbor; equal distance breaks toward the earlier line, then the
-   earlier column. A blank line is a real line and breaks adjacency.
+   `/discussions/` are not qualifiers. The nearest allowed qualifier wins:
+   same line beats a neighbor; equal distance breaks toward the earlier line,
+   then the earlier column. A blank line is a real line and breaks adjacency.
 
 A name is plausible when it is a GitHub owner and repository (no `.`, `..`,
 extra slash, or trailing `.git`) and neither segment is a common prose or

@@ -1874,6 +1874,7 @@ def test_markdown_broken_readme_and_matcher_edges(tmp_path):
         f"acme/widgets@{zero}",
     ])
     kept = g._markdown_pins("README.md", blocked)
+    assert g._markdown_pins("README.md", f"acme/widgets\n{sha}\n") == []
     assert {(p["repository"], p["commit"]) for p in kept} == {("acme/widgets", sha)}
     assert len(kept) == 3
     assert zero not in {p["commit"] for p in kept}

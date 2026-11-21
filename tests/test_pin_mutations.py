@@ -40,9 +40,10 @@ def _oracle(ns):
     assert [(p["repository"], p["commit"]) for p in explicit] == [("acme/widgets", sha)]
     same = pins("README.md", f"zz/far\naa/near {sha} zz/later\n")
     assert [(p["repository"], p["commit"]) for p in same] == [("aa/near", sha)]
-    adjacent = pins("docs/a.md", f"only/here\n{sha}\n")
+    adjacent = pins("docs/a.md", f"https://github.com/only/here\n{sha}\n")
     assert [(p["repository"], p["commit"]) for p in adjacent] == [("only/here", sha)]
-    far = pins("README.md", f"aa/near\n{sha}{' ' * 30}zz/far\n")
+    assert pins("README.md", f"acme/widgets\n{sha}\n") == []
+    far = pins("README.md", f"https://github.com/aa/near\n{sha}{' ' * 30}zz/far\n")
     assert [(p["repository"], p["commit"]) for p in far] == [("zz/far", sha)]
     bare = pins("docs/a.md", f"prose {sha} with no repository\n")
     assert bare == []
@@ -104,16 +105,53 @@ MUTANTS = [
     ("_markdown_pins", "if span in consumed:\n                continue", "if False and span in consumed:\n                continue", ()),
     ("_markdown_pins", "name = _nearest_markdown_repo(qualifiers, index, match.start(), match.end())\n            if name is None:\n                continue",
      "name = _nearest_markdown_repo(qualifiers, index, match.start(), match.end())\n            if name is None:\n                name = \"bare/repo\"", ()),
+    ("_github_full_name_ok", 'or name in (".","..")', 'or name.startswith(".")', ()),
+    ("_pin_repo", "    else:\n        raise ValueError(\"not an OWNER/REPO\")\n    if not _github_full_name_ok(full):",
+     "    else:\n        found = re.search(r\"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$\", value)\n        if found is None:\n            raise ValueError(\"not an OWNER/REPO\")\n        full = found.group(1)\n    if not _github_full_name_ok(full):", ()),
+    ("_markdown_qualifiers", "found.append((match.start(), match.end(), name, False))",
+     "found.append((match.start(), match.end(), name, True))", ("_markdown_pins", "_nearest_markdown_repo")),
 ]
+
+
+def _repo_mutant():
+    ns = dict(g.__dict__)
+    ns["REPO"] = __import__("re").compile(r"^[\w.-]+/[\w.-]+$")
+    exec(inspect.getsource(g.repo), ns)
+    return ns
+
+
+def _name_oracle(ns):
+    assert ns["repo"]("o/r") == "o/r"
+    assert ns["repo"]("日本/リポ") == "日本/リポ"
+    assert ns["repo"]("acme/.github") == "acme/.github"
+    for bad in ("../secret", "./secret", "owner/..", "owner/."):
+        try:
+            ns["repo"](bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+    assert ns["_github_full_name_ok"]("acme/.github") is True
+    assert ns["_github_full_name_ok"]("owner/.hidden") is True
+    assert ns["_github_full_name_ok"]("owner/..") is False
+    assert ns["_pin_repo"]("acme/.github") == "acme/.github"
+    assert ns["_pin_repo"]("https://github.com/acme/widgets") == "acme/widgets"
+    for bad in ("a/b/c", "https://evil.example/acme/widgets", "/tmp/remotes/acme/widgets", "../secret"):
+        try:
+            ns["_pin_repo"](bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
 
 
 def test_parent_and_markdown_mutants_are_killed():
     _oracle(g.__dict__)
+    _name_oracle(g.__dict__)
     killed = []
     for name, old, new, extra in MUTANTS:
         ns = _activate(name, old, new, extra)
         try:
             _oracle(ns)
+            _name_oracle(ns)
         except AssertionError:
             killed.append(name + ":" + old)
             continue
@@ -125,5 +163,10 @@ def test_parent_and_markdown_mutants_are_killed():
         killed.append("_MD_SHA:uppercase")
     else:
         raise AssertionError("uppercase sha mutant survived")
-    assert len(killed) == len(MUTANTS) + 1
-    assert len(killed) == 28
+    try:
+        _name_oracle(_repo_mutant())
+    except AssertionError:
+        killed.append("repo:dotdot")
+    else:
+        raise AssertionError("repo traversal mutant survived")
+    assert len(killed) == len(MUTANTS) + 2

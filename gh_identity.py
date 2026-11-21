@@ -29,7 +29,7 @@ from collections import Counter; from datetime import datetime, timezone; from h
 # ---------------------------------------------------------------------------
 # Transport and budgets: request (gh first, urllib fallback), pagination, operation limits
 # ---------------------------------------------------------------------------
-API="https://api.github.com"; REPO=re.compile(r"^[\w.-]+/[\w.-]+$")
+API="https://api.github.com"; REPO=re.compile(r"^(?!\.{1,2}/)[\w.-]+/(?!\.{1,2}$)[\w.-]+$")
 class Error(RuntimeError):
  def __init__(self,code,uncertain=False): super().__init__(code); self.code=code; self.uncertain=uncertain
 
@@ -203,9 +203,9 @@ def _when(value):
  try:return datetime.fromisoformat(value.replace("Z","+00:00"))
  except ValueError:return None
 _GH_OWNER=re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
-_GH_REPO=re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")
+_GH_REPO=re.compile(r"[A-Za-z0-9._-]{1,100}")
 def _github_full_name_ok(value):
- """GitHub OWNER/REPO. Rejects '.', '..', backslash, a second slash, and a trailing .git name."""
+ """GitHub OWNER/REPO. Rejects a segment that is exactly '.' or '..', a backslash, a second slash, and a trailing .git name. A repository may start with '.' (for example .github)."""
  if not isinstance(value,str) or value.count("/")!=1 or "\\" in value:
   return False
  owner,name=value.split("/",1)
@@ -5184,15 +5184,25 @@ PIN_JSON_GLOBS = ("vendor.lock.json", "**/vendor.lock.json", "**/publication.jso
                   "child-heads.json")
 
 
+_PIN_GITHUB_URL = re.compile(
+    r"(?i)(?:https?://)?(?:www\.)?github\.com/(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?/?$")
+
+
 def _pin_repo(value):
-    value = value.strip()
-    if value.endswith(".git"):
-        value = value[:-4]
-    cleaned = value.replace("https://github.com/", "").replace("http://github.com/", "")
-    m = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$", cleaned)
-    if not m or not _github_full_name_ok(m.group(1)):
+    """Bare OWNER/REPO, or a github.com URL of that repository. Anything else is rejected."""
+    if not isinstance(value, str):
         raise ValueError("not an OWNER/REPO")
-    return m.group(1)
+    value = value.strip()
+    url = _PIN_GITHUB_URL.fullmatch(value)
+    if url:
+        full = url["owner"] + "/" + url["name"]
+    elif value.count("/") == 1 and "://" not in value and not value.startswith(("/", "\\")):
+        full = value[:-4] if value.lower().endswith(".git") else value
+    else:
+        raise ValueError("not an OWNER/REPO")
+    if not _github_full_name_ok(full):
+        raise ValueError("not an OWNER/REPO")
+    return full
 
 
 def _workflow_pins(path, text):
@@ -5221,9 +5231,12 @@ def _json_pins(path, document):
             repository = node.get("repository") or key
             if isinstance(repository, str) and _is_sha(commit) \
                     and set(commit) != {"0"}:
+                declared = node.get("repository") if isinstance(node.get("repository"), str) else None
                 try:
                     name = _pin_repo(repository)
                 except ValueError:
+                    if declared is not None and declared.strip():
+                        raise PinInputError(f"{path}: invalid_repository")
                     name = None
                 if name:
                     source = node.get("source") or node.get("source_path")
@@ -5329,13 +5342,13 @@ def _markdown_qualifiers(line):
             continue
         name = _plausible_pin_repo(match.group("repo"))
         if name:
-            found.append((match.start(), match.end(), name))
+            found.append((match.start(), match.end(), name, True))
     for match in _MD_REPO.finditer(line):
         if _span_inside(hidden, match.start(), match.end()):
             continue
         name = _plausible_pin_repo(match.group("repo"))
         if name:
-            found.append((match.start(), match.end(), name))
+            found.append((match.start(), match.end(), name, False))
     return found
 
 
@@ -5351,7 +5364,9 @@ def _nearest_markdown_repo(qualifiers, index, sha_start, sha_end):
         other = index + delta
         if other < 0 or other >= len(qualifiers):
             continue
-        for start, end, name in qualifiers[other]:
+        for start, end, name, adjacent_ok in qualifiers[other]:
+            if delta != 0 and not adjacent_ok:
+                continue
             if end <= sha_start:
                 gap = sha_start - end
             else:
@@ -5372,10 +5387,12 @@ def _markdown_pins(path, text):
       must not continue a longer path. A trailing ``.git`` is stripped. The
       all-zero SHA is not a pin.
     * Qualified SHA: any other standalone 40-lowercase-hex token outside fenced
-      blocks and inline code, when a plausible ``OWNER/REPO`` token or a
-      ``github.com/OWNER/REPO`` URL (not ``/issues/``, ``/pull/``, ``/pulls/``,
-      or ``/discussions/``) is on the same line or the immediately previous or
-      next line. The nearest qualifier wins, as in ``_nearest_markdown_repo``.
+      blocks and inline code. A bare ``OWNER/REPO`` qualifies a SHA only on the
+      same line. A ``github.com/OWNER/REPO`` URL (not ``/issues/``, ``/pull/``,
+      ``/pulls/``, or ``/discussions/``) also qualifies the immediately previous
+      or next line. A checksum on the
+      neighbouring line of a bare name is not a pin. The nearest allowed
+      qualifier wins, as in ``_nearest_markdown_repo``.
     * A name is plausible when it is a GitHub owner/repo and neither segment is
       a common prose or directory word, and the repo is not a file name whose
       extension is documentation, data, or an image.
@@ -5494,6 +5511,8 @@ def collect_pins(root=".", json_globs=PIN_JSON_GLOBS, *, include_markdown=False)
                 elif include_markdown and _markdown_pin_file(rel):
                     with open(full, encoding="utf-8") as stream:
                         pins += _markdown_pins(rel, stream.read(4 * 1024 * 1024))
+            except PinInputError:
+                raise
             except (OSError, ValueError) as error:
                 if isinstance(error, UnicodeDecodeError) and _markdown_pin_file(rel):
                     reason = "read_error"
@@ -5579,8 +5598,10 @@ def pin_audit(root=".", *, json_globs=PIN_JSON_GLOBS, only_owners=None, remote_b
     `not_merge`. A pin on that line whose parent count cannot be read is
     `unknown_parents`. Both are not ok. Without require_merge, an unknown parent
     count stays ok or drift. A repository that cannot be fetched without
-    credentials is reported without its name (it may be private). Names that
-    are not a GitHub OWNER/REPO are dropped before any git remote is built.
+    credentials is reported without its name (it may be private). A declared
+    repository that is not a bare OWNER/REPO or a github.com URL fails the
+    input instead of being trimmed or omitted. A repository may be named
+    ``.github``; a segment that is exactly ``.`` or ``..`` is rejected.
 
     repos, when set, limits the audit to those OWNER/REPO pins. Blank entries
     are unset. include_markdown adds README.md and docs/**/*.md (see ``_markdown_pins``).
@@ -5588,8 +5609,7 @@ def pin_audit(root=".", *, json_globs=PIN_JSON_GLOBS, only_owners=None, remote_b
     """
     if not isinstance(remote_base, str) or not remote_base.startswith(("https://", "file://", "/")):
         raise ValueError("remote_base must be https://, file:// or an absolute path")
-    pins = [p for p in collect_pins(root, tuple(json_globs), include_markdown=include_markdown)
-            if _github_full_name_ok(p["repository"])]
+    pins = collect_pins(root, tuple(json_globs), include_markdown=include_markdown)
     if only_owners:
         owners = set(only_owners)
         pins = [p for p in pins if p["repository"].split("/")[0] in owners]

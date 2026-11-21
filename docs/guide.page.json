@@ -91,7 +91,7 @@
         {
           "type": "card",
           "title": "📌 ピンがマージコミットか",
-          "text": "pin-audit は読み取り専用です。各結果に parent_count と kind（merge / single / root / unknown）が付きます。--require-merge-commit を付けると、main の first-parent 上で親が 2 未満のピンは not_merge、親の数が読めないピンは unknown_parents になり、どちらも終了コード 1 です。--include-markdown は README.md と docs/**/*.md だけを見ます。コードの中では OWNER/REPO@40桁だけを取り、地の文は GitHub の名前として尤もらしい OWNER/REPO が同じ行か隣の行にある 40 桁（小文字、全ゼロ以外）だけです。issues や pull の URL、and/or、docs/guide.md は取りません。",
+          "text": "pin-audit は読み取り専用です。各結果に parent_count と kind（merge / single / root / unknown）が付きます。--require-merge-commit を付けると、main の first-parent 上で親が 2 未満のピンは not_merge、親の数が読めないピンは unknown_parents になり、どちらも終了コード 1 です。--include-markdown は README.md と docs/**/*.md だけを見ます。コードの中では OWNER/REPO@40桁だけを取り、地の文は同じ行の OWNER/REPO、または隣の行でもよい github.com のリポジトリ URL に結び付いた 40 桁（小文字、全ゼロ以外）だけです。隣の行のチェックサム、issues や pull の URL、and/or、docs/guide.md は取りません。リポジトリ名は .github のようにドットで始まってもよく、. と .. だけは拒否します。",
           "blocks": [
             {
               "type": "output",
