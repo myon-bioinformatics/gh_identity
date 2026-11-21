@@ -6057,7 +6057,10 @@ def branch_ref(repository, branch, *, transport="auto", timeout=30):
     """Branch existence and tip SHA from one GET of the git ref.
 
     A missing branch is a result ({"exists": False, "sha": None}), not an error;
-    other read failures raise. Read-only.
+    other read failures raise. Read-only. A bare 404 is ambiguous (GitHub also
+    hides inaccessible repositories behind it), so absence is reported only
+    when a complete branch listing also excludes the branch; an inaccessible
+    or malformed listing raises instead.
     """
     r = repo(repository)
     if not isinstance(branch, str) or not branch.strip():
@@ -6066,8 +6069,20 @@ def branch_ref(repository, branch, *, transport="auto", timeout=30):
         d = request("GET", f"repos/{r}/git/ref/heads/{urllib.parse.quote(branch, safe='/')}", transport=transport, timeout=timeout)
     except Error as e:
         if e.code == "not_found_or_inaccessible":
+            tips = {}
+            for row in pages(f"repos/{r}/branches", transport=transport, timeout=timeout):
+                name = row.get("name") if isinstance(row, dict) else None
+                if not isinstance(name, str) or not name or name in tips:
+                    raise Error("invalid_branch_listing")
+                commit = row.get("commit") if isinstance(row.get("commit"), dict) else {}
+                tips[name] = commit.get("sha")
+            if branch not in tips:
+                return {"schema": "gh-identity-branch/1", "write": False, "repository": r, "branch": branch,
+                        "exists": False, "sha": None, "observed_at": now()}
+            if not _is_sha(tips[branch]):
+                raise Error("invalid_ref")
             return {"schema": "gh-identity-branch/1", "write": False, "repository": r, "branch": branch,
-                    "exists": False, "sha": None, "observed_at": now()}
+                    "exists": True, "sha": tips[branch], "observed_at": now()}
         raise
     target = d.get("object") if isinstance(d, dict) else None
     if (not isinstance(target, dict) or d.get("ref") != f"refs/heads/{branch}"
