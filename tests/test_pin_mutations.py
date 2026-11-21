@@ -27,7 +27,9 @@ def _oracle(ns):
     assert state(present=True, ancestor=True, on_line=True, parent_count=0, require_merge=True, changed=False) == "not_merge"
     assert state(present=True, ancestor=True, on_line=True, parent_count=2, require_merge=True, changed=True) == "drift"
     assert state(present=True, ancestor=True, on_line=True, parent_count=2, require_merge=False, changed=False) == "ok"
-    assert state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=False) == "ok"
+    assert state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=False) == "unknown_parents"
+    assert state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=True) == "unknown_parents"
+    assert state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=False, changed=True) == "drift"
     assert state(present=True, ancestor=True, on_line=True, parent_count=1, require_merge=False, changed=True) == "drift"
     assert parents("") == 0
     assert parents("tree a\nparenthood\n\nparent in message\n") == 0
@@ -45,6 +47,10 @@ def _oracle(ns):
     bare = pins("docs/a.md", f"prose {sha} with no repository\n")
     assert bare == []
     assert pins("docs/a.md", f"acme/widgets {upper}\n") == []
+    assert pins("README.md", f"and/or {sha}\n") == []
+    assert pins("README.md", f"docs/guide.md {sha}\n") == []
+    assert pins("README.md", f"acme/widgets {'0' * 40}\n") == []
+    assert pins("README.md", f"https://github.com/acme/widgets/pull/4 {sha}\n") == []
     left, right = "aa/bb", "cc/dd"
     tied = pins("docs/t.md", f"{left}   {sha}   {right}\n")
     assert [p["repository"] for p in tied] == [left]
@@ -78,7 +84,8 @@ MUTANTS = [
     ("_commit_kind", "return single", 'return "merge"', ()),
     ("_pin_result_state", "and parent_count < 2:", "and parent_count < 1:", ()),
     ("_pin_result_state", "and parent_count < 2:", "and parent_count <= 2:", ()),
-    ("_pin_result_state", "parent_count is not None", "parent_count is None", ()),
+    ("_pin_result_state", "parent_count is None:", "parent_count is not None:", ()),
+    ("_pin_result_state", 'return "unknown_parents"', 'return "ok"', ()),
     ("_pin_result_state", "if not on_line:", "if on_line:", ()),
     ("_pin_result_state", "if not present or not ancestor:", "if not present and not ancestor:", ()),
     ("_pin_result_state", "if changed:", "if not changed:", ()),
@@ -119,4 +126,4 @@ def test_parent_and_markdown_mutants_are_killed():
     else:
         raise AssertionError("uppercase sha mutant survived")
     assert len(killed) == len(MUTANTS) + 1
-    assert len(killed) == 27
+    assert len(killed) == 28

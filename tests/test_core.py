@@ -37,7 +37,12 @@ import gh_identity as g
 class T(unittest.TestCase):
  def test_repo_validation(self):
   self.assertEqual(g.repo("o/r"),"o/r")
+  self.assertEqual(g.repo("日本/リポ"),"日本/リポ")
   with self.assertRaises(ValueError): g.repo("bad")
+  for bad in ("../secret", "owner/..", "owner/.", "./secret", "o/repo.git", "o/a\\b", "a/b/c", None):
+   self.assertFalse(g._github_full_name_ok(bad))
+  with self.assertRaises(ValueError): g._pin_repo("../secret")
+  with self.assertRaises(ValueError): g._selected_repos([" ../secret "])
  def test_capabilities_no_secret(self):
   with mock.patch.dict(g.os.environ,{"GH_TOKEN":"secret"},clear=False):
    x=g.capabilities(); self.assertTrue(x["token_present"]); self.assertNotIn("secret",json.dumps(x))
@@ -1398,6 +1403,21 @@ def _page(n=100):
     return rows
 
 
+def test_commit_classify_exact_uses_one_fetch():
+    fake = DispatchGit(cat_p=(0, b"tree t\nparent a\nparent b\n\n"))
+
+    def pulls(method, path, **kw):
+        if path.endswith("/pulls?per_page=100"):
+            return []
+        raise g.Error("not_found_or_inaccessible")
+
+    with g.request_stub(pulls):
+        out = g.commit_classify("me/a", M3, exact=True, remote="https://github.com/me/a", git_runner=fake, branch="main")
+    assert out["on_first_parent"] is True and out["parent_count"] == 2 and out["kind"] == "merge"
+    assert sum("init" in call for call in fake.calls) == 1
+    assert sum("fetch" in call for call in fake.calls) == 1
+
+
 def test_commit_classify_exact_local_and_missing_default(tmp_path):
     up = tmp_path / "up"
     up.mkdir()
@@ -1432,6 +1452,8 @@ def test_commit_classify_exact_local_and_missing_default(tmp_path):
     with g.request_stub(pulls):
         missing = g.commit_classify("me/a", "ab" * 20, exact=True, remote=str(up), branch="main")
     assert missing["on_first_parent"] is False and missing["parent_count"] is None and missing["kind"] == "unknown"
+    assert g._exact_parent_count("me/a", merge, remote=str(up), remote_base="https://github.com/",
+                                 git_runner=None, timeout=30) == 2
 
     def no_default(method, path, **kw):
         if path == "repos/me/a":
