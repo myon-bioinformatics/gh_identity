@@ -1401,6 +1401,8 @@ def test_branch_ref_existing_and_missing():
     def fake(method, path, **kw):
         if path == "repos/me/r/git/ref/heads/feat/x":
             return {"ref": "refs/heads/feat/x", "object": {"sha": M1, "type": "commit"}}
+        if path.startswith("repos/me/r/branches"):
+            return []
         raise g.Error("not_found_or_inaccessible")
     with g.request_stub(fake):
         out = g.branch_ref("me/r", "feat/x")
@@ -1423,3 +1425,22 @@ def test_branch_ref_rejects_malformed_ref_payload(payload):
         with pytest.raises(g.Error) as e:
             g.branch_ref("me/r", "main")
         assert e.value.code == "invalid_ref"
+
+
+def test_branch_ref_absence_needs_a_complete_listing():
+    def listed(method, path, **kw):
+        if path.startswith("repos/me/r/branches"):
+            return [{"name": "feat/x", "commit": {"sha": M1}}]
+        raise g.Error("not_found_or_inaccessible")
+    with g.request_stub(listed):
+        out = g.branch_ref("me/r", "feat/x")
+        assert out["exists"] is True and out["sha"] == M1
+
+    def inaccessible(method, path, **kw):
+        if path.startswith("repos/me/r/branches"):
+            raise g.Error("permission_or_rate_limit")
+        raise g.Error("not_found_or_inaccessible")
+    with g.request_stub(inaccessible):
+        with pytest.raises(g.Error) as e:
+            g.branch_ref("me/r", "feat/x")
+        assert e.value.code == "permission_or_rate_limit"
