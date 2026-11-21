@@ -1395,3 +1395,31 @@ class SharedParsers(unittest.TestCase):
         for bad in (None, "", "yesterday", 1):
             with self.subTest(bad=bad):
                 self.assertIsNone(g._when(bad))
+
+
+def test_branch_ref_existing_and_missing():
+    def fake(method, path, **kw):
+        if path == "repos/me/r/git/ref/heads/feat/x":
+            return {"ref": "refs/heads/feat/x", "object": {"sha": M1, "type": "commit"}}
+        raise g.Error("not_found_or_inaccessible")
+    with g.request_stub(fake):
+        out = g.branch_ref("me/r", "feat/x")
+        assert out["exists"] is True and out["sha"] == M1 and out["write"] is False
+        assert out["schema"] == "gh-identity-branch/1" and out["branch"] == "feat/x"
+        out = g.branch_ref("me/r", "gone")
+        assert out["exists"] is False and out["sha"] is None
+    with pytest.raises(ValueError):
+        g.branch_ref("me/r", " ")
+
+
+@pytest.mark.parametrize("payload", [
+    {"ref": "refs/heads/main", "object": ["bad"]},
+    {"ref": "refs/heads/main", "object": {"type": "commit", "sha": "not-a-sha"}},
+    {"ref": "refs/heads/elsewhere", "object": {"type": "commit", "sha": M1}},
+    {"ref": "refs/heads/main", "object": {"type": "tag", "sha": M1}},
+])
+def test_branch_ref_rejects_malformed_ref_payload(payload):
+    with g.request_stub(lambda *a, **k: payload):
+        with pytest.raises(g.Error) as e:
+            g.branch_ref("me/r", "main")
+        assert e.value.code == "invalid_ref"

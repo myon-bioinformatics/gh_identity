@@ -6053,6 +6053,30 @@ def repo_identity(repository, *, transport="auto", timeout=30):
             "default_branch": branch, "head": head["sha"], "owner_type": (d.get("owner") or {}).get("type")}
 
 
+def branch_ref(repository, branch, *, transport="auto", timeout=30):
+    """Branch existence and tip SHA from one GET of the git ref.
+
+    A missing branch is a result ({"exists": False, "sha": None}), not an error;
+    other read failures raise. Read-only.
+    """
+    r = repo(repository)
+    if not isinstance(branch, str) or not branch.strip():
+        raise ValueError("invalid branch")
+    try:
+        d = request("GET", f"repos/{r}/git/ref/heads/{urllib.parse.quote(branch, safe='/')}", transport=transport, timeout=timeout)
+    except Error as e:
+        if e.code == "not_found_or_inaccessible":
+            return {"schema": "gh-identity-branch/1", "write": False, "repository": r, "branch": branch,
+                    "exists": False, "sha": None, "observed_at": now()}
+        raise
+    target = d.get("object") if isinstance(d, dict) else None
+    if (not isinstance(target, dict) or d.get("ref") != f"refs/heads/{branch}"
+            or target.get("type") != "commit" or not _is_sha(target.get("sha"))):
+        raise Error("invalid_ref")
+    return {"schema": "gh-identity-branch/1", "write": False, "repository": r, "branch": branch,
+            "exists": True, "sha": d["object"]["sha"], "observed_at": now()}
+
+
 def list_owner_repositories(owner, *, kind="auto", include_forks=False, include_archived=False,
                             transport="auto", timeout=30, max_pages=20):
     """List repositories for a user or organization (public only by default).
