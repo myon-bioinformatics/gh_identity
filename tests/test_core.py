@@ -1412,8 +1412,14 @@ def test_branch_ref_existing_and_missing():
         g.branch_ref("me/r", " ")
 
 
-def test_branch_ref_rejects_malformed_ref_payload():
-    with g.request_stub(lambda *a, **k: {"object": {"sha": "not-a-sha"}}):
+@pytest.mark.parametrize("payload", [
+    {"ref": "refs/heads/main", "object": ["bad"]},
+    {"ref": "refs/heads/main", "object": {"type": "commit", "sha": "not-a-sha"}},
+    {"ref": "refs/heads/elsewhere", "object": {"type": "commit", "sha": M1}},
+    {"ref": "refs/heads/main", "object": {"type": "tag", "sha": M1}},
+])
+def test_branch_ref_rejects_malformed_ref_payload(payload):
+    with g.request_stub(lambda *a, **k: payload):
         with pytest.raises(g.Error) as e:
             g.branch_ref("me/r", "main")
         assert e.value.code == "invalid_ref"

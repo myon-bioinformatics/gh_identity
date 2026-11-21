@@ -6069,7 +6069,9 @@ def branch_ref(repository, branch, *, transport="auto", timeout=30):
             return {"schema": "gh-identity-branch/1", "write": False, "repository": r, "branch": branch,
                     "exists": False, "sha": None, "observed_at": now()}
         raise
-    if not isinstance(d, dict) or not _is_sha((d.get("object") or {}).get("sha")):
+    target = d.get("object") if isinstance(d, dict) else None
+    if (not isinstance(target, dict) or d.get("ref") != f"refs/heads/{branch}"
+            or target.get("type") != "commit" or not _is_sha(target.get("sha"))):
         raise Error("invalid_ref")
     return {"schema": "gh-identity-branch/1", "write": False, "repository": r, "branch": branch,
             "exists": True, "sha": d["object"]["sha"], "observed_at": now()}
