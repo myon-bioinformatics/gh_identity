@@ -709,6 +709,27 @@ def test_artifact_file_returns_member_text_and_digest(monkeypatch):
     assert (out["run_id"], out["head_sha"], out["name"]) == (5, "a" * 40, "junit-flutter-refactor")
 
 
+@pytest.mark.parametrize("data", [b"", bytes(range(256)), b"\xef\xbb\xbfhello\r\n"])
+@pytest.mark.parametrize("mode", ["base64", "blob-sha"])
+def test_cli_artifact_file_commit_rows(monkeypatch, capsys, data, mode):
+    _patch(monkeypatch, _zip(**{"input.bin": data}))
+    assert g.main(["artifact-file", "o/r", "9", "input.bin", "--format", mode,
+                   "--path", "out/copy.bin"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    if mode == "blob-sha":
+        assert rows == [{"path": "out/copy.bin", "blob_sha": g.git_blob_sha(data)}]
+    else:
+        assert rows == [{"path": "out/copy.bin", "encoding": "base64",
+                         "content": base64.b64encode(data).decode("ascii")}]
+
+
+def test_incomplete_artifact_never_emits_commit_row(monkeypatch, capsys):
+    _patch(monkeypatch, _zip(**{"big.txt": "x" * 5000}))
+    assert g.main(["artifact-file", "o/r", "9", "big.txt", "--format", "base64", "--file-bytes", "100"]) == 1
+    output = capsys.readouterr()
+    assert not output.out and json.loads(output.err)["truncated"]
+
+
 def test_member_larger_than_the_cap_is_not_expanded(monkeypatch):
     _patch(monkeypatch, _zip(**{"big.txt": "x" * 5000}))
     out = g.artifact_file("o/r", 9, "big.txt", max_bytes=100)
