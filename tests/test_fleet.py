@@ -1478,6 +1478,367 @@ def test_target_read_error_identifies_file(tmp_path, monkeypatch):
     assert g.main(["pin-audit", "--root", str(tmp_path)]) == 2
 
 
+def test_pin_parent_fields_keep_existing_states(world):
+    out = g.pin_audit(world["root"], remote_base=world["base"])
+    by = {r["commit"]: r for r in out["results"] if r["repository"]}
+    assert by[world["first"]]["parent_count"] == 0 and by[world["first"]]["kind"] == "root"
+    assert by[world["first"]]["state"] == "drift" and by[world["first"]]["changed"] == ["tool.py"]
+    assert by[world["merge"]]["parent_count"] == 2 and by[world["merge"]]["kind"] == "merge"
+    assert by[world["merge"]]["state"] == "ok" and by[world["merge"]]["changed"] == []
+    assert by[world["tip"]]["parent_count"] == 1 and by[world["tip"]]["kind"] == "single" and by[world["tip"]]["state"] == "ok"
+    assert by[world["pr_head"]]["kind"] == "single" and by[world["pr_head"]]["state"] == "not_final"
+    assert by[world["side"]]["parent_count"] == 1 and by[world["side"]]["state"] == "unmerged"
+    hidden = [r for r in out["results"] if r["repository"] is None]
+    assert hidden[0]["parent_count"] is None and hidden[0]["kind"] == "unknown"
+    text = g.render_pin_audit(out)
+    assert "hidden" not in text and "(redacted)" in text and "unknown/?" in text
+    assert "not_final me/up@" in text
+
+
+def test_require_merge_rejects_squash_and_root_only(world):
+    out = g.pin_audit(world["root"], remote_base=world["base"], require_merge=True)
+    by = {r["commit"]: r for r in out["results"] if r["repository"]}
+    assert by[world["merge"]]["state"] == "ok"
+    assert by[world["tip"]]["state"] == "not_merge" and by[world["tip"]]["parent_count"] == 1
+    assert by[world["first"]]["state"] == "not_merge" and "parent_count=0" in by[world["first"]]["detail"]
+    assert by[world["pr_head"]]["state"] == "not_final" and by[world["pr_head"]]["final"] == world["merge"]
+    assert by[world["side"]]["state"] == "unmerged"
+    assert out["ok"] is False and out["counts"]["not_merge"] == 2
+    proc = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(world["root"]),
+                           "--remote-base", world["base"], "--require-merge-commit", "--text"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 1 and "not_merge me/up@" in proc.stdout and "hidden" not in proc.stdout
+
+
+# ──── pin_audit merge fixture ─────────────────────────────────────
+
+
+def _pin(repo, commit, path, line=None, paths=None):
+    return {"repository": repo, "commit": commit, "file": path, "line": line, "entry": path, "paths": list(paths or [])}
+
+
+class AuditGit:
+    """Offline git double for one pin-audit bare session. Responses are (code, stdout bytes)."""
+
+    def __init__(self, **kw):
+        self.calls = []
+        self.fetch_sha = kw.get("fetch_sha", (0, b""))
+        self.cat_e = kw.get("cat_e", (0, b""))
+        self.cat_p = kw.get("cat_p", (0, b"tree t\nparent p\n\nmsg\n"))
+        self.merge = kw.get("merge", (0, b""))
+        self.count = kw.get("count", b"1\n")
+        self.first = kw.get("first", b"")
+        self.ancestry = kw.get("ancestry", b"")
+        self.diff = kw.get("diff", (0, b""))
+        self.ls = kw.get("ls", b"ref: refs/heads/main\tHEAD\n")
+        self.init = kw.get("init", (0, b""))
+        self.fail = kw.get("fail")
+
+    def __call__(self, args, cwd):
+        self.calls.append(list(args))
+        words = []
+        index = 0
+        while index < len(args):
+            if args[index] == "-c":
+                index += 2
+                continue
+            words.append(args[index])
+            index += 1
+        verb = words[0]
+        if verb == "init":
+            return self.init
+        if verb == "ls-remote":
+            return 0, self.ls
+        if verb == "fetch":
+            if any("refs/heads/" in word for word in words):
+                return 0, b""
+            return self.fetch_sha
+        if verb == "rev-list" and "--first-parent" in words:
+            return 0, self.first
+        if verb == "rev-list" and "--count" in words:
+            return 0, self.count
+        if verb == "rev-list" and "--ancestry-path" in words:
+            return 0, self.ancestry
+        if verb == "cat-file" and "-e" in words:
+            return self.cat_e
+        if verb == "cat-file" and "-p" in words:
+            return self.cat_p
+        if verb == "merge-base":
+            return self.merge
+        if verb == "diff":
+            if self.fail == "diff":
+                return 4, b""
+            return self.diff
+        return 0, b""
+
+
+A40, B40, C40 = "a" * 40, "b" * 40, "c" * 40
+
+
+def test_scripted_audit_edges():
+    on = AuditGit(first=f"{B40}\n{A40}\n".encode(), cat_p=(0, b"tree t\nparent p1\nparent p2\n\n"),
+                  diff=(0, b"tool.py\n"))
+    rows = g._audit_repository("me/up", [_pin("me/up", A40, "L", 3, [None, "tool.py"]), _pin("me/up", A40, "M")],
+                               "/remote/me/up", 30, git_runner=on)
+    assert rows[0]["state"] == "drift" and rows[0]["parent_count"] == 2 and rows[0]["kind"] == "merge"
+    assert rows[0]["changed"] == ["tool.py"] and rows[0]["since"] == 1
+    assert sum(1 for call in on.calls if "--first-parent" in call) == 1
+    assert on.calls[0][:6] == ["-c", "credential.helper=", "-c", "core.askPass=", "-c", "http.extraHeader="]
+    missing = AuditGit(cat_e=(1, b""), fetch_sha=(1, b""))
+    row = g._audit_repository("me/up", [_pin("me/up", C40, "z")], "/remote/me/up", 30, git_runner=missing)[0]
+    assert row["state"] == "unmerged" and row["detail"] == "commit not found on the remote"
+    assert row["parent_count"] is None and row["kind"] == "unknown"
+    unreachable = AuditGit(merge=(1, b""), cat_p=(0, b"tree t\nparent only\n\n"))
+    row = g._audit_repository("me/up", [_pin("me/up", A40, "z")], "/remote/me/up", 30, git_runner=unreachable)[0]
+    assert row["state"] == "unmerged" and row["detail"] == "not reachable from main" and row["parent_count"] == 1
+    rejected = AuditGit(first=f"{B40}\n{A40}\n".encode(), cat_p=(0, b"tree t\nparent only\n\n"))
+    row = g._audit_repository("me/up", [_pin("me/up", A40, "z")], "/remote/me/up", 30, require_merge=True, git_runner=rejected)[0]
+    assert row["state"] == "not_merge" and row["changed"] == [] and "parent_count=1" in row["detail"]
+    unknown = AuditGit(first=f"{A40}\n".encode(), cat_p=(1, b""), count=b"")
+    row = g._audit_repository("me/up", [_pin("me/up", A40, "z")], "/remote/me/up", 30, require_merge=True, git_runner=unknown)[0]
+    assert row["state"] == "ok" and row["parent_count"] is None and row["kind"] == "unknown" and row["since"] == 0
+    final = AuditGit(first=f"{B40}\n{A40}\n".encode(), ancestry=f"{B40}\n".encode())
+    row = g._audit_repository("me/up", [_pin("me/up", C40, "z")], "/remote/me/up", 30, git_runner=final)[0]
+    assert row["state"] == "not_final" and row["final"] == B40
+    tip = AuditGit(first=f"{B40}\n{A40}\n".encode(), ancestry=b"")
+    row = g._audit_repository("me/up", [_pin("me/up", C40, "z")], "/remote/me/up", 30, git_runner=tip)[0]
+    assert row["state"] == "not_final" and row["final"] == B40
+    empty_line = AuditGit(first=b"", ls=b"abc\tHEAD\n")
+    row = g._audit_repository("me/up", [_pin("me/up", C40, "z")], "/remote/me/up", 30, git_runner=empty_line)[0]
+    assert row["branch"] == "main" and row["state"] == "not_final" and row["final"] is None
+    with pytest.raises(g.Error) as raised:
+        g._audit_repository("me/up", [_pin("me/up", A40, "z", paths=["f"])], "/remote/me/up", 30,
+                            git_runner=AuditGit(first=f"{A40}\n".encode(), fail="diff"))
+    assert raised.value.code == "git_failed"
+
+
+def _history(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    git(work, "init", "-q", "-b", "main")
+    (work / "tool.py").write_text("v1\n")
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "root")
+    root = git(work, "rev-parse", "HEAD")
+    git(work, "switch", "-q", "-c", "pr")
+    (work / "pr.txt").write_text("pr\n")
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "pr")
+    pr = git(work, "rev-parse", "HEAD")
+    git(work, "switch", "-q", "main")
+    git(work, "merge", "-q", "--no-ff", "-m", "Merge pull request #7", "pr")
+    merge = git(work, "rev-parse", "HEAD")
+    git(work, "switch", "-q", "-c", "fix")
+    (work / "tool.py").write_text("v2\n")
+    git(work, "commit", "-qam", "fix")
+    git(work, "switch", "-q", "main")
+    git(work, "merge", "-q", "--squash", "fix")
+    git(work, "commit", "-qm", "squash fix")
+    squash = git(work, "rev-parse", "HEAD")
+    tree = git(work, "rev-parse", "HEAD^{tree}")
+    octopus = git(work, "commit-tree", tree, "-p", squash, "-p", pr, "-p", root, "-m", "octopus")
+    git(work, "reset", "-q", "--hard", octopus)
+    git(work, "switch", "-q", "-c", "side")
+    (work / "side.txt").write_text("s\n")
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "side")
+    side = git(work, "rev-parse", "HEAD")
+    git(work, "switch", "-q", "main")
+    bare = tmp_path / "remotes" / "acme" / "widgets"
+    bare.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "--bare", "-q", str(work), str(bare))
+    return {"work": work, "bare": bare, "base": str(tmp_path / "remotes") + "/",
+            "root": root, "pr": pr, "merge": merge, "squash": squash, "octopus": octopus, "side": side}
+
+
+@pytest.fixture(scope="module")
+def bare_world(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("bare-pins")
+    made = _history(tmp_path)
+    child = tmp_path / "child"
+    (child / ".github" / "workflows").mkdir(parents=True)
+    (child / "docs" / "nested").mkdir(parents=True)
+    (child / ".git").mkdir()
+    action = "e" * 40
+    bare_sha = "c" * 40
+    upper = "D" * 40
+    (child / ".github" / "workflows" / "ci.yml").write_text(
+        f"# loose {bare_sha}\njobs:\n  a:\n    uses: actions/checkout@{action}\n")
+    (child / ".github" / "workflows" / "extra.yaml").write_text("name: extra\n")
+    (child / ".git" / "vendor.lock.json").write_text(json.dumps({"repository": "acme/widgets", "commit": made["merge"]}))
+    readme = "\n".join([
+        f"Pin acme/widgets@{made['octopus']}",
+        f"same line acme/widgets commit {made['squash']}",
+        f"acme/widgets {upper}",
+        f"https://github.com/acme/widgets/commit/{made['root']}",
+        "http://www.github.com/acme/widgets is the same repository",
+    ])
+    (child / "README.md").write_text(readme + "\n")
+    (child / "docs" / "guide.md").write_text(f"Repository: https://github.com/acme/widgets\n{made['side']}\n")
+    (child / "docs" / "a.md").write_text(f"acme/widgets@{made['merge']}\n")
+    (child / "docs" / "nested" / "extra.md").write_text(f"acme/widgets@{made['merge']}\n")
+    (child / "docs" / "noise.md").write_text("\n".join([
+        f"nothing but {bare_sha} here",
+        "",
+        bare_sha,
+        "",
+        "owner/.git@" + ("ab" * 20),
+        "",
+        "prefix/acme/widgets@" + ("cd" * 20),
+        "",
+        upper,
+        "",
+    ]))
+    (child / "docs" / "notes.txt").write_text(f"acme/widgets@{made['merge']}\n")
+    (child / "docs" / "linked.md").symlink_to(child / "docs" / "guide.md")
+    (child / "vendor.lock.json").write_text(json.dumps({"files": [
+        {"repository": "acme/widgets", "commit": made["root"], "source": "tool.py", "destination": "vendor/tool.py"},
+        {"repository": "acme/widgets", "commit": made["merge"], "source": "pr.txt", "destination": "vendor/pr.txt"},
+        {"repository": "acme/widgets", "commit": made["squash"]},
+        {"repository": "acme/widgets", "commit": made["pr"]},
+        {"repository": "acme/widgets", "commit": made["side"]},
+        {"repository": "secret/hidden", "commit": "f" * 40, "source": "a.py"},
+    ]}))
+    made["child"] = child
+    made["action"] = action
+    made["bare_sha"] = bare_sha
+    return made
+
+
+def test_markdown_rule_and_workflow_actions_stay_put(bare_world):
+    child = bare_world["child"]
+    plain = g.collect_pins(child)
+    commits = {p["commit"] for p in plain}
+    assert bare_world["octopus"] not in commits and bare_world["action"] in commits
+    assert bare_world["bare_sha"] not in commits
+    assert all(not p["file"].startswith(".git/") for p in plain)
+    marked = g.collect_pins(child, include_markdown=True)
+    found = {(p["file"], p["commit"], p["repository"]) for p in marked}
+    assert ("README.md", bare_world["octopus"], "acme/widgets") in found
+    assert ("README.md", bare_world["squash"], "acme/widgets") in found
+    assert ("README.md", bare_world["root"], "acme/widgets") in found
+    assert ("docs/guide.md", bare_world["side"], "acme/widgets") in found
+    assert ("docs/nested/extra.md", bare_world["merge"], "acme/widgets") in found
+    assert bare_world["bare_sha"] not in {p["commit"] for p in marked}
+    assert "D" * 40 not in {p["commit"] for p in marked}
+    assert not any(p["repository"] == "owner/.git" or p["commit"] == "ab" * 20 for p in marked)
+    assert not any(p["commit"] == "cd" * 20 for p in marked)
+    assert not any(p["file"] == "docs/notes.txt" or p["file"] == "docs/linked.md" for p in marked)
+    action_pins = [p for p in marked if p["commit"] == bare_world["action"]]
+    assert len(action_pins) == 1 and action_pins[0]["file"].endswith("ci.yml")
+
+
+def test_bare_repo_merge_squash_and_repo_filter(bare_world):
+    base, child = bare_world["base"], bare_world["child"]
+    out = g.pin_audit(child, remote_base=base, include_markdown=True)
+    by = {r["commit"]: r for r in out["results"] if r["repository"] == "acme/widgets"}
+    assert by[bare_world["merge"]]["parent_count"] == 2 and by[bare_world["merge"]]["kind"] == "merge"
+    assert by[bare_world["merge"]]["state"] == "ok"
+    assert by[bare_world["octopus"]]["parent_count"] == 3 and by[bare_world["octopus"]]["kind"] == "merge"
+    assert by[bare_world["octopus"]]["state"] == "ok"
+    assert by[bare_world["squash"]]["parent_count"] == 1 and by[bare_world["squash"]]["kind"] == "single"
+    assert by[bare_world["squash"]]["state"] == "ok"
+    assert by[bare_world["root"]]["parent_count"] == 0 and by[bare_world["root"]]["kind"] == "root"
+    assert by[bare_world["root"]]["state"] == "drift" and by[bare_world["root"]]["changed"] == ["tool.py"]
+    assert by[bare_world["pr"]]["state"] == "not_final" and by[bare_world["pr"]]["final"] == bare_world["merge"]
+    assert by[bare_world["side"]]["state"] == "unmerged"
+    dumped = json.dumps(out)
+    assert out["redacted"] == 2
+    for hidden in ("hidden", "secret", "checkout", "actions"):
+        assert hidden not in dumped
+    text = g.render_pin_audit(out)
+    assert " +1 more" in text
+    assert "(redacted)" in text and "unknown/?" in text
+    filtered = g.pin_audit(child, remote_base=base, include_markdown=True, repos=["  acme/widgets  ", "  "])
+    assert filtered["redacted"] == 0 and all(r["repository"] == "acme/widgets" for r in filtered["results"])
+    assert "hidden" not in json.dumps(filtered)
+    owned = g.pin_audit(child, remote_base=base, only_owners=["acme"])
+    assert owned["redacted"] == 0 and {r["repository"] for r in owned["results"]} == {"acme/widgets"}
+    with pytest.raises(ValueError):
+        g.pin_audit(child, remote_base=base, repos=["not a repo"])
+    proc = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
+                           "--remote-base", base, "--include-markdown", "--repo", " acme/widgets ",
+                           "--repo", " ", "--json", "vendor.lock.json", "--text"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 1 and "hidden" not in proc.stdout and "acme/widgets@" in proc.stdout
+    bad = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
+                          "--repo", "nope"], capture_output=True, text=True)
+    assert bad.returncode == 2 and not bad.stdout
+    forced = g.pin_audit(child, remote_base=base, include_markdown=True, repos=["acme/widgets"], require_merge=True)
+    states = {r["commit"]: r["state"] for r in forced["results"]}
+    assert states[bare_world["merge"]] == "ok" and states[bare_world["octopus"]] == "ok"
+    assert states[bare_world["squash"]] == "not_merge" and states[bare_world["root"]] == "not_merge"
+    assert states[bare_world["pr"]] == "not_final" and states[bare_world["side"]] == "unmerged"
+    assert forced["ok"] is False
+    gate = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
+                           "--remote-base", base, "--include-markdown", "--repo", "acme/widgets",
+                           "--require-merge-commit"], capture_output=True, text=True)
+    assert gate.returncode == 1 and json.loads(gate.stdout)["counts"]["not_merge"] >= 1
+
+
+def test_invalid_json_reason_is_reported_in_process(tmp_path):
+    (tmp_path / "vendor.lock.json").write_text("{broken")
+    with pytest.raises(g.PinInputError, match="vendor.lock.json: invalid_json_or_encoding"):
+        g.collect_pins(tmp_path)
+    (tmp_path / "vendor.lock.json").write_bytes(b"\xff")
+    with pytest.raises(g.PinInputError, match="vendor.lock.json: invalid_json_or_encoding"):
+        g.collect_pins(tmp_path)
+
+
+def test_markdown_broken_readme_and_matcher_edges(tmp_path):
+    (tmp_path / "README.md").write_bytes(b"\xff")
+    assert g.collect_pins(tmp_path) == []
+    with pytest.raises(g.PinInputError, match="README.md: read_error"):
+        g.collect_pins(tmp_path, include_markdown=True)
+    sha = "ab" * 20
+    other = "cd" * 20
+    left, right = "aa/bb", "cc/dd"
+    tie = f"{left}   {sha}   {right}"
+    pins = g._markdown_pins("README.md", "\n".join([
+        f"zz/far {other}",
+        f"aa/near {sha} zz/later",
+        "owner/name@" + sha,
+        "",
+        sha,
+        "",
+        f"only/here {other}",
+    ]))
+    located = {(pin["line"], pin["repository"], pin["commit"]) for pin in pins}
+    assert (2, "aa/near", sha) in located
+    assert (3, "owner/name", sha) in located
+    assert not any(pin["repository"] == "zz/far" and pin["commit"] == sha for pin in pins)
+    assert not any(pin["repository"] == "zz/later" for pin in pins)
+    assert not any(pin["line"] == 5 for pin in pins)
+    assert (1, "zz/far", other) in located and (7, "only/here", other) in located
+    tied = g._markdown_pins("docs/t.md", tie + "\n")
+    assert [p["repository"] for p in tied] == ["aa/bb"]
+    assert g._markdown_pins("docs/t.md", "") == []
+    assert g._parent_count_text("") == 0
+    assert g._parent_count_text("tree a\nparenthood\n\nparent in message\n") == 0
+    assert g._parent_count_text("tree a\nparent b\nparent c\n\nparent d\n") == 2
+    assert g._commit_kind(None) == "unknown" and g._commit_kind(0) == "root"
+    assert g._commit_kind(1) == "single" and g._commit_kind(1, single="squash_or_single") == "squash_or_single"
+    assert g._commit_kind(2) == "merge" and g._commit_kind(3) == "merge"
+    assert g._pin_result_state(present=False, ancestor=True, on_line=True, parent_count=2, require_merge=True, changed=False) == "unmerged"
+    assert g._pin_result_state(present=True, ancestor=False, on_line=True, parent_count=2, require_merge=True, changed=False) == "unmerged"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=False, parent_count=2, require_merge=True, changed=False) == "not_final"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=1, require_merge=True, changed=True) == "not_merge"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=0, require_merge=True, changed=False) == "not_merge"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=2, require_merge=True, changed=True) == "drift"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=2, require_merge=True, changed=False) == "ok"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=False) == "ok"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=True) == "drift"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=1, require_merge=False, changed=False) == "ok"
+    assert g._pin_result_state(present=True, ancestor=True, on_line=True, parent_count=1, require_merge=False, changed=True) == "drift"
+    assert g._selected_repos(None) is None and g._selected_repos([]) is None
+    assert g._selected_repos(["  ", ""]) is None
+    assert g._selected_repos([" me/up "]) == {"me/up"}
+    assert g._blank_to_none(None) is None and g._blank_to_none("  ") is None and g._blank_to_none(" a ") == "a"
+    assert g._markdown_pin_file("README.md") and g._markdown_pin_file("docs/a/b.md")
+    assert not g._markdown_pin_file("docs/a.txt") and not g._markdown_pin_file("nested/README.md")
+    assert "--first-parent" not in __import__("inspect").getsource(g._audit_repository)
+
+
 # ──── vendor_tools ────────────────────────────────────────────────
 
 # vendor-lock-check / vendor-lock-verify-remote / vendor-plan / vendor-matrix: read-only.

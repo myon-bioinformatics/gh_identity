@@ -316,3 +316,51 @@ Repository health combines check runs with the combined legacy commit status on 
 - `pr_checks(..., steps=True)` and CLI `pr-checks --steps`: shares failed check-run step and annotation enrichment (`_enrich_failed_checks`) and rendering (`_render_failed_check_details`) with `fleet_checks`.
 - `search(query, kind="code"|"repo", ...)` and CLI `search --kind {pr,issue,code,repo}`: extends `gh-identity-search/1` to support GitHub code search (`search/code`) and repository search (`search/repositories`) alongside `pr` and `issue`, plus text rendering via `render_search` (`--text`).
 - `render_runs` (`runs --text`, `head-runs --text`, `workflow-runs --text`) and `render_jobs` (`jobs --text`), plus filter flags (`--branch`, `--head-sha`, `--event`, `--exclude-event`, `--limit`) on CLI `runs`.
+
+## Pin audit merge commits and commit classification
+
+`pin_audit` stays read-only and token-free. Default states are unchanged:
+`ok`, `drift`, `not_final`, `unmerged`, `unavailable`. Every result also carries
+`parent_count` (int or null) and `kind`: `merge` when `parent_count >= 2`,
+`single` when it is 1, `root` when it is 0, `unknown` otherwise.
+`--require-merge-commit` / `require_merge=True` is opt-in. A pin that is on the
+default-branch first-parent line and whose `parent_count` is an int `< 2`
+becomes `not_merge` instead of `ok` or `drift`. `not_merge` is not ok and makes
+the process exit 1. A null parent count does not become `not_merge`.
+Unreadable remotes stay `unavailable` with a null repository, commit, and parent
+count; private names are not printed.
+
+The first-parent list is `_exact_first_parent_lines`, the exact-git half of
+`first_parent_check`. API history remains `_first_parent_contains`. Pin audit
+does not keep a second `git rev-list --first-parent` walk. Parent count on that
+path is `git cat-file -p` (header lines `parent ` before the blank line).
+
+`--include-markdown` reads only `README.md` at the checkout root and
+`docs/**/*.md`. A pin is either a standalone `OWNER/REPO@` + 40 lowercase hex
+digits (not a longer path; trailing `.git` stripped) or another standalone
+40-lowercase-hex token whose nearest `OWNER/REPO` token or `github.com/OWNER/REPO`
+URL is on the same line or the immediately previous or next line. Same line
+beats a neighbor; ties break toward the earlier line, then the earlier column.
+A blank line breaks adjacency. Bare prose SHAs, uppercase hex, longer hex runs,
+and workflow files are not matches. Action `uses:` SHAs stay on the workflow
+scanner only.
+
+`--repo` is repeatable. Values are stripped; blank is unset. The audit keeps
+pins whose repository is in the remaining set. It combines with `--only`.
+
+`commit_classify` / `commit-classify` is read-only. It calls `first_parent_check`
+and `commit_pulls` and does not add a walker. `on_first_parent` is that check's
+`contains` (null when the API walk stops for `max_pages`). `parent_count` is
+`git cat-file -p` when `exact=True` and `GET repos/{r}/commits/{sha}` otherwise
+(null when the commit is missing or `parents` is not a list). `kind` uses
+`squash_or_single` for one parent. `pulls` are sorted by integer `number`,
+non-integers last, with `is_merge_commit` (`sha == merge_commit_sha`), `is_head`
+(`sha == head_sha`), and `base_ref`. Repository, sha, and branch are stripped;
+empty sha or repository is rejected; empty branch is unset. CLI JSON uses
+`sort_keys`. `--text` prints `render_commit_classify`. Exit 0 on success, 2 on
+bad input.
+
+日本語: 既定の pin-audit の状態は変えない。`--require-merge-commit` のときだけ、
+first-parent 上で親が 2 未満のピンを `not_merge` にする。markdown から拾う SHA は
+上の 2 形式だけ。`commit-classify` は既存の first-parent と commit-pulls を組み合わせ、
+新しい履歴 walker は持たない。
