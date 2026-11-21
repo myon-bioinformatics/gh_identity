@@ -27,7 +27,8 @@ def _oracle(ns):
     assert state(present=True, ancestor=True, on_line=True, parent_count=0, require_merge=True, changed=False) == "not_merge"
     assert state(present=True, ancestor=True, on_line=True, parent_count=2, require_merge=True, changed=True) == "drift"
     assert state(present=True, ancestor=True, on_line=True, parent_count=2, require_merge=False, changed=False) == "ok"
-    assert state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=False) == "ok"
+    assert state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=True, changed=False) == "unknown_parents"
+    assert state(present=True, ancestor=True, on_line=True, parent_count=None, require_merge=False, changed=False) == "ok"
     assert state(present=True, ancestor=True, on_line=True, parent_count=1, require_merge=False, changed=True) == "drift"
     assert parents("") == 0
     assert parents("tree a\nparenthood\n\nparent in message\n") == 0
@@ -36,17 +37,18 @@ def _oracle(ns):
     upper = "AB" * 20
     explicit = pins("README.md", f"acme/widgets@{sha}\n")
     assert [(p["repository"], p["commit"]) for p in explicit] == [("acme/widgets", sha)]
-    same = pins("README.md", f"zz/far\naa/near {sha} zz/later\n")
+    same = pins("README.md", f"Repo: zz/far\nRepo: aa/near {sha} Repo: zz/later\n")
     assert [(p["repository"], p["commit"]) for p in same] == [("aa/near", sha)]
-    adjacent = pins("docs/a.md", f"only/here\n{sha}\n")
+    adjacent = pins("docs/a.md", f"Repo: only/here\n{sha}\n")
     assert [(p["repository"], p["commit"]) for p in adjacent] == [("only/here", sha)]
-    far = pins("README.md", f"aa/near\n{sha}{' ' * 30}zz/far\n")
+    far = pins("README.md", f"Repo: aa/near\n{sha}{' ' * 30}Repo: zz/far\n")
     assert [(p["repository"], p["commit"]) for p in far] == [("zz/far", sha)]
     bare = pins("docs/a.md", f"prose {sha} with no repository\n")
     assert bare == []
-    assert pins("docs/a.md", f"acme/widgets {upper}\n") == []
+    assert pins("docs/a.md", f"Repo: acme/widgets {upper}\n") == []
+    assert pins("docs/a.md", f"Repo: acme/widgets {'0' * 40}\n") == []
     left, right = "aa/bb", "cc/dd"
-    tied = pins("docs/t.md", f"{left}   {sha}   {right}\n")
+    tied = pins("docs/t.md", f"Repo: {left}   {sha}   Repo: {right}\n")
     assert [p["repository"] for p in tied] == [left]
 
 
@@ -76,9 +78,9 @@ MUTANTS = [
     ("_commit_kind", 'return "unknown"', 'return "root"', ()),
     ("_commit_kind", 'return "root"', 'return "single"', ()),
     ("_commit_kind", "return single", 'return "merge"', ()),
-    ("_pin_result_state", "and parent_count < 2:", "and parent_count < 1:", ()),
-    ("_pin_result_state", "and parent_count < 2:", "and parent_count <= 2:", ()),
-    ("_pin_result_state", "parent_count is not None", "parent_count is None", ()),
+    ("_pin_result_state", "if parent_count < 2:", "if parent_count < 1:", ()),
+    ("_pin_result_state", "if parent_count < 2:", "if parent_count <= 2:", ()),
+    ("_pin_result_state", 'return "unknown_parents"', 'return "ok"', ()),
     ("_pin_result_state", "if not on_line:", "if on_line:", ()),
     ("_pin_result_state", "if not present or not ancestor:", "if not present and not ancestor:", ()),
     ("_pin_result_state", "if changed:", "if not changed:", ()),
@@ -94,7 +96,7 @@ MUTANTS = [
     ("_nearest_markdown_repo", "for delta in (-1, 0, 1):", "for delta in (-1, 1):", ("_markdown_pins",)),
     ("_nearest_markdown_repo", "(abs(delta), gap, other, start, name)", "(0, gap, other, start, name)", ("_markdown_pins",)),
     ("_nearest_markdown_repo", "(abs(delta), gap, other, start, name)", "(abs(delta), gap, other, -start, name)", ("_markdown_pins",)),
-    ("_markdown_pins", "if span in consumed:\n                continue", "if False and span in consumed:\n                continue", ()),
+    ("_markdown_pins", "if sha == zero:", "if sha != zero:", ()),
     ("_markdown_pins", "name = _nearest_markdown_repo(qualifiers, index, match.start(), match.end())\n            if name is None:\n                continue",
      "name = _nearest_markdown_repo(qualifiers, index, match.start(), match.end())\n            if name is None:\n                name = \"bare/repo\"", ()),
 ]

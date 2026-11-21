@@ -323,10 +323,10 @@ Repository health combines check runs with the combined legacy commit status on 
 `ok`, `drift`, `not_final`, `unmerged`, `unavailable`. Every result also carries
 `parent_count` (int or null) and `kind`: `merge` when `parent_count >= 2`,
 `single` when it is 1, `root` when it is 0, `unknown` otherwise.
-`--require-merge-commit` / `require_merge=True` is opt-in. A pin that is on the
-default-branch first-parent line and whose `parent_count` is an int `< 2`
-becomes `not_merge` instead of `ok` or `drift`. `not_merge` is not ok and makes
-the process exit 1. A null parent count does not become `not_merge`.
+`--require-merge-commit` / `require_merge=True` is opt-in. For a pin on the
+default-branch first-parent line, fewer than two parents yields `not_merge`
+and a null parent count yields `unknown_parents`. Either state sets `ok` to
+`false` and makes the process exit 1.
 Unreadable remotes stay `unavailable` with a null repository, commit, and parent
 count; private names are not printed.
 
@@ -336,14 +336,15 @@ does not keep a second `git rev-list --first-parent` walk. Parent count on that
 path is `git cat-file -p` (header lines `parent ` before the blank line).
 
 `--include-markdown` reads only `README.md` at the checkout root and
-`docs/**/*.md`. A pin is either a standalone `OWNER/REPO@` + 40 lowercase hex
-digits (not a longer path; trailing `.git` stripped) or another standalone
-40-lowercase-hex token whose nearest `OWNER/REPO` token or `github.com/OWNER/REPO`
-URL is on the same line or the immediately previous or next line. Same line
-beats a neighbor; ties break toward the earlier line, then the earlier column.
-A blank line breaks adjacency. Bare prose SHAs, uppercase hex, longer hex runs,
-and workflow files are not matches. Action `uses:` SHAs stay on the workflow
-scanner only.
+`docs/**/*.md`. Pin forms are `OWNER/REPO@SHA`, a GitHub commit URL, or a standalone
+SHA with a `Repo: OWNER/REPO` label, `Repository: OWNER/REPO` label, or GitHub
+repository root URL on the same or immediately adjacent line. Same-line qualifiers
+take precedence. Ties in distance prefer the earlier line, then the earlier
+column. Blank lines break adjacency. SHAs must be 40 lowercase hex digits with
+at least one nonzero digit. The parser ignores fenced code and treats GitHub
+issue and pull request URLs as ordinary links. Repository names cannot contain
+`.` or `..` as either segment. A trailing `.git` is stripped from Markdown and
+JSON names before validation. The workflow scanner handles `uses:` pins.
 
 `--repo` is repeatable. Values are stripped; blank is unset. The audit keeps
 pins whose repository is in the remaining set. It combines with `--only`.
@@ -360,7 +361,6 @@ empty sha or repository is rejected; empty branch is unset. CLI JSON uses
 `sort_keys`. `--text` prints `render_commit_classify`. Exit 0 on success, 2 on
 bad input.
 
-日本語: 既定の pin-audit の状態は変えない。`--require-merge-commit` のときだけ、
-first-parent 上で親が 2 未満のピンを `not_merge` にする。markdown から拾う SHA は
-上の 2 形式だけ。`commit-classify` は既存の first-parent と commit-pulls を組み合わせ、
-新しい履歴 walker は持たない。
+日本語: `--require-merge-commit` を指定すると、first-parent 上のピンは親数が
+2 未満なら `not_merge`、不明なら `unknown_parents` となり、終了コードは 1。
+`commit-classify` は既存の first-parent と commit-pulls を利用する。
