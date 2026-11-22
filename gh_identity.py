@@ -6801,8 +6801,8 @@ def repository_metadata(root=".", *, repository, source_sha=None, expected_sha=N
     return record
 
 
-def tool_versions(commands=(), *, include_python=False, timeout=5.0):
-    """Explicitly requested, allowlisted tool versions; missing tools are omitted."""
+def tool_versions(commands=(), *, include_python=False, timeout=5.0, stdout_only=False):
+    """Observe allowlisted versions. stdout_only excludes diagnostic streams."""
     if isinstance(commands, (str, bytes)):
         raise TypeError("commands must be a sequence of command names")
     unknown = [command for command in commands if command not in _RM_TOOL_ARGS]
@@ -6823,7 +6823,11 @@ def tool_versions(commands=(), *, include_python=False, timeout=5.0):
                                     encoding="utf-8", errors="replace", timeout=timeout, check=False)
         except (OSError, subprocess.SubprocessError):
             continue
-        text = (result.stdout.strip() or result.stderr.strip()) if result.returncode == 0 else ""
+        if result.returncode:
+            continue
+        text = result.stdout.strip()
+        if not text and not stdout_only:
+            text = result.stderr.strip()
         first = next((line.strip() for line in text.splitlines() if line.strip()), "")
         match = _RM_TOOL_PATTERNS[command].fullmatch(first)
         if match and len(match.group("v")) <= 32:
