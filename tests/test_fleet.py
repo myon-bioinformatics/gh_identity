@@ -2203,6 +2203,24 @@ def test_checkout_head_ignores_github_sha(repo, monkeypatch):
     assert g.checkout_head(repo)["sha"] == _git(repo, "rev-parse", "HEAD")
 
 
+def test_checkout_sha_handles_detached_empty_subject(repo, monkeypatch):
+    _git(repo, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q",
+         "--allow-empty", "--allow-empty-message", "-m", "")
+    expected = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "--detach")
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    assert g.checkout_sha(repo, timeout=5) == expected
+
+
+def test_checkout_sha_propagates_timeout(monkeypatch):
+    def slow_git(root, args, *, max_bytes, timeout):
+        assert timeout == 0.03
+        raise g.GitInspectionError("git timed out")
+    monkeypatch.setattr(g, "_git_run", slow_git)
+    with pytest.raises(g.GitInspectionError, match="timed out"):
+        g.checkout_sha(timeout=0.03)
+
+
 def test_detached_head_is_null_branch_in_v2_and_detached_in_v1(repo):
     _git(repo, "checkout", "-q", "--detach")
     assert g.checkout_head(repo)["branch"] is None and g.checkout_head(repo)["detached"] is True

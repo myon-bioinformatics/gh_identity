@@ -3350,16 +3350,22 @@ def _rm_time(value, name):
     return value
 
 
-def _rm_git(root, *args):
-    raw, truncated, _ = _git_run(root, ["-c", "i18n.logOutputEncoding=UTF-8", *args], max_bytes=64 * 1024)
+def _rm_git(root, *args, timeout=None):
+    raw, truncated, _ = _git_run(root, ["-c", "i18n.logOutputEncoding=UTF-8", *args],
+                                  max_bytes=64 * 1024, timeout=timeout)
     if truncated:
         raise GitInspectionError("git output exceeded the metadata bound")
     return _git_decode(raw).strip()
 
 
+def checkout_sha(root=".", *, timeout=None):
+    """Verified checkout commit ID, independent of branch name and commit message."""
+    return _rm_sha(_rm_git(root, "rev-parse", "--verify", "HEAD^{commit}", timeout=timeout), "HEAD")
+
+
 def checkout_head(root="."):
     """The commit actually checked out at root (never GITHUB_SHA or other env)."""
-    sha = _rm_sha(_rm_git(root, "rev-parse", "--verify", "HEAD^{commit}"), "HEAD")
+    sha = checkout_sha(root)
     fields = _rm_git(root, "show", "-s", "--format=%cI%x1f%s", "HEAD").split("\x1f", 1)
     if len(fields) != 2 or not fields[1]:
         raise GitInspectionError("HEAD has no committer date or subject")
