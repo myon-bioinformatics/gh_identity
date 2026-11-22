@@ -2275,6 +2275,18 @@ def test_v1_validator_rejects_contract_breaks(repo):
             g.validate_repository_metadata_v1(broken)
 
 
+def test_tool_versions_stdout_only_keeps_stderr_private(monkeypatch):
+    monkeypatch.setattr(g.shutil, "which", lambda name: name)
+    result = g.subprocess.CompletedProcess([], 0, "", "v25.4.1")
+    monkeypatch.setattr(g.subprocess, "run", lambda *a, **kw: result)
+    assert g.tool_versions(["node"]) == {"node": "25.4.1"}
+    assert g.tool_versions(["node"], stdout_only=True) == {}
+    result.stdout = "v26.1.0"
+    assert g.tool_versions(["node"], stdout_only=True) == {"node": "26.1.0"}
+    result.returncode = 1
+    assert g.tool_versions(["node"], stdout_only=True) == {}
+
+
 def test_tool_versions_is_explicit_and_allowlisted():
     assert g.tool_versions() == {}
     with pytest.raises(ValueError):
