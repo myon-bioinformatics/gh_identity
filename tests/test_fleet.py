@@ -46,7 +46,7 @@ PARENT_WORKFLOW_PIN = "9e3da7ae1846e9604ebc24bb5178f7de094a4e77"
 # Node sources and the shared checks stay on accepted upstream commits with exact bytes.
 ACCEPTED = {
     "vendor/py_launch.cjs": "384f5dd532076062f7833038764e9a62322c387c",
-    "vendor/fleet_check.py": "6c29503cf17eda856766ddfdf4d66a5b0965a8b1",
+    "vendor/fleet_check.py": "64db25eb0fd9025dbe3cbcbced8b88a39ecb9266",
 }
 
 
@@ -4526,3 +4526,11 @@ def test_stats_skips_unreadable_files(tmp_path: Path, monkeypatch) -> None:
 
 def test_positive_accepts_valid_values(tmp_path: Path, capsys) -> None:
     assert g.main(["repo-overview", str(tmp_path), "--max-lines", "3", "--no-files"]) == 0
+
+
+# 🧰 Scripts: 📝 each one describes itself and ⌨️ one that reads sys.argv declares its arguments (argparse /
+# cli_args). Read with ast, never run; the portfolio's script catalog reads the same facts.
+
+class ScriptsDescribeThemselves(unittest.TestCase):
+    def test_every_script_has_a_description_and_declared_arguments(self):
+        fleet.check_scripts(fleet.repo_root(__file__))
