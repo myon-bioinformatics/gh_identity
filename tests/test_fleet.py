@@ -46,7 +46,7 @@ PARENT_WORKFLOW_PIN = "fbf433b296ec047f1c9acdf4d5d12c81ff7f59e8"
 # Node sources and the shared checks stay on accepted upstream commits with exact bytes.
 ACCEPTED = {
     "vendor/py_launch.cjs": "384f5dd532076062f7833038764e9a62322c387c",
-    "vendor/fleet_check.py": "64db25eb0fd9025dbe3cbcbced8b88a39ecb9266",
+    "vendor/fleet_check.py": "bc57f08a590ee1cb33a8bb37c1bb3b8f28a2f3c9",
 }
 
 
@@ -4534,3 +4534,9 @@ def test_positive_accepts_valid_values(tmp_path: Path, capsys) -> None:
 class ScriptsDescribeThemselves(unittest.TestCase):
     def test_every_script_has_a_description_and_declared_arguments(self):
         fleet.check_scripts(fleet.repo_root(__file__))
+
+    def test_root_scripts_import_only_the_standard_library(self):
+        root = fleet.repo_root(__file__)
+        for path in sorted(root.glob("*.py")):
+            if path.name != "conftest.py":
+                fleet.check_imports(root, path.name)
