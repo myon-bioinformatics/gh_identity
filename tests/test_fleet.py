@@ -40,7 +40,7 @@ import gh_identity as g
 # Fleet contracts through the parent's shared checks (vendor/fleet_check.py): locks, pins, CI setup, benchmark, Node entry.
 
 
-PARENT_WORKFLOW_PIN = "a816ff489a7d4fdf59ee6890c84b0aca4bc9015c"
+PARENT_WORKFLOW_PIN = "98a0e611cc879fde2d047da806de5a2121a65524"
 
 
 # Node sources and the shared checks stay on accepted upstream commits with exact bytes.
