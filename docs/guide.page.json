@@ -148,6 +148,19 @@
           ]
         }
       ]
+    },
+    {
+      "type": "links",
+      "items": [
+        {
+          "label": "🏠 Portfolio",
+          "href": "https://myon-bioinformatics.github.io/"
+        },
+        {
+          "label": "🐙 GitHub",
+          "href": "https://github.com/myon-bioinformatics/gh_identity"
+        }
+      ]
     }
   ]
 }
