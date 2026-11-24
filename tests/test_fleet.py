@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from unittest.mock import patch
 from vendor import fleet_check as fleet
+from vendor.cli_args import run_cli
 import base64
 import contextlib
 import hashlib
@@ -1420,8 +1421,7 @@ def test_unreadable_repository_is_redacted(world):
 
 def test_only_owner_and_cli_exit(world):
     assert g.pin_audit(world["root"], only_owners=["nobody"], remote_base=world["base"])["pins"] == 0
-    p = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(world["root"]),
-                        "--remote-base", world["base"], "--text"], capture_output=True, text=True)
+    p = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(world['root']), '--remote-base', world['base'], '--text')
     assert p.returncode == 1 and "not_final me/up@" in p.stdout and p.stdout.strip().splitlines()[-1].startswith("pins=")
 
 
@@ -1431,8 +1431,7 @@ def test_remote_base_validation(world):
 
 
 def run_audit(root):
-    return subprocess.run([sys.executable, "-S", str(Path(g.__file__)), "pin-audit", "--root", str(root)],
-                          capture_output=True, text=True)
+    return run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(root), python_options=('-S',))
 
 
 @pytest.mark.parametrize("name", ["vendor.lock.json", "nested/publication.json"])
@@ -1505,9 +1504,7 @@ def test_require_merge_rejects_squash_and_root_only(world):
     assert by[world["pr_head"]]["state"] == "not_final" and by[world["pr_head"]]["final"] == world["merge"]
     assert by[world["side"]]["state"] == "unmerged"
     assert out["ok"] is False and out["counts"]["not_merge"] == 2
-    proc = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(world["root"]),
-                           "--remote-base", world["base"], "--require-merge-commit", "--text"],
-                          capture_output=True, text=True)
+    proc = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(world['root']), '--remote-base', world['base'], '--require-merge-commit', '--text')
     assert proc.returncode == 1 and "not_merge me/up@" in proc.stdout and "hidden" not in proc.stdout
 
 
@@ -1759,13 +1756,9 @@ def test_bare_repo_merge_squash_and_repo_filter(bare_world):
     assert owned["redacted"] == 0 and {r["repository"] for r in owned["results"]} == {"acme/widgets"}
     with pytest.raises(ValueError):
         g.pin_audit(child, remote_base=base, repos=["not a repo"])
-    proc = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
-                           "--remote-base", base, "--include-markdown", "--repo", " acme/widgets ",
-                           "--repo", " ", "--json", "vendor.lock.json", "--text"],
-                          capture_output=True, text=True)
+    proc = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(child), '--remote-base', base, '--include-markdown', '--repo', ' acme/widgets ', '--repo', ' ', '--json', 'vendor.lock.json', '--text')
     assert proc.returncode == 1 and "hidden" not in proc.stdout and "acme/widgets@" in proc.stdout
-    bad = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
-                          "--repo", "nope"], capture_output=True, text=True)
+    bad = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(child), '--repo', 'nope')
     assert bad.returncode == 2 and not bad.stdout
     forced = g.pin_audit(child, remote_base=base, include_markdown=True, repos=["acme/widgets"], require_merge=True)
     states = {r["commit"]: r["state"] for r in forced["results"]}
@@ -1773,9 +1766,7 @@ def test_bare_repo_merge_squash_and_repo_filter(bare_world):
     assert states[bare_world["squash"]] == "not_merge" and states[bare_world["root"]] == "not_merge"
     assert states[bare_world["pr"]] == "not_final" and states[bare_world["side"]] == "unmerged"
     assert forced["ok"] is False
-    gate = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
-                           "--remote-base", base, "--include-markdown", "--repo", "acme/widgets",
-                           "--require-merge-commit"], capture_output=True, text=True)
+    gate = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(child), '--remote-base', base, '--include-markdown', '--repo', 'acme/widgets', '--require-merge-commit')
     assert gate.returncode == 1 and json.loads(gate.stdout)["counts"]["not_merge"] >= 1
 
 
@@ -1914,15 +1905,12 @@ def test_cli_unknown_parents_fails_require_merge(tmp_path):
     env = os.environ.copy()
     env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
     base = str(tmp_path / "remotes") + "/"
-    forced = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
-                             "--remote-base", base, "--require-merge-commit"],
-                            capture_output=True, text=True, env=env)
+    forced = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(child), '--remote-base', base, '--require-merge-commit', env=env)
     assert forced.returncode == 1, forced.stderr
     body = json.loads(forced.stdout)
     assert body["ok"] is False and body["results"][0]["state"] == "unknown_parents"
     assert body["results"][0]["parent_count"] is None and "secret" not in forced.stdout
-    plain = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(child),
-                            "--remote-base", base], capture_output=True, text=True, env=env)
+    plain = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(child), '--remote-base', base, env=env)
     assert plain.returncode == 0 and json.loads(plain.stdout)["results"][0]["state"] == "ok"
 
 
@@ -2160,8 +2148,7 @@ def test_matrix_rejects_bad_owner():
 
 
 def test_cli_check(project):
-    p = subprocess.run([sys.executable, str(Path(g.__file__)), "vendor-lock-check", "--root", str(project)],
-                       capture_output=True, text=True)
+    p = run_cli(str(Path(g.__file__)), 'vendor-lock-check', '--root', str(project))
     assert p.returncode == 0, p.stderr
     assert json.loads(p.stdout)["ok"] is True
 
@@ -2267,14 +2254,10 @@ def test_invalid_inputs_are_rejected(repo, kwargs, message):
 
 def test_expected_sha_mismatch_fails_closed_before_writing(repo, tmp_path):
     out = tmp_path / "out"
-    result = subprocess.run([sys.executable, "-S", g.__file__, "repo-metadata", "--root", str(repo),
-                             "--repository", REPO, "--format", "v1", "--expected-sha", "f" * 40,
-                             "--output-dir", str(out)], capture_output=True, text=True)
+    result = run_cli(g.__file__, 'repo-metadata', '--root', str(repo), '--repository', REPO, '--format', 'v1', '--expected-sha', 'f' * 40, '--output-dir', str(out), python_options=('-S',))
     assert result.returncode == 2 and not out.exists()
     sha = _git(repo, "rev-parse", "HEAD")
-    ok = subprocess.run([sys.executable, "-S", g.__file__, "repo-metadata", "--root", str(repo),
-                         "--repository", REPO, "--format", "v1", "--expected-sha", sha.upper(),
-                         "--output-dir", str(out)], capture_output=True, text=True)
+    ok = run_cli(g.__file__, 'repo-metadata', '--root', str(repo), '--repository', REPO, '--format', 'v1', '--expected-sha', sha.upper(), '--output-dir', str(out), python_options=('-S',))
     assert ok.returncode == 0, ok.stderr
     assert json.loads((out / "repository-metadata.json").read_text(encoding="utf-8"))["head"]["sha"] == sha
 
@@ -3203,8 +3186,7 @@ def test_existing_subtree_cache_is_preserved(repo_subtree_split):
 
 @needs_subtree
 def test_cli_subtree_split(repo_subtree_split):
-    proc = subprocess.run([sys.executable, str(Path(g.__file__)), "subtree-split", "--root", str(repo_subtree_split), "--prefix", "sub"],
-                          capture_output=True, text=True)
+    proc = run_cli(str(Path(g.__file__)), 'subtree-split', '--root', str(repo_subtree_split), '--prefix', 'sub')
     assert proc.returncode == 0, proc.stderr
     assert len(json.loads(proc.stdout)["sha"]) == 40
 
@@ -3728,7 +3710,7 @@ def test_split_preflight_missing_prefix_and_validation(cross):
 @needs_subtree
 def test_cli_subtree_sync(mono_subtree_sync, tmp_path):
     other = _clone_split(mono_subtree_sync, tmp_path)
-    run = lambda *a: subprocess.run([sys.executable, str(Path(g.__file__)), *a], capture_output=True, text=True)
+    run = lambda *a: run_cli(str(Path(g.__file__)), *a)
     p = run("subtree-sync-status", "--root", str(mono_subtree_sync), "--prefix", "sub", "--other-root", str(other))
     assert p.returncode == 0, p.stderr
     assert json.loads(p.stdout)["state"] == "in_sync"
@@ -3949,9 +3931,7 @@ def test_pull_refuses_dirty_tree(tmp_path):
 
 @needs_subtree
 def test_cli_plan_prints_command(world_subtree_sync_run):
-    r = subprocess.run([sys.executable, "-S", str(Path(g.__file__)), "subtree-sync", "--root", str(world_subtree_sync_run["mono"]),
-                        "--prefix", "sub", "--remote", str(world_subtree_sync_run["child"]), "--branch", "sync/x",
-                        "--direction", "push"], capture_output=True, text=True)
+    r = run_cli(str(Path(g.__file__)), 'subtree-sync', '--root', str(world_subtree_sync_run['mono']), '--prefix', 'sub', '--remote', str(world_subtree_sync_run['child']), '--branch', 'sync/x', '--direction', 'push', python_options=('-S',))
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["state"] == "planned" and out["command"][:2] == ["git", "push"]
@@ -4166,7 +4146,7 @@ def test_cli_on_this_repository_runs_without_site_packages() -> None:
     assert done.stdout.startswith("=== about ===\n")
     assert "=== README.md (" in done.stdout
     assert "=== .github/workflows/ci.yml (" in done.stdout and "=== files (" in done.stdout
-    missing = subprocess.run([sys.executable, "-S", str(CLI), "repo-overview", str(ROOT / "nope")], capture_output=True, text=True)
+    missing = run_cli(str(CLI), 'repo-overview', str(ROOT / 'nope'), python_options=('-S',))
     assert missing.returncode == 2
 
 
