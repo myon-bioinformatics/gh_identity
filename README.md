@@ -82,11 +82,11 @@ Commit selectors must be full SHAs; resolve a branch/ref first using
 `resolve_ref`, then read that immutable identity. No clone is needed.
 
 ```python
-import gh_identity as ghi
-hits = ghi.search('repo:OWNER/REPO is:open', kind='pr')
+import gh_identity as GHI
+hits = GHI.search('repo:OWNER/REPO is:open', kind='pr')
 if hits['items']:
-    selected = ghi.content_from_hit(hits['items'][0])
-    body_only = ghi.select_content(selected, ['body'])  # offline, no extra GET
+    selected = GHI.content_from_hit(hits['items'][0])
+    body_only = GHI.select_content(selected, ['body'])  # offline, no extra GET
 ```
 
 Search/list results remain digest-first. `content_from_hit` re-reads the chosen
@@ -164,14 +164,14 @@ tree modes, non-recursive retrieval and upstream truncation.
 ## Actions step permalinks
 
 ```python
-import gh_identity as ghi
+import gh_identity as GHI
 
 # Pure URL construction from explicit IDs, without network calls:
-url = ghi.step_url("OWNER/REPO", 20, 91, 7, line=1)
+url = GHI.step_url("OWNER/REPO", 20, 91, 7, line=1)
 
 # Validate against a complete observation of the exact run attempt:
-observation = ghi.jobs("OWNER/REPO", 20, attempt=2)
-url = ghi.step_url_from_jobs(observation, 91, 7, line=1)
+observation = GHI.jobs("OWNER/REPO", 20, attempt=2)
+url = GHI.step_url_from_jobs(observation, 91, 7, line=1)
 ```
 
 ```bash
@@ -195,9 +195,9 @@ python gh_identity.py job-log OWNER/REPO RUN_ID JOB_ID --attempt 2 \
 
 ```python
 import os
-import gh_identity as ghi
+import gh_identity as GHI
 
-observation = ghi.job_log(
+observation = GHI.job_log(
     "OWNER/REPO", 20, 91,
     attempt=2,
     max_bytes=500_000,
@@ -360,9 +360,9 @@ response bytes and elapsed time also cover individual requests. `timeout=` sets
 the outer operation deadline, rather than restarting it on each page.
 
 ```python
-with ghi.operation(max_pages=20, max_items=2000, max_bytes=2000000, timeout=15):
-    checks = ghi.checks_for_sha("OWNER/REPO", sha)
-    comments = ghi.comments("OWNER/REPO", 9, last=5)
+with GHI.operation(max_pages=20, max_items=2000, max_bytes=2000000, timeout=15):
+    checks = GHI.checks_for_sha("OWNER/REPO", sha)
+    comments = GHI.comments("OWNER/REPO", 9, last=5)
 ```
 
 Explicit scopes share limits across multiple calls and cannot be nested. CLI
@@ -389,7 +389,7 @@ uncertain and must not be blindly retried.
 `pages(..., requester=...)` and `checks_for_sha(..., requester=...)` accept a
 callable with signature `requester(method, path, *, transport, timeout)` for
 existing clients and offline fixtures. Return parsed JSON to use numbered
-pagination, or `ghi.Page(data, headers)` to preserve Link pagination. Explicit
+pagination, or `GHI.Page(data, headers)` to preserve Link pagination. Explicit
 headers without a next link end the collection, even on a full page. Next links
 must advance one page on the same GitHub API endpoint with unchanged filters.
 This retains injectable client transports without duplicating check classification.
@@ -400,9 +400,9 @@ An adapter can wrap an existing client's response as follows:
 def requester(method, path, *, transport, timeout):
     # Configure your client's transport to enforce this remaining timeout.
     response = client.request(method, "/" + path)
-    return ghi.Page(response.data, response.headers)
+    return GHI.Page(response.data, response.headers)
 
-checks = ghi.checks_for_sha("OWNER/REPO", sha, requester=requester)
+checks = GHI.checks_for_sha("OWNER/REPO", sha, requester=requester)
 ```
 
 Injected callables are trusted: they must bound their own I/O and allocations and
@@ -1449,11 +1449,11 @@ Reaching `max_repos` conservatively reports `truncated=true` and `sort_scope="pa
 ### PR review observations (Issue #20 slice)
 
 ```python
-observation = ghi.review_observations("OWNER/REPO", 7, max_items=100, max_pages=10)
+observation = GHI.review_observations("OWNER/REPO", 7, max_items=100, max_pages=10)
 # Separate APIs use the same limits and transport/timeout parameters:
-inline = ghi.inline_comments("OWNER/REPO", 7)
-threads = ghi.review_threads("OWNER/REPO", 7)
-changes = ghi.diff_pr_observations(previous_observation, observation)
+inline = GHI.inline_comments("OWNER/REPO", 7)
+threads = GHI.review_threads("OWNER/REPO", 7)
+changes = GHI.diff_pr_observations(previous_observation, observation)
 ```
 
 ```bash
