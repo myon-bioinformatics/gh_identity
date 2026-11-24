@@ -2494,6 +2494,49 @@ def artifacts(r, run_id, *, max_items=100, max_pages=10, transport="auto", timeo
             "count": len(rows), "complete": complete, "truncated": not complete, "observed_at": now()}
 
 
+def artifact_archive(r, run_id, artifact_id, *, max_bytes=10_000_000, transport="auto", timeout=30):
+    """Download one exact run artifact once using the existing bounded worker.
+
+    The returned bytes are for local processing, never for automatic logging.
+    No partial archive is returned. Callers must still enforce decompressed
+    byte/member limits and their own result and redaction contracts.
+    """
+    r = repo(r)
+    run_id = _positive_identifier(run_id, "run")
+    artifact_id = _positive_identifier(artifact_id, "artifact")
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError("max_bytes must be a positive integer")
+    meta = request("GET", f"repos/{r}/actions/artifacts/{artifact_id}", transport=transport, timeout=timeout)
+    if not isinstance(meta, dict) or type(meta.get("id")) is not int or meta["id"] != artifact_id:
+        raise Error("artifact_identity_mismatch")
+    owner = meta.get("workflow_run")
+    if not isinstance(owner, dict) or type(owner.get("id")) is not int or owner["id"] != run_id:
+        raise Error("artifact_identity_mismatch")
+    if type(meta.get("expired")) is not bool:
+        raise Error("invalid_artifact_metadata")
+    if meta["expired"]:
+        raise Error("artifact_expired")
+    got = _download_job_log(f"repos/{r}/actions/artifacts/{artifact_id}/zip", max_bytes=max_bytes,
+                            redact=(), transport=transport, timeout=timeout, binary=True)
+    if not got.get("complete"):
+        raise Error("artifact_bytes_limit")
+    try:
+        data = base64.b64decode(got["data_b64"], validate=True)
+        if len(data) > max_bytes:
+            raise Error("artifact_bytes_limit")
+        with zipfile.ZipFile(io.BytesIO(data)):
+            pass
+    except (KeyError, TypeError, ValueError, zipfile.BadZipFile, OSError):
+        raise Error("invalid_artifact_archive") from None
+    digest = hashlib.sha256(data).hexdigest()
+    expected = meta.get("digest")
+    if expected is not None and expected != "sha256:" + digest:
+        raise Error("artifact_digest_mismatch")
+    return {"repository": r, "run_id": run_id, "artifact_id": artifact_id,
+            "head_sha": owner.get("head_sha"), "name": meta.get("name"),
+            "sha256": digest, "size": len(data), "data": data}
+
+
 def artifact_file(r, artifact_id, member, *, output_format="metadata", max_bytes=10_000_000, transport="auto", timeout=30):
     """Read one member of an artifact zip under a byte cap, with its SHA-256.
 
@@ -7868,7 +7911,7 @@ def main(argv=None):
 # One outer deadline/budget is shared across nested calls and gh fallback.
 for _name in ("_gh","_url","request","pages","repository","repositories","repository_inventory","rate_limit","releases","compare_refs","pr","pr_files","comments","reviews","inline_comments","review_threads","review_observations",
               "issue","content","content_from_hit","issues","search","pull_requests","run_history","workflow_run_discovery","runs","variable","set_variable","post_comment",
-              "resolve_ref","tree","source_identity","remote_file","get","checks_for_sha","observe_pr","workflow","workflows","run","jobs","job_log","failed_job_logs","artifacts","artifact_file",
+              "resolve_ref","tree","source_identity","remote_file","get","checks_for_sha","observe_pr","workflow","workflows","run","jobs","job_log","failed_job_logs","artifacts","artifact_archive","artifact_file",
               "pages_bounded","item_status","vendor_lock_verify_remote","vendor_matrix","owner_repositories","verify_parent_ref",
                "enrollment_progress","repo_identity","merge_preview","merge_readiness","fleet_checks","fleet_pr","list_owner_repositories","pr_identity","commit_pulls","first_parent_check","commit_classify","repo_name_files"):
  globals()[_name]=_bounded(globals()[_name])

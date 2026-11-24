@@ -1091,3 +1091,40 @@ def test_head_runs_can_exclude_dynamic_review_runs_and_says_so(monkeypatch):
     assert g.run_history("o/r", head_sha=SHA)["state"] == "failed"   # default unchanged
     out = g.run_history("o/r", head_sha=SHA, exclude_events=("dynamic",))
     assert (out["state"], out["excluded_count"], out["filters"]["exclude_events"]) == ("green", 1, ["dynamic"])
+
+
+def test_shared_artifact_archive_downloads_once_and_checks_digest(monkeypatch):
+    data = _zip(**{"junit.xml": "<testsuite/>", "collection.json": "{}"})
+    digest = hashlib.sha256(data).hexdigest()
+    _patch(monkeypatch, data, _meta(digest="sha256:" + digest))
+    with patch.object(g, "_download_job_log", wraps=g._download_job_log) as download:
+        result = g.artifact_archive("o/r", 5, 9)
+    assert download.call_count == 1
+    assert result["data"] == data and result["sha256"] == digest
+    assert result["run_id"] == 5 and result["artifact_id"] == 9
+
+
+@pytest.mark.parametrize("meta,error", [
+    (_meta(expired=True), "artifact_expired"),
+    (_meta(id=10), "artifact_identity_mismatch"),
+    (_meta(workflow_run={"id": 6}), "artifact_identity_mismatch"),
+    (_meta(digest="sha256:" + "0" * 64), "artifact_digest_mismatch"),
+    (_meta(expired=None), "invalid_artifact_metadata"),
+])
+def test_shared_artifact_archive_rejects_invalid_metadata(monkeypatch, meta, error):
+    _patch(monkeypatch, _zip(**{"junit.xml": "<testsuite/>"}), meta)
+    with pytest.raises(g.Error) as exc:
+        g.artifact_archive("o/r", 5, 9)
+    assert exc.value.code == error
+
+
+def test_shared_artifact_archive_rejects_corrupt_zip_and_byte_limit(monkeypatch):
+    _patch(monkeypatch, b"not a zip")
+    with pytest.raises(g.Error, match="invalid_artifact_archive"):
+        g.artifact_archive("o/r", 5, 9)
+    _patch(monkeypatch, _zip(**{"r.xml": "<testsuite/>"}))
+    with pytest.raises(g.Error, match="artifact_bytes_limit"):
+        g.artifact_archive("o/r", 5, 9, max_bytes=1)
+    monkeypatch.setattr(g, "_download_job_log", lambda *a, **k: {"complete": False})
+    with pytest.raises(g.Error, match="artifact_bytes_limit"):
+        g.artifact_archive("o/r", 5, 9)
