@@ -27,13 +27,13 @@ The three concepts are used provisionally by purpose: **A** for the README hero,
 
 ## Read-only workflow concept
 
-![gh_identity concept: inspect GitHub and local checkout state, assess merge readiness, and return bounded JSON with unavailable fields kept as null](docs/images/concept-overview.png)
+![gh_identity concept: inspect GitHub and local checkout state, assess merge readiness, and return bounded JSON with unavailable fields kept as null](docs/images/repository-concept.png)
 
 The supplied diagram focuses on the read-only inspection workflow. Its `gh`-wrapper description is not the full current scope: GHI also has a stdlib `urllib` fallback for supported REST operations and explicitly requested, guarded writes. A readiness report is an observation, not a merge action. See the architecture and command documentation for current behavior.
 
 ### Challenges, responsibilities and intended outcomes
 
-![gh_identity complementary concept: observe GitHub state, inspect merge readiness and guard writes to produce bounded JSON for CI or review](docs/images/concept-overview-v2.png)
+![gh_identity complementary concept: observe GitHub state, inspect merge readiness and guard writes to produce bounded JSON for CI or review](docs/images/repository-concept-v2.png)
 
 This additional supplied panel organizes the read-only workflow by challenges, responsibilities and intended outcomes. The `gh`-focused illustration complements rather than replaces the broader interface described above: the `urllib` fallback and explicit guarded-write commands remain available. Merge-readiness is still an observation, not a merge action.
 

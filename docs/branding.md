@@ -27,8 +27,8 @@ openings in the hash; the 32/64px PNGs retain the full-size master.
 ## Reuse
 
 - Use the SVG masters for README illustrations, diagrams and scaled output.
-- Use [repository-icon.png](../assets/branding/repository-icon.png) for a 512 × 512 raster icon.
-- Use [favicon.ico](../assets/branding/favicon.ico) for an ICO containing the exact 16, 32 and 64px C PNGs, without additional resampling.
+- ♻️ The 512 × 512 raster icon and the favicon live in [CaChereCyCle](https://github.com/myon-bioinformatics/CaChereCyCle) as `gh_identity.icon` and `gh_identity.favicon` (the C PNG at 64px); the usage guide publishes them as [icon.png](https://myon-bioinformatics.github.io/gh_identity/icon.png) and [favicon.png](https://myon-bioinformatics.github.io/gh_identity/favicon.png) (`guide_brand` in `.github/workflows/pages.yml`).
+- An ICO with the exact 16, 32 and 64px C PNGs can be rebuilt from the exported PNGs (below); `python cacherecycle.py sync favicon.ico=gh_identity.favicon@16,32,64` makes one from the 64px PNG instead.
 - Use [concept-c.svg](../assets/branding/concept-c.svg) for a scalable SVG icon, or [concept-c-16.svg](../assets/branding/concept-c-16.svg) for a pixel-aligned 16px favicon.
 - Keep the `#0d1117` rounded square and white marks. SVG lettering is outlined,
   with accessible titles and descriptions, so it needs no installed font.
@@ -36,7 +36,7 @@ openings in the hash; the 32/64px PNGs retain the full-size master.
 GitHub has no independent repository avatar setting. The C artwork is therefore
 used in the README heading and supplied for downstream favicon/icon use; adding
 these files does not configure a browser favicon on github.com or a GitHub Pages
-site. There is no Pages site in this change.
+site by themselves; the usage guide's Pages site gets them from CaChereCyCle.
 
 The comparison board was generated with the built-in image-generation tool from
 the supplied three-concept reference. The production SVGs are editable vector
