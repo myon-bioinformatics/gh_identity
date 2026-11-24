@@ -9,7 +9,6 @@ from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 import json
 import os
-import subprocess
 import sys
 
 import pytest
@@ -17,6 +16,7 @@ import pytest
 from conftest import FIXTURES, ROOT, SHA
 
 import gh_identity as g
+from vendor.cli_args import run_cli
 
 
 # ──── issue_search ────────────────────────────────────────────────
@@ -280,9 +280,9 @@ def test_recorded_public_content_through_cli(case, tmp_path):
     env = dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ.get('PATH', ''),
                GHI_REPLAY_ENDPOINT=endpoint, GHI_REPLAY_FILE=str(tmp_path / 'response.json'))
     for body_only in (False, True):
-        command = [sys.executable, str(ROOT / 'gh_identity.py'), '--transport', 'gh', 'content',
-                   case['repository'], kind, str(case['identifier']), *(['--field', 'body'] if body_only else [])]
-        result = subprocess.run(command, env=env, capture_output=True, timeout=30)
+        result = run_cli(ROOT / 'gh_identity.py', '--transport', 'gh', 'content',
+                         case['repository'], kind, str(case['identifier']), *(['--field', 'body'] if body_only else []),
+                         env=env, timeout=30)
         assert result.returncode == 0, result.stderr
         output = json.loads(result.stdout)
         assert (output['body'], output.get('kind'), output.get('repository')) == (expected, kind, case['repository'])
@@ -333,10 +333,10 @@ def test_limits():
 def test_cli_saved_dom(tmp_path):
     path=tmp_path/'page.html';path.write_text(HTML,encoding='utf-8')
     cli=Path(g.__file__)
-    run=subprocess.run([sys.executable,str(cli),'html-content',str(path),'--selector','#description','--source-kind','dom'],capture_output=True,text=True)
+    run=run_cli(str(cli), 'html-content', str(path), '--selector', '#description', '--source-kind', 'dom')
     assert run.returncode==0,run.stderr
     assert json.loads(run.stdout)['body']==g.html_content(HTML,['#description'])['body']
-    bad=subprocess.run([sys.executable,str(cli),'html-content',str(path),'--selector','#absent'],capture_output=True,text=True)
+    bad=run_cli(str(cli), 'html-content', str(path), '--selector', '#absent')
     assert bad.returncode==2
 
 
@@ -428,8 +428,7 @@ CAPTURE=FIXTURES['browser_dom/file-code']
 def test_live_file_preview_dom_matches_browser_text(case,tmp_path):
     path=tmp_path/'captured.html'
     path.write_text(case['html'],encoding='utf-8')
-    result=subprocess.run([sys.executable,g.__file__,'html-content',str(path),
-                           '--selector','pre','--source-kind','dom'],capture_output=True,text=True)
+    result=run_cli(g.__file__, 'html-content', str(path), '--selector', 'pre', '--source-kind', 'dom')
     assert result.returncode==0,result.stderr
     observation=json.loads(result.stdout)
     assert observation['body']==case['visible']
@@ -500,7 +499,7 @@ CASES=FIXTURES['browser_dom/global-sites']['cases']
 @pytest.mark.parametrize('case',CASES,ids=[c['name'] for c in CASES])
 def test_global_dom_via_cli(case,tmp_path):
     path=tmp_path/'capture.html';path.write_text(case['html'],encoding='utf-8')
-    run=subprocess.run([sys.executable,g.__file__,'html-content',str(path),'--selector',case['selector'],'--source-kind','dom'],capture_output=True,text=True)
+    run=run_cli(g.__file__, 'html-content', str(path), '--selector', case['selector'], '--source-kind', 'dom')
     assert run.returncode==0,run.stderr
     body=json.loads(run.stdout)['body']
     if case['comparison']=='exact':
@@ -524,9 +523,9 @@ CASES_chat_surface_dom=FIXTURES['browser_dom/chat-surfaces']['cases']
 @pytest.mark.parametrize('case',CASES_chat_surface_dom,ids=[c['name'] for c in CASES_chat_surface_dom])
 def test_chat_surfaces_cli(case,tmp_path):
     path=tmp_path/'page.html';path.write_text(case['html'],encoding='utf-8')
-    args=[sys.executable,g.__file__,'html-content',str(path),'--selector',case['selector'],'--source-kind','dom']
+    args=['html-content',str(path),'--selector',case['selector'],'--source-kind','dom']
     if case.get('include_controls'):args.append('--include-controls')
-    run=subprocess.run(args,capture_output=True,text=True)
+    run=run_cli(g.__file__,*args)
     assert run.returncode==0,run.stderr
     assert json.loads(run.stdout)['body']==case['expected']
 
