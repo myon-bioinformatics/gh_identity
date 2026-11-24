@@ -23,8 +23,8 @@ permissions:
 
 jobs:
   pages:
-    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-pages-static.yml@1368174821fb03be258ecf3312ce0ea809f6ea22
+    uses: myon-bioinformatics/myon-bioinformatics/.github/workflows/reusable-pages-static.yml@a281f0f02f9db1f69057a3986d249bb63493ab36
     with:
       artifact_path: _site
       guide_page: docs/guide.page.json
-      guide_assets: assets/branding/repository-icon.png=icon.png assets/branding/concept-c-32.png=favicon.png
+      guide_brand: gh_identity   # ♻️ icon and favicon from CaChereCyCle (gh_identity.icon / gh_identity.favicon)
