@@ -46,6 +46,8 @@ jobs:
         id: parent
         env:
           PARENT_REF_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.parent_ref || '' }}
+          # 🔑 without a token the API allows 60 requests an hour per runner IP (shared): 403 now and then
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -55,6 +57,7 @@ jobs:
           override="${PARENT_REF_OVERRIDE:-}"
           python -S - "$parent" "$expected_id" <<'PY'
           import json
+          import os
           import re
           import sys
           import urllib.request
@@ -65,6 +68,8 @@ jobs:
               headers = {"User-Agent": "gh-identity-parent-resolve"}
               if accept:
                   headers["Accept"] = accept
+              if url.startswith("https://api.github.com/") and os.environ.get("GITHUB_TOKEN"):
+                  headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
               request = urllib.request.Request(url, headers=headers)
               with urllib.request.urlopen(request, timeout=60) as response:
                   return response.read()
