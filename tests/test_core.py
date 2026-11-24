@@ -30,6 +30,7 @@ except ImportError:  # `python -S` (no site-packages): only the unittest.TestCas
     pytest = _NoPytest()
 
 import gh_identity as g
+from vendor.cli_args import run_cli
 
 
 # ──── gh_identity ─────────────────────────────────────────────────
@@ -1434,8 +1435,7 @@ def test_dot_repo_is_kept_and_traversal_never_calls_git(tmp_path, monkeypatch):
     (tmp_path / "vendor.lock.json").write_text(json.dumps({"repository": "a/b/c", "commit": sha}))
     with pytest.raises(g.PinInputError, match="invalid_repository"):
         g.collect_pins(tmp_path)
-    cli = subprocess.run([sys.executable, str(Path(g.__file__)), "pin-audit", "--root", str(tmp_path)],
-                         capture_output=True, text=True)
+    cli = run_cli(str(Path(g.__file__)), 'pin-audit', '--root', str(tmp_path))
     assert cli.returncode == 2
     assert "invalid_repository" in cli.stderr
     assert "b/c" not in cli.stderr
@@ -1618,10 +1618,8 @@ def test_commit_classify_api_and_cli():
         g.commit_classify("me/r", "  nope  ")
     with pytest.raises(ValueError):
         g.commit_classify("   ", sha)
-    proc = subprocess.run([sys.executable, str(Path(g.__file__)), "commit-classify", "me/r", "nope"],
-                          capture_output=True, text=True)
-    exact = subprocess.run([sys.executable, str(Path(g.__file__)), "commit-classify", "me/r", "nope", "--exact",
-                            "--branch", "  "], capture_output=True, text=True)
+    proc = run_cli(str(Path(g.__file__)), 'commit-classify', 'me/r', 'nope')
+    exact = run_cli(str(Path(g.__file__)), 'commit-classify', 'me/r', 'nope', '--exact', '--branch', '  ')
     assert proc.returncode == 2 and exact.returncode == 2 and not proc.stdout and not exact.stdout
     with g.request_stub(fake):
         with contextlib.redirect_stdout(io.StringIO()) as text_out:

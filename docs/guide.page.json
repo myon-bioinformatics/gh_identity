@@ -16,109 +16,130 @@
       ]
     },
     {
-      "type": "section",
-      "title": "📥 取得",
-      "blocks": [
+      "type": "tabs",
+      "id": "guide",
+      "tabs": [
         {
-          "type": "text",
-          "text": "1 ファイルを置くだけで動きます（pip 不要）。"
-        },
-        {
-          "type": "output",
-          "text": "curl -fsSLO https://raw.githubusercontent.com/myon-bioinformatics/gh_identity/main/gh_identity.py"
-        }
-      ]
-    },
-    {
-      "type": "section",
-      "title": "▶️ 実行",
-      "blocks": [
-        {
-          "type": "card",
-          "title": "🧭 いまの位置",
-          "text": "引数なしで、ローカルと GitHub の現在地をまとめて出します。",
+          "label": "🧩 機能一覧",
           "blocks": [
             {
-              "type": "output",
-              "text": "$ python gh_identity.py\n{\"schema\": \"gh-identity-overview/1\", \"environment\": {…}, \"local\": {…}, …}"
+              "type": "section",
+              "title": "📥 取得",
+              "blocks": [
+                {
+                  "type": "text",
+                  "text": "1 ファイルを置くだけで動きます（pip 不要）。"
+                },
+                {
+                  "type": "output",
+                  "text": "curl -fsSLO https://raw.githubusercontent.com/myon-bioinformatics/gh_identity/main/gh_identity.py"
+                }
+              ]
+            },
+            {
+              "type": "section",
+              "title": "▶️ 実行",
+              "blocks": [
+                {
+                  "type": "card",
+                  "title": "🧭 いまの位置",
+                  "text": "引数なしで、ローカルと GitHub の現在地をまとめて出します。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python gh_identity.py\n{\"schema\": \"gh-identity-overview/1\", \"environment\": {…}, \"local\": {…}, …}"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "📍 ローカルだけ",
+                  "text": "cwd・Git のトップ・HEAD・変更数・リモート（通信なし）。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python gh_identity.py local-position\n{\"schema\": \"gh-identity-local-position/1\", \"cwd\": \"…\", \"git\": {…}}"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "🧰 使える道具",
+                  "text": "python / gh / git / トークンの有無を出します。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python gh_identity.py capabilities\n{\"schema\": \"gh-identity-capabilities/1\", \"python\": \"…\", \"gh\": true, \"git\": true, …}"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "✅ PR のチェック",
+                  "text": "OWNER/REPO#N の check-runs。終了コード 0=緑 / 1=失敗 / 3=保留。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python gh_identity.py pr-checks OWNER/REPO#N"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "🔀 まとめてマージできるか",
+                  "text": "複数の open PR が衝突しないかを、何も push せずに試します。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python gh_identity.py merge-preview OWNER/REPO --all-open"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "📌 ピンがマージコミットか",
+                  "text": "pin-audit は読み取り専用です。各結果に parent_count と kind（merge / single / root / unknown）が付きます。--require-merge-commit を付けると、main の first-parent 上で親が 2 未満のピンは not_merge、親の数が読めないピンは unknown_parents になり、どちらも終了コード 1 です。--include-markdown は README.md と docs/**/*.md だけを見ます。コードの中では OWNER/REPO@40桁だけを取り、地の文は同じ行の OWNER/REPO、または隣の行でもよい github.com のリポジトリ URL に結び付いた 40 桁（小文字、全ゼロ以外）だけです。隣の行のチェックサム、issues や pull の URL、and/or、docs/guide.md は取りません。リポジトリ名は .github のようにドットで始まってもよく、. と .. だけは拒否します。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python gh_identity.py pin-audit --require-merge-commit --include-markdown --repo OWNER/REPO"
+                    }
+                  ]
+                },
+                {
+                  "type": "card",
+                  "title": "🧭 コミットの分類",
+                  "text": "commit-classify は first-parent に乗っているか、親の数、紐づく PR をまとめて返します。履歴の歩き方は first-parent の API と --exact だけで、新しい walker はありません。--exact の親の数は git cat-file、それ以外は API です。",
+                  "blocks": [
+                    {
+                      "type": "output",
+                      "text": "$ python gh_identity.py commit-classify OWNER/REPO SHA --exact --text"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "section",
+              "title": "🐍 Python から呼ぶ",
+              "blocks": [
+                {
+                  "type": "output",
+                  "text": "python gh_identity.py --help   # サブコマンド一覧"
+                }
+              ]
             }
           ]
         },
         {
-          "type": "card",
-          "title": "📍 ローカルだけ",
-          "text": "cwd・Git のトップ・HEAD・変更数・リモート（通信なし）。",
+          "label": "🎞 GIF デモ",
           "blocks": [
             {
-              "type": "output",
-              "text": "$ python gh_identity.py local-position\n{\"schema\": \"gh-identity-local-position/1\", \"cwd\": \"…\", \"git\": {…}}"
+              "type": "text",
+              "text": "🎞 まだ GIF はありません。ブラウザテストや実行の様子を GIF にしたら、ここに並びます。",
+              "muted": true
             }
           ]
-        },
-        {
-          "type": "card",
-          "title": "🧰 使える道具",
-          "text": "python / gh / git / トークンの有無を出します。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python gh_identity.py capabilities\n{\"schema\": \"gh-identity-capabilities/1\", \"python\": \"…\", \"gh\": true, \"git\": true, …}"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "✅ PR のチェック",
-          "text": "OWNER/REPO#N の check-runs。終了コード 0=緑 / 1=失敗 / 3=保留。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python gh_identity.py pr-checks OWNER/REPO#N"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "🔀 まとめてマージできるか",
-          "text": "複数の open PR が衝突しないかを、何も push せずに試します。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python gh_identity.py merge-preview OWNER/REPO --all-open"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "📌 ピンがマージコミットか",
-          "text": "pin-audit は読み取り専用です。各結果に parent_count と kind（merge / single / root / unknown）が付きます。--require-merge-commit を付けると、main の first-parent 上で親が 2 未満のピンは not_merge、親の数が読めないピンは unknown_parents になり、どちらも終了コード 1 です。--include-markdown は README.md と docs/**/*.md だけを見ます。コードの中では OWNER/REPO@40桁だけを取り、地の文は同じ行の OWNER/REPO、または隣の行でもよい github.com のリポジトリ URL に結び付いた 40 桁（小文字、全ゼロ以外）だけです。隣の行のチェックサム、issues や pull の URL、and/or、docs/guide.md は取りません。リポジトリ名は .github のようにドットで始まってもよく、. と .. だけは拒否します。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python gh_identity.py pin-audit --require-merge-commit --include-markdown --repo OWNER/REPO"
-            }
-          ]
-        },
-        {
-          "type": "card",
-          "title": "🧭 コミットの分類",
-          "text": "commit-classify は first-parent に乗っているか、親の数、紐づく PR をまとめて返します。履歴の歩き方は first-parent の API と --exact だけで、新しい walker はありません。--exact の親の数は git cat-file、それ以外は API です。",
-          "blocks": [
-            {
-              "type": "output",
-              "text": "$ python gh_identity.py commit-classify OWNER/REPO SHA --exact --text"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "type": "section",
-      "title": "🐍 Python から呼ぶ",
-      "blocks": [
-        {
-          "type": "output",
-          "text": "python gh_identity.py --help   # サブコマンド一覧"
         }
       ]
     },
