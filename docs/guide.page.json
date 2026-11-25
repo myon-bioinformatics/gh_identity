@@ -132,6 +132,71 @@
           ]
         },
         {
+          "label": "🔬 検証ガイド",
+          "blocks": [
+            {
+              "type": "runbook",
+              "id": "verify",
+              "books": [
+                {
+                  "label": "🐍 python",
+                  "intro": "🤖 のついた手順は CI で実際に動かし、出た結果をそのまま載せています。",
+                  "runbook": {
+                    "key": "gh-identity/python",
+                    "steps": [
+                      {
+                        "id": "get",
+                        "title": "📥 ファイルを置く",
+                        "command": "curl -fsSLO https://raw.githubusercontent.com/myon-bioinformatics/gh_identity/main/gh_identity.py",
+                        "needs": "🌐 ネットワーク"
+                      },
+                      {
+                        "id": "local",
+                        "title": "📍 ローカルだけ",
+                        "command": "python gh_identity.py local-position",
+                        "run": true
+                      },
+                      {
+                        "id": "tools",
+                        "title": "🧰 使える道具",
+                        "command": "python gh_identity.py capabilities",
+                        "run": true
+                      },
+                      {
+                        "id": "checks",
+                        "title": "✅ PR のチェック",
+                        "command": "python gh_identity.py pr-checks OWNER/REPO#N",
+                        "needs": "🌐 ネットワーク"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "label": "⚡ uv",
+                  "intro": "uv があれば Python の版を気にせず動きます。",
+                  "runbook": {
+                    "key": "gh-identity/uv",
+                    "steps": [
+                      {
+                        "id": "get",
+                        "title": "📥 ファイルを置く",
+                        "command": "curl -fsSLO https://raw.githubusercontent.com/myon-bioinformatics/gh_identity/main/gh_identity.py",
+                        "needs": "🌐 ネットワーク"
+                      },
+                      {
+                        "id": "local",
+                        "title": "📍 ローカルだけ",
+                        "command": "uv run --no-project python gh_identity.py local-position",
+                        "run": true
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
           "label": "🎞 GIF デモ",
           "blocks": [
             {
