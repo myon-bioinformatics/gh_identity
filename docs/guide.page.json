@@ -1,7 +1,7 @@
 {
   "schema": "web-ui-page/1",
   "title": "gh_identity 利用ガイド",
-  "theme": "auto",
+  "theme": "modern",
   "description": "GitHub とローカル Git を読み取り専用で観測する単一ファイルのツール（gh があれば使い、なければ urllib）。",
   "icon": "./icon.png",
   "favicon": "./favicon.png",
