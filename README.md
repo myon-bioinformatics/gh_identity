@@ -1,4 +1,4 @@
-# <img src="assets/branding/concept-c.svg" width="40" height="40" alt="GHI search icon"> gh_identity (GHI)
+# <img src="https://myon-bioinformatics.github.io/gh_identity/icon.png" width="40" height="40" alt="GHI search icon"> gh_identity (GHI)
 
 ![GHI fingerprint and commit graph README hero](assets/branding/readme-hero.svg)
 
