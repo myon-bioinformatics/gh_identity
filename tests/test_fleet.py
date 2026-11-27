@@ -3813,9 +3813,9 @@ def test_missing_subtree_is_clear_error(world_subtree_sync_run, monkeypatch):
     with pytest.raises(g.Error) as e:
         g.subtree_sync(world_subtree_sync_run["mono"], "sub", str(world_subtree_sync_run["child"]), "feature", direction="push")
     assert e.value.code == "subtree_unavailable"
-    r = subprocess.run([sys.executable, "-S", str(Path(g.__file__)), "subtree-sync", "--root", str(world_subtree_sync_run["mono"]),
-                        "--prefix", "sub", "--remote", str(world_subtree_sync_run["child"]), "--branch", "feature",
-                        "--direction", "push"], capture_output=True, text=True, env={"PATH": "/nonexistent"})
+    r = run_cli(str(Path(g.__file__)), "subtree-sync", "--root", str(world_subtree_sync_run["mono"]),
+                "--prefix", "sub", "--remote", str(world_subtree_sync_run["child"]), "--branch", "feature",
+                "--direction", "push", python_options=("-S",), env={"PATH": "/nonexistent"})
     assert r.returncode == 2 and not r.stdout
 
 
@@ -4140,8 +4140,8 @@ def test_git_work_tree_uses_ls_files_and_respects_gitignore(tmp_path: Path) -> N
 
 
 def test_cli_on_this_repository_runs_without_site_packages() -> None:
-    done = subprocess.run([sys.executable, "-S", str(CLI), "repo-overview", str(ROOT), "--max-lines", "3", "--max-files", "5"],
-                          capture_output=True, text=True, encoding="utf-8")
+    done = run_cli(str(CLI), "repo-overview", str(ROOT), "--max-lines", "3", "--max-files", "5",
+                   python_options=("-S",), encoding="utf-8")
     assert done.returncode == 0, done.stderr
     assert done.stdout.startswith("=== about ===\n")
     assert "=== README.md (" in done.stdout
@@ -4324,8 +4324,8 @@ def test_churn_outside_git_prints_one_line_note(tmp_path: Path) -> None:
 def test_cli_stats_and_churn_flags(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=git_env())
     commit_file(tmp_path, "a.py", "x\n", "2026-01-01T00:00:00+0000")
-    done = subprocess.run([sys.executable, "-S", str(CLI), "repo-overview", str(tmp_path), "--no-files", "--stats",
-                          "--churn", "5"], capture_output=True, text=True, encoding="utf-8")
+    done = run_cli(str(CLI), "repo-overview", str(tmp_path), "--no-files", "--stats",
+                   "--churn", "5", python_options=("-S",), encoding="utf-8")
     assert done.returncode == 0, done.stderr
     assert "=== stats ===" in done.stdout
     assert "=== churn (1 commit scanned) ===" in done.stdout
