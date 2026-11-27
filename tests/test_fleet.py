@@ -2707,12 +2707,12 @@ def test_markdown_and_check_exit(tmp_path):
     (tmp_path / "vendor").mkdir()
     (tmp_path / "vendor" / "m.py").write_bytes(data)
     (tmp_path / "vendor.lock.json").write_text(json.dumps({"schema": "vendor-lock/1", "files": [entry_duplicate_files("vendor/m.py", data, source="m.py")]}))
-    cli = [sys.executable, str(Path(g.__file__)), "vendor-lock-check", "--root", str(tmp_path)]
-    p = subprocess.run(cli + ["--markdown", "--ci-check"], capture_output=True, text=True)
+    cli = (str(Path(g.__file__)), "vendor-lock-check", "--root", str(tmp_path))
+    p = run_cli(*cli, "--markdown", "--ci-check")
     assert p.returncode == 0 and p.stdout.startswith("### gh-identity-vendor-check/1: ok") and "| vendor/m.py | ok |" in p.stdout
     (tmp_path / "vendor" / "m.py").write_bytes(b"changed\n")
-    assert subprocess.run(cli + ["--ci-check"], capture_output=True).returncode == 1
-    assert subprocess.run(cli, capture_output=True).returncode == 0
+    assert run_cli(*cli, "--ci-check").returncode == 1
+    assert run_cli(*cli).returncode == 0
 
 
 def test_duplicates_markdown():
