@@ -60,7 +60,7 @@ PARENT_WORKFLOW_PIN = "27dedd9651efc816fa88d8922adb5f242725df69"
 # Node sources and the shared checks stay on accepted upstream commits with exact bytes.
 ACCEPTED = {
     "vendor/py_launch.cjs": "384f5dd532076062f7833038764e9a62322c387c",
-    "vendor/fleet_check.py": "20de01921e50e9339aa9271b0547a5be7649b3b3",
+    "vendor/fleet_check.py": "eee8c096fc753465a5d5a26264e64c12e555638f",
 }
 
 
@@ -4537,3 +4537,7 @@ class ScriptsDescribeThemselves(unittest.TestCase):
         for path in sorted(root.glob("*.py")):
             if path.name != "conftest.py":
                 fleet.check_imports(root, path.name)
+
+    def test_no_top_level_vendor_package_imports(self):
+        # 📦 vendored modules load by path under a repo-unique name (cli_args README: Loading a vendored copy)
+        self.assertEqual(fleet.check_no_vendor_package_imports(ROOT), [])
