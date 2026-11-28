@@ -3,6 +3,7 @@
 Sections (each was one file; `-k` selects inside them): gh_identity, capabilities_versions, cli_exception_merge, operation_limits, benchmark_validation, library_budget_and_git_runner, identity_api.
 """
 
+import importlib.util
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -30,7 +31,19 @@ except ImportError:  # `python -S` (no site-packages): only the unittest.TestCas
     pytest = _NoPytest()
 
 import gh_identity as g
-from vendor.cli_args import run_cli
+
+
+def load_vendored(name, relpath):
+    """Load a vendored file by path under a repo-unique name (cli_args README: Loading a vendored copy)."""
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[1] / relpath)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+run_cli = load_vendored("gh_identity_cli_args", "vendor/cli_args.py").run_cli
 
 
 # ──── gh_identity ─────────────────────────────────────────────────

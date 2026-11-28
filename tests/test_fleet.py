@@ -5,6 +5,7 @@ Sections (each was one file; `-k` selects inside them): fleet_check, fleet_statu
 
 from __future__ import annotations
 
+import importlib.util
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -12,8 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from unittest.mock import patch
-from vendor import fleet_check as fleet
-from vendor.cli_args import run_cli
 import base64
 import contextlib
 import hashlib
@@ -34,6 +33,20 @@ import pytest
 from conftest import FIXTURES, ROOT, SHA, _git, _git_tester
 
 import gh_identity as g
+
+
+def load_vendored(name, relpath):
+    """Load a vendored file by path under a repo-unique name (cli_args README: Loading a vendored copy)."""
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[1] / relpath)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+fleet = load_vendored("gh_identity_fleet_check", "vendor/fleet_check.py")
+run_cli = load_vendored("gh_identity_cli_args", "vendor/cli_args.py").run_cli
 
 
 # ──── fleet_check ─────────────────────────────────────────────────
