@@ -3,6 +3,7 @@
 Sections (each was one file; `-k` selects inside them): issue_search, content, content_snapshot_cli, html_content, html_page_patterns, browser_dom, simple_site_dom, global_site_dom, chat_surface_dom.
 """
 
+import importlib.util
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs
@@ -16,7 +17,19 @@ import pytest
 from conftest import FIXTURES, ROOT, SHA
 
 import gh_identity as g
-from vendor.cli_args import run_cli
+
+
+def load_vendored(name, relpath):
+    """Load a vendored file by path under a repo-unique name (cli_args README: Loading a vendored copy)."""
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[1] / relpath)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+run_cli = load_vendored("gh_identity_cli_args", "vendor/cli_args.py").run_cli
 
 
 # ──── issue_search ────────────────────────────────────────────────
