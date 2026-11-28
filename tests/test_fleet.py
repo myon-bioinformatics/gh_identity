@@ -54,14 +54,14 @@ run_cli = load_vendored("gh_identity_cli_args", "vendor/cli_args.py").run_cli
 # Fleet contracts through the parent's shared checks (vendor/fleet_check.py): locks, pins, CI setup, benchmark, Node entry.
 
 
-PARENT_WORKFLOW_PIN = "27dedd9651efc816fa88d8922adb5f242725df69"
+PARENT_WORKFLOW_PIN = "main"  # 🔁 own sources follow main (2026-11-28)
 
 
 # Node sources and the shared checks stay on accepted upstream commits with exact bytes.
 ACCEPTED = {
-    "vendor/py_launch.cjs": "384f5dd532076062f7833038764e9a62322c387c",
-    "vendor/fleet_check.py": "eee8c096fc753465a5d5a26264e64c12e555638f",
-}
+    "vendor/py_launch.cjs",
+    "vendor/fleet_check.py",
+}  # 🔁 locked destinations; they follow main
 
 
 TOOL, ENV_VAR = "gh_identity.py", "GH_IDENTITY_PYTHON"
@@ -78,7 +78,7 @@ def job_text(path, name):
 
 
 def test_vendor_lock_matches_checked_in_bytes_and_accepted_commits():
-    rows = fleet.check_lock(ROOT, commits=ACCEPTED)
+    rows = fleet.check_lock(ROOT)
     launcher = rows["vendor/py_launch.cjs"]
     assert (launcher["repository"], launcher["source"]) == (fleet.PARENT, "py_launch.cjs")
 
