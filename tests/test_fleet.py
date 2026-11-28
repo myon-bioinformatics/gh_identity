@@ -4537,3 +4537,7 @@ class ScriptsDescribeThemselves(unittest.TestCase):
         for path in sorted(root.glob("*.py")):
             if path.name != "conftest.py":
                 fleet.check_imports(root, path.name)
+
+    def test_no_top_level_vendor_package_imports(self):
+        # 📦 vendored modules load by path under a repo-unique name (cli_args README: Loading a vendored copy)
+        self.assertEqual(fleet.check_no_vendor_package_imports(ROOT), [])
